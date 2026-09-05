@@ -66,6 +66,9 @@ class Diagnostic:
     path
         File or folder the diagnostic points at, if any. Used by the
         GitHub renderer to attach the annotation to a file.
+    line
+        1-based line inside ``path`` when the problem is located inside a
+        file (a bad YAML key, an unknown reference), else ``None``.
     """
 
     severity: Severity
@@ -73,6 +76,14 @@ class Diagnostic:
     message: str
     scope_id: str | None = None
     path: Path | None = None
+    line: int | None = None
+
+    @property
+    def location(self) -> str | None:
+        """``path:line`` (or just ``path``) for messages, ``None`` if pathless."""
+        if self.path is None:
+            return None
+        return f"{self.path}:{self.line}" if self.line else str(self.path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +217,7 @@ class Report:
                     "message": diag.message,
                     "scope": diag.scope_id,
                     "path": self.display_path(diag.path) if diag.path else None,
+                    "line": diag.line,
                 }
                 for diag in self.diagnostics
             ],

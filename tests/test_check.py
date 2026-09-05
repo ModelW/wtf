@@ -236,4 +236,5 @@ def test_display_path_falls_back_to_absolute_outside_root(tmp_path: Path) -> Non
         "message": "m",
         "scope": None,
         "path": ".",
+        "line": None,
     }

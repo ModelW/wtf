@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from model_wtf.compliance.declarations.loader import load_declarations, load_folder
 from model_wtf.compliance.discovery import load_units, select_manifest
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.report import (
@@ -50,8 +51,20 @@ def run_check(root: Path, *, strict: bool) -> Report:
             exit_code=ExitCode.DECLARATION_ERROR,
         )
 
-    scopes = [_inspect(SHARED_SCOPE_ID, ScopeKind.SHARED, root / SHARED_FOLDER)]
+    shared_folder = root / SHARED_FOLDER
+    scopes = [_inspect(SHARED_SCOPE_ID, ScopeKind.SHARED, shared_folder)]
     scopes.extend(_inspect(unit.id, ScopeKind.UNIT, unit.folder) for unit in units)
+
+    # Declarations: the shared folder is validated once on its own, then
+    # every unit is validated and cross-checked against it. A unit whose
+    # folder *is* the shared folder (single-image repo) is not re-reported.
+    _, shared_diags = load_folder(shared_folder, SHARED_SCOPE_ID)
+    diagnostics.extend(shared_diags)
+    for unit in units:
+        _, unit_diags = load_declarations(unit.folder, shared_folder, unit.id)
+        if unit.folder.resolve() == shared_folder.resolve():
+            unit_diags = [d for d in unit_diags if d.code == "unknown-reference"]
+        diagnostics.extend(unit_diags)
 
     if all(scope.file_count == 0 for scope in scopes):
         diagnostics.append(

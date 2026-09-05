@@ -17,7 +17,7 @@ from model_wtf.compliance.report import ScopeStatus, Severity
 if TYPE_CHECKING:
     from rich.console import Console
 
-    from model_wtf.compliance.report import Report
+    from model_wtf.compliance.report import Diagnostic, Report
 
 _STATUS_STYLE = {
     ScopeStatus.OK: "green",
@@ -40,8 +40,9 @@ def render_text(report: Report, console: Console) -> None:
     for diag in report.diagnostics:
         style = _SEVERITY_STYLE[diag.severity]
         where = f" ({diag.scope_id})" if diag.scope_id else ""
+        at = f" [dim]{_display_location(report, diag)}[/dim]" if diag.line else ""
         console.print(
-            f"[{style}]{diag.severity.value}[/{style}]{where}: {diag.message}"
+            f"[{style}]{diag.severity.value}[/{style}]{where}: {diag.message}{at}"
         )
 
 
@@ -61,6 +62,8 @@ def render_github(report: Report, console: Console) -> None:
         props = [f"title={_escape(diag.code)}"]
         if diag.path:
             props.insert(0, f"file={_escape(report.display_path(diag.path))}")
+            if diag.line:
+                props.insert(1, f"line={diag.line}")
         console.print(
             f"::{diag.severity.value} {','.join(props)}::{_escape(diag.message)}",
             markup=False,
@@ -88,6 +91,13 @@ def _summary_table(report: Report) -> Table:
             f"[{_STATUS_STYLE[status]}]{status.value}[/]",
         )
     return table
+
+
+def _display_location(report: Report, diag: Diagnostic) -> str:
+    """``relative/path:line`` for a diagnostic that has a path."""
+    assert diag.path is not None  # noqa: S101 - guarded by callers
+    where = report.display_path(diag.path)
+    return f"{where}:{diag.line}" if diag.line else where
 
 
 def _escape(value: str) -> str:
