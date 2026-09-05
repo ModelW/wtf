@@ -14,6 +14,7 @@ dependencies = [
     "click",
     "httpx",
     "pyyaml",
+    "pydantic>=2.13.5",
 ]
 
 [project.scripts]
@@ -33,7 +34,7 @@ test = [
 default-groups = ["dev", "test"]
 
 [build-system]
-requires = ["uv_build>=0.9.5,<0.10.0"]
+requires = ["uv_build>=0.9.5,<0.12.0"]
 build-backend = "uv_build"
 
 [tool.mypy]
@@ -44,6 +45,11 @@ files = ["src"]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = ["-q", "-ra", "--tb=short"]
+filterwarnings = [
+    # rich-click still imports click 8 helpers slated for removal in click 9;
+    # nothing actionable on our side.
+    "ignore:.*deprecated and will be removed in Click 9.0:DeprecationWarning",
+]
 
 [tool.ruff]
 target-version = "py312"
