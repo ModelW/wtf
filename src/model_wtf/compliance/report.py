@@ -21,13 +21,17 @@ if TYPE_CHECKING:
 class Severity(StrEnum):
     """How bad a diagnostic is.
 
-    Only ``ERROR`` influences the exit code; ``WARNING`` is informational.
+    ``ERROR`` and ``FINDING`` influence the exit code; ``WARNING`` is
+    informational.
     ``--strict`` works by promoting specific warnings to errors at emission
     time, so renderers never need to know about strictness.
     """
 
     WARNING = "warning"
     ERROR = "error"
+    FINDING = "finding"
+    """An open finding (failed gate, agent ``not_ok``). Maps to exit 1, which
+    ``ERROR`` (exit 3) outranks."""
 
 
 class ScopeKind(StrEnum):

@@ -8,7 +8,7 @@ import rich_click as click
 from rich.console import Console
 
 from model_wtf.compliance.check import run_check
-from model_wtf.compliance.discovery import find_repo_root
+from model_wtf.compliance.discovery import find_repo_root, git_sha
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.render import render_github, render_json, render_text
 
@@ -38,11 +38,29 @@ def compliance() -> None:
     default=None,
     help="Repository root. Defaults to the enclosing Git checkout, else the cwd.",
 )
+@click.option(
+    "--framework",
+    type=click.Choice(["gdpr", "stride", "all"]),
+    default="all",
+    show_default=True,
+    help="Only evaluate rules tagged with this framework.",
+)
+@click.option(
+    "--no-write",
+    is_flag=True,
+    help="Report only; do not update elements/, ledgers or findings/.",
+)
 @click.pass_context
 def check(
-    ctx: click.Context, *, strict: bool, output_format: str, root: Path | None
+    ctx: click.Context,
+    *,
+    strict: bool,
+    output_format: str,
+    root: Path | None,
+    framework: str,
+    no_write: bool,
 ) -> None:
-    """Discover compliance units and verify something is declared.
+    """Validate declarations and evaluate the deterministic gates.
 
     Exit codes: 0 clean, 1 open findings, 2 stale attestation,
     3 declaration errors, 4 tool error.
@@ -50,7 +68,13 @@ def check(
     console = Console()
     try:
         resolved_root = root.resolve() if root else find_repo_root(Path.cwd())
-        report = run_check(resolved_root, strict=strict)
+        report = run_check(
+            resolved_root,
+            strict=strict,
+            framework=framework,
+            write=not no_write,
+            sha=git_sha(resolved_root),
+        )
         if output_format == "json":
             # Plain write: rich would wrap long lines and break the JSON.
             click.echo(render_json(report))

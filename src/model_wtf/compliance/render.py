@@ -24,7 +24,16 @@ _STATUS_STYLE = {
     ScopeStatus.EMPTY: "yellow",
     ScopeStatus.MISSING: "red",
 }
-_SEVERITY_STYLE = {Severity.WARNING: "yellow", Severity.ERROR: "red"}
+_SEVERITY_STYLE = {
+    Severity.WARNING: "yellow",
+    Severity.ERROR: "red",
+    Severity.FINDING: "magenta",
+}
+_GITHUB_LEVEL = {
+    Severity.WARNING: "warning",
+    Severity.ERROR: "error",
+    Severity.FINDING: "error",
+}
 
 
 def render_text(report: Report, console: Console) -> None:
@@ -41,8 +50,11 @@ def render_text(report: Report, console: Console) -> None:
         style = _SEVERITY_STYLE[diag.severity]
         where = f" ({diag.scope_id})" if diag.scope_id else ""
         at = f" [dim]{_display_location(report, diag)}[/dim]" if diag.line else ""
+        code = f" {diag.code}" if diag.severity is Severity.FINDING else ""
         console.print(
-            f"[{style}]{diag.severity.value}[/{style}]{where}: {diag.message}{at}"
+            f"[{style}]{diag.severity.value}[/{style}]{code}{where}: "
+            f"{diag.message}{at}",
+            soft_wrap=True,
         )
 
 
@@ -65,7 +77,8 @@ def render_github(report: Report, console: Console) -> None:
             if diag.line:
                 props.insert(1, f"line={diag.line}")
         console.print(
-            f"::{diag.severity.value} {','.join(props)}::{_escape(diag.message)}",
+            f"::{_GITHUB_LEVEL[diag.severity]} {','.join(props)}::"
+            f"{_escape(diag.message)}",
             markup=False,
             highlight=False,
         )

@@ -11,7 +11,6 @@ from declarations_fixtures import (
     ACTOR_CUSTOMERS,
     DATA_INVOICES,
     FINDING_0001,
-    RECIPIENT_STRIPE,
     SNOW_ONE_UNIT,
     valid_tree,
 )
@@ -213,24 +212,6 @@ def test_single_image_repo_shared_is_unit(make_repo: MakeRepo) -> None:
             "invalid-declaration",
             None,
             id="typo-key-forbidden",
-        ),
-        pytest.param(
-            "recipients/stripe.yaml",
-            RECIPIENT_STRIPE.replace(
-                "dpa_reference: contracts/stripe-dpa-2024.pdf\n", ""
-            ),
-            "invalid-declaration",
-            2,
-            id="processor-without-dpa",
-        ),
-        pytest.param(
-            "recipients/stripe.yaml",
-            RECIPIENT_STRIPE.replace(
-                "transfer_safeguards: EU-US Data Privacy Framework\n", ""
-            ),
-            "invalid-declaration",
-            2,
-            id="third-country-without-safeguards",
         ),
         pytest.param(
             "recipients/stripe.yaml",

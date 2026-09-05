@@ -12,5 +12,7 @@ description: >-
 mitigation: >-
   Classify the new fields in `data/<id>.yaml` (use `item: none` for
   non-personal data) and remove entries for dropped fields.
-condition: set(gen_keys(data_object, "fields")) == set(data_object.fields)
+condition: >-
+  not has_gen(data_object)
+  or set(gen_keys(data_object, "fields")) == set(data_object.fields)
 references: ["Art. 30(1)(c)", "Art. 5(1)(d)"]

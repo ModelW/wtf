@@ -7,10 +7,17 @@ compliance of a given Git repo.
 
 ```
 uv run model-wtf compliance check [--strict] [--format text|json|github] [--root PATH]
+                                  [--framework gdpr|stride|all] [--no-write]
 ```
 
-Discovers the repository's compliance _units_ and verifies that something is
-declared for each of them.
+Discovers the repository's compliance _units_, validates their declaration
+files, and runs the deterministic **gates** of the rule engine on every element
+(data object, activity, recipient). Gate verdicts are written to the checkpoint
+ledger `elements/<kind>.<id>.yaml` (with `evaluated.by: engine`), applicability
+to `elements/<kind>.<id>.gen.yaml`, and each failing gate gets a
+`findings/F-NNNN.yaml` that is deleted when the gate passes again. `verify`
+rules are seeded as `unknown` for the agent. `--no-write` reports without
+touching the tree.
 
 ### Unit discovery
 

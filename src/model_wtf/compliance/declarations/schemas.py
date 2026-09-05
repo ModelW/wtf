@@ -110,6 +110,11 @@ class Evaluated(Strict):
     sha: str = Field(title="Commit", description="Git SHA that was evaluated.")
     model: str = Field(title="Model", description="LLM or engine identifier.")
     at: datetime = Field(title="Timestamp", description="When it was evaluated.")
+    by: Literal["engine", "agent"] = Field(
+        default="agent",
+        title="Evaluator",
+        description="``engine`` for deterministic gates, ``agent`` for the LLM.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +217,13 @@ class RecipientKind(StrEnum):
 
 
 class Recipient(Strict):
-    """A party personal data is disclosed to."""
+    """A party personal data is disclosed to.
+
+    "``dpa_reference`` required for processors" and "``transfer_safeguards``
+    required with ``third_country``" are *gates* (``GDPR-PROCESSOR-DPA``,
+    ``GDPR-TRANSFER``), not schema errors: a missing DPA is an open finding
+    to fix or accept, not a malformed file.
+    """
 
     drafted_by: Literal["agent"] | None = Field(
         default=None,
@@ -253,17 +264,6 @@ class Recipient(Strict):
         description="Time limits for sinks that keep data (Sentry, logs).",
         json_schema_extra=ref("Art. 30(1)(f)"),
     )
-
-    @model_validator(mode="after")
-    def _conditional_requirements(self) -> Recipient:
-        """Enforce the two "required when" clauses of the data model."""
-        if self.kind is RecipientKind.PROCESSOR and not self.dpa_reference:
-            msg = "dpa_reference is required when kind is 'processor' (Art. 28)"
-            raise ValueError(msg)
-        if self.third_country and not self.transfer_safeguards:
-            msg = "transfer_safeguards is required when third_country is set"
-            raise ValueError(msg)
-        return self
 
 
 # ---------------------------------------------------------------------------

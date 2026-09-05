@@ -11,15 +11,13 @@ reported verbatim (with their YAML location) as declaration errors.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from model_wtf.compliance.report import DeclarationError, Diagnostic, Severity, Unit
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 SNOW_MANIFEST = "snow.yml"
 FALLBACK_MANIFEST = ".model-wtf.yml"
@@ -105,6 +103,25 @@ def find_repo_root(start: Path) -> Path:
         if (candidate / ".git").exists():
             return candidate
     return start
+
+
+def git_sha(root: Path) -> str:
+    """Short SHA of ``HEAD`` for provenance, or ``"unknown"`` outside Git.
+
+    Read from ``.git`` directly rather than shelling out: the check must
+    work in minimal CI images and in the test suite's fake repos.
+    """
+    git = root / ".git"
+    try:
+        if git.is_file():  # worktree: "gitdir: <path>"
+            git = Path(git.read_text(encoding="utf-8").split(":", 1)[1].strip())
+        head = (git / "HEAD").read_text(encoding="utf-8").strip()
+        if head.startswith("ref:"):
+            ref = git / head.split(" ", 1)[1].strip()
+            head = ref.read_text(encoding="utf-8").strip()
+        return head[:7] if head else "unknown"
+    except (OSError, IndexError):
+        return "unknown"
 
 
 def select_manifest(root: Path) -> Path:
