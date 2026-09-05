@@ -424,7 +424,13 @@ def _unknown_item(
 
 
 def _check_ledgers(ds: DeclarationSet, scope_id: str) -> Iterator[Diagnostic]:
-    """Ledger entries with a ``finding`` point at an existing finding file."""
+    """Ledger entries with a ``finding`` point at an existing finding file.
+
+    A missing finding file is *not* an error: deleting a finding is how a
+    human asks for re-evaluation, and ``stage`` turns that into
+    ``unknown``. It is surfaced as a warning so a stray deletion is still
+    visible.
+    """
     for ledger in ds.unit.get(Kind.LEDGER).values():
         model: Ledger | None = ledger.model
         if model is None:
@@ -432,7 +438,15 @@ def _check_ledgers(ds: DeclarationSet, scope_id: str) -> Iterator[Diagnostic]:
         for rule_id, checkpoint in model.checkpoints.items():
             target = checkpoint.finding
             if target and ds.resolve(Kind.FINDING, target) is None:
-                yield _dangling(ledger, f"{rule_id}.finding", target, scope_id)
+                diag = _dangling(ledger, f"{rule_id}.finding", target, scope_id)
+                yield Diagnostic(
+                    Severity.WARNING,
+                    "finding-deleted",
+                    f"{diag.message} (checkpoint will be re-staged)",
+                    scope_id,
+                    diag.path,
+                    diag.line,
+                )
 
 
 def _check_finding(

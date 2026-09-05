@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,8 @@ from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.explain import explain_target
 from model_wtf.compliance.init import InitError, run_init
 from model_wtf.compliance.render import render_github, render_json, render_text
+from model_wtf.compliance.report import DeclarationError
+from model_wtf.compliance.stage import Aggressiveness, StageOptions, run_stage
 from model_wtf.compliance.whitelist import check_write
 
 
@@ -215,3 +218,86 @@ def init(
         console.print(f"[green]created[/green]  {path.relative_to(resolved_root)}")
     console.print()
     console.print("next: fill controller.yaml, then run model-wtf compliance auto")
+
+
+@compliance.command()
+@click.option("--base", default=None, help="Git ref to diff against (the PR base).")
+@click.option("--element", "elements", multiple=True, help="Re-stage this element.")
+@click.option("--rule", "rules", multiple=True, help="Re-stage this rule everywhere.")
+@click.option("--all", "all_", is_flag=True, help="Re-stage every checkpoint.")
+@click.option(
+    "--stage-aggressiveness",
+    type=click.Choice([a.value for a in Aggressiveness]),
+    default=Aggressiveness.MEDIUM.value,
+    show_default=True,
+    help="How eagerly the agent re-stages checkpoints the diff may affect.",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    show_default=True,
+)
+@click.option(
+    "--root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Repository root. Defaults to the enclosing Git checkout, else the cwd.",
+)
+@click.pass_context
+def stage(
+    ctx: click.Context,
+    *,
+    base: str | None,
+    elements: tuple[str, ...],
+    rules: tuple[str, ...],
+    all_: bool,
+    stage_aggressiveness: str,
+    output_format: str,
+    root: Path | None,
+) -> None:
+    """Send checkpoints back to ``unknown`` so ``auto`` re-evaluates them.
+
+    Mechanical triggers always run (new checkpoints, rule version bumps,
+    deleted findings, unclassified extracted contents, explicit flags).
+    With ``--base``, code changes are handed to the staging agent when one
+    is configured. Exit 0 whether or not anything was staged; the JSON
+    ``empty`` flag tells CI whether ``auto`` can be skipped.
+    """
+    resolved_root = root.resolve() if root else find_repo_root(Path.cwd())
+    options = StageOptions(
+        base=base,
+        elements=frozenset(elements),
+        rules=frozenset(rules),
+        all=all_,
+        aggressiveness=Aggressiveness(stage_aggressiveness),
+    )
+    console = Console()
+    try:
+        report = run_stage(resolved_root, options)
+    except DeclarationError as exc:
+        console.print(f"[red]{exc.diagnostic.message}[/red]")
+        ctx.exit(int(ExitCode.DECLARATION_ERROR))
+    except Exception as exc:
+        Console(stderr=True).print(f"[red]Tool error:[/red] {exc}")
+        ctx.exit(int(ExitCode.TOOL_ERROR))
+
+    if output_format == "json":
+        click.echo(json.dumps(report.to_dict(), indent=2))
+        return
+    if report.empty:
+        console.print("Nothing to stage.")
+    for title, group in (
+        ("Re-staged (mechanical)", report.unknown),
+        ("Re-staged (agent)", report.ai),
+        ("To classify", report.classify),
+    ):
+        if group:
+            console.print(f"[bold]{title}[/bold]")
+            for key, reason in sorted(group.items()):
+                console.print(f"  {key}  [dim]{escape(reason)}[/dim]", soft_wrap=True)
+    for old, new in report.renumbered.items():
+        console.print(f"renumbered {old} -> {new}")
+    for note in report.notes:
+        console.print(f"[yellow]note[/yellow]: {escape(note)}")

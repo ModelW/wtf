@@ -234,13 +234,6 @@ def test_single_image_repo_shared_is_unit(make_repo: MakeRepo) -> None:
             1,
             id="gen-without-by",
         ),
-        pytest.param(
-            "elements/http.POST.back.api.invoices.yaml",
-            "MW-SEC-001: {status: not_ok, finding: F-0042}\n",
-            "unknown-reference",
-            1,
-            id="ledger-dangling-finding",
-        ),
     ],
 )
 def test_broken_fixture_exits_3_with_location(
@@ -275,6 +268,22 @@ def test_cli_prints_file_and_line(make_repo: MakeRepo, invoke: Invoke) -> None:
         "::error file=api/compliance/processing/billing.yaml,line=5,"
         "title=unknown-reference::" in result.output
     )
+
+
+def test_dangling_finding_reference_only_warns(make_repo: MakeRepo) -> None:
+    files = valid_tree()
+    files["api/compliance/elements/http.POST.back.api.invoices.yaml"] = (
+        "MW-SEC-001: {status: not_ok, finding: F-0042}\n"
+    )
+    del files["api/compliance/findings/F-0001.yaml"]
+    root = make_repo(snow=SNOW_ONE_UNIT, files=files)
+
+    report = run_check(root, strict=False)
+
+    warnings = [d for d in report.diagnostics if d.code == "finding-deleted"]
+    assert len(warnings) == 1
+    assert warnings[0].line == 1
+    assert report.exit_code is not ExitCode.DECLARATION_ERROR
 
 
 def test_unknown_top_level_yaml_warns(make_repo: MakeRepo) -> None:

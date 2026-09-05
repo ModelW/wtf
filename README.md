@@ -51,6 +51,20 @@ committed, never reused). The lifecycle is deterministic
 annotated at the finding's `provenance` under `--format github`.
 
 ```
+uv run model-wtf compliance stage [--base REF] [--element ID] [--rule ID] [--all] [--format text|json]
+```
+
+`stage` sends checkpoints back to `unknown` so `auto` re-evaluates them.
+Mechanical triggers (no AI): new checkpoints, rule version bumps, deleted
+findings, extracted `candidate_contents` nobody classified (→ `classify` list /
+`GDPR-CLASSIFICATION-STALE`), explicit flags, and `.seq` conflicts against
+`--base` (our findings are renumbered). With `--base`, code changes inside a
+unit are handed to the staging **agent** (configured by `auto`), which returns
+the checkpoints the diff plausibly invalidates (`staged_because: "ai: ..."`); a
+unit already >50 % re-staged is re-staged whole instead. A docs-only diff yields
+`empty: true` and no agent call.
+
+```
 uv run model-wtf compliance explain F-0042 | GDPR-PROCESSOR-DPA@recipient:stripe | recipient:stripe
 uv run model-wtf compliance whitelist <paths...>   # what the bot may commit (exit 1 otherwise)
 ```
