@@ -5,6 +5,19 @@ compliance of a given Git repo.
 
 ## Compliance
 
+### Getting started
+
+```
+uv run model-wtf compliance init [--unit ID]... [--codeowners-team @org/team] [--yes]
+```
+
+Creates a `compliance/` folder next to each image's Dockerfile (structure +
+`security.yaml`/`controller.yaml` stubs with `open` markers, default actors, a
+README), adds `compliance: compliance` to each `snow.yml` image (comments and
+ordering preserved), and appends `/<context>/compliance/ @<org>/dpo` to
+CODEOWNERS. Without `snow.yml`, units are detected from Dockerfiles into
+`.model-wtf.yml` after confirmation. Idempotent: never overwrites.
+
 ```
 uv run model-wtf compliance check [--strict] [--format text|json|github] [--root PATH]
                                   [--framework gdpr|stride|all] [--no-write]

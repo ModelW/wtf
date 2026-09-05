@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import rich_click as click
 from rich.console import Console
+from rich.markup import escape
 
 from model_wtf.compliance.check import run_check
 from model_wtf.compliance.discovery import find_repo_root, git_sha
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.explain import explain_target
+from model_wtf.compliance.init import InitError, run_init
 from model_wtf.compliance.render import render_github, render_json, render_text
 from model_wtf.compliance.whitelist import check_write
 
@@ -144,3 +147,71 @@ def whitelist(ctx: click.Context, *, paths: tuple[str, ...], root: Path | None) 
         )
         refused += not verdict.allowed
     ctx.exit(1 if refused else 0)
+
+
+@compliance.command()
+@click.option(
+    "--unit",
+    "units",
+    multiple=True,
+    help="Only initialise this image/unit id (repeatable).",
+)
+@click.option(
+    "--codeowners-team",
+    default=None,
+    help="Team owning compliance/ in CODEOWNERS. Default: @<org>/dpo from origin.",
+)
+@click.option("--yes", is_flag=True, help="Do not ask before writing .model-wtf.yml.")
+@click.option(
+    "--root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Repository root. Defaults to the enclosing Git checkout, else the cwd.",
+)
+@click.pass_context
+def init(
+    ctx: click.Context,
+    *,
+    units: tuple[str, ...],
+    codeowners_team: str | None,
+    yes: bool,
+    root: Path | None,
+) -> None:
+    """Create compliance/ next to each image's Dockerfile and wire the manifest.
+
+    Structure only: fill ``controller.yaml``, then run ``compliance auto``.
+    Safe to re-run; existing files are never overwritten.
+    """
+    resolved_root = root.resolve() if root else find_repo_root(Path.cwd())
+    console = Console()
+
+    def confirm(detected: list[Any]) -> bool:
+        console.print("No snow.yml; units detected from Dockerfiles:")
+        for plan in detected:
+            console.print(f"  - {plan.id}  (context: {plan.context})")
+        return bool(click.confirm("Write .model-wtf.yml with these units?"))
+
+    try:
+        report = run_init(
+            resolved_root,
+            units=units,
+            codeowners_team=codeowners_team,
+            confirm_units=None if yes else confirm,
+        )
+    except InitError as exc:
+        console.print(f"[red]{exc}[/red]")
+        ctx.exit(1)
+
+    for warning in report.warnings:
+        console.print(f"[yellow]warning[/yellow]: {warning}")
+    if not report.changed:
+        console.print("Nothing to do: already initialised.")
+        return
+    for edit_ in report.manifest_edits:
+        console.print(f"[green]manifest[/green]  {escape(edit_)}")
+    for line in report.codeowners_lines:
+        console.print(f"[green]codeowners[/green] {line}")
+    for path in report.files:
+        console.print(f"[green]created[/green]  {path.relative_to(resolved_root)}")
+    console.print()
+    console.print("next: fill controller.yaml, then run model-wtf compliance auto")
