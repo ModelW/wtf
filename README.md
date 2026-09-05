@@ -148,6 +148,21 @@ with its `file:line`.
 | 3    | Declaration errors (missing/invalid manifest, `--strict` hits) |
 | 4    | Tool error                                                     |
 
+### Rendering
+
+```
+uv run model-wtf compliance render --format registry [-o registry.md]
+```
+
+Derives the Art. 30 record of processing activities as Markdown from the
+declarations alone (no code, no AI): controller block, one section per activity
+(purpose, lawful basis, data subjects, categories of personal data = union of
+the linked data objects' items, recipients with third country/safeguards,
+erasure time limits, derived rights matrix), recipients, data objects, and the
+`security.yaml` TOMs description. Deterministic: same declarations →
+byte-identical output. Templates are one Jinja file per kind under
+`src/model_wtf/compliance/templates/registry/`.
+
 ## Knowledge
 
 The rules, the data-item vocabulary and the egress catalogue live as YAML under

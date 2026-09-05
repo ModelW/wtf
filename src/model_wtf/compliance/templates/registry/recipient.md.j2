@@ -1,0 +1,11 @@
+
+### {{ recipient.id }} -- {{ recipient.name }}
+
+| | |
+| --- | --- |
+| **Kind** | {{ recipient.kind }} |
+{% if recipient.dpa_reference %}| **Processing agreement (Art. 28)** | {{ recipient.dpa_reference }} |
+{% endif %}{% if recipient.third_country %}| **Third country (Art. 30(1)(e))** | {{ recipient.third_country }} |
+| **Transfer safeguards (Art. 44+)** | {{ recipient.transfer_safeguards or "_missing_" }} |
+{% endif %}{% for r in recipient.retention %}| **Retention** | {{ r.time_limit }} from {{ r.trigger }} ({{ r.expiry_action }}) |
+{% endfor %}

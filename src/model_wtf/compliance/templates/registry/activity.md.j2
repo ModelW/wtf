@@ -1,0 +1,35 @@
+
+### {{ activity.id }}
+
+| | |
+| --- | --- |
+| **Purpose (Art. 30(1)(b))** | {{ activity.purpose }} |
+| **Lawful basis (Art. 6(1))** | {{ activity.lawful_basis }} |
+| **Data subjects (Art. 30(1)(c))** | {{ activity.subjects | join(", ") or "_none declared_" }} |
+| **Categories of personal data (Art. 30(1)(c))** | {{ activity.items | join(", ") or "_none_" }} |
+| **Recipients (Art. 30(1)(d))** | {{ activity.recipients | join("; ") or "_none_" }} |
+| **Data objects** | {{ activity.data_objects | join(", ") or "_none linked_" }} |
+{% if activity.dpia_reference %}| **DPIA (Art. 35)** | {{ activity.dpia_reference }} |
+{% endif %}
+
+**Erasure time limits (Art. 30(1)(f))**
+
+{% if activity.retention %}
+| Source | Time limit | Trigger | Expiry | Statutory basis |
+| --- | --- | --- | --- | --- |
+{% for r in activity.retention %}| {{ r.source }} | {{ r.time_limit }} | {{ r.trigger }} | {{ r.expiry_action }} | {{ r.statutory_basis or "" }} |
+{% endfor %}
+{% else %}
+_None declared._
+{% endif %}
+
+**Rights of the data subject**
+
+{% if activity.rights %}
+| Data object | Access (15) | Rectification (16) | Erasure (17) | Restriction (18) | Portability (20) | Objection (21) | Withdrawal (7(3)) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+{% for row in activity.rights %}| {{ row.data_object }} | {{ row.access }} | {{ row.rectification }} | {{ row.erasure }} | {{ row.restriction }} | {{ row.portability }} | {{ row.objection }} | {{ row.withdrawal }} |
+{% endfor %}
+{% else %}
+_No data object linked; rights cannot be derived._
+{% endif %}

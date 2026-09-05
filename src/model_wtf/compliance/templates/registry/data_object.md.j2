@@ -1,0 +1,13 @@
+
+### {{ data_object.id }} -- {{ data_object.name }}
+
+{{ data_object.description }}
+
+| | |
+| --- | --- |
+| **Data subjects** | {{ data_object.subjects | join(", ") }} |
+| **Categories of personal data** | {{ data_object.items | join(", ") or "_none_" }} |
+| **Identification (Art. 11)** | {{ data_object.identification }} |
+| **Rectification (Art. 16)** | {{ data_object.rectification }} |
+{% if data_object.multi_subject %}| **Multi-subject** | may hold other people's data |
+{% endif %}

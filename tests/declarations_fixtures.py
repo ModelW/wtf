@@ -122,6 +122,16 @@ accepted:
   review_by: 2027-03-01
 """
 
+SNOW_TWO_UNITS_FULL = """
+images:
+  - id: api
+    context: api
+    compliance: compliance
+  - id: front
+    context: front
+    compliance: compliance
+"""
+
 SNOW_ONE_UNIT = """
 images:
   - id: api

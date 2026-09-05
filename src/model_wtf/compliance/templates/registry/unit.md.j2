@@ -1,0 +1,35 @@
+{% if unit.controller %}
+{% with controller = unit.controller %}{% include "controller.md.j2" %}{% endwith %}
+{% else %}
+
+## Controller
+
+_Not declared._
+{% endif %}
+
+## Processing activities
+{% if not unit.activities %}
+
+_No processing activity declared._
+{% endif %}
+{% for activity in unit.activities %}
+{% include "activity.md.j2" %}
+{% endfor %}
+
+## Recipients
+{% if not unit.recipients %}
+
+_No recipient declared._
+{% endif %}
+{% for recipient in unit.recipients %}
+{% include "recipient.md.j2" %}
+{% endfor %}
+
+## Data objects
+{% for data_object in unit.data_objects %}
+{% include "data_object.md.j2" %}
+{% endfor %}
+
+## Technical and organisational security measures (Art. 30(1)(g))
+
+{% if unit.security %}{{ unit.security | trim }}{% else %}_Not declared._{% endif %}

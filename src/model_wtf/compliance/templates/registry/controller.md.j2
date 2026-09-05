@@ -1,0 +1,13 @@
+
+## Controller (Art. 30(1)(a))
+
+| | |
+| --- | --- |
+| **Controller** | {{ controller.name }} |
+| **Address** | {{ controller.contact.address }} |
+| **Email** | {{ controller.contact.email }} |
+{% if controller.contact.phone %}| **Phone** | {{ controller.contact.phone }} |
+{% endif %}{% if controller.dpo %}| **Data protection officer (Art. 37)** | {{ controller.dpo.name }} -- {{ controller.dpo.contact.email }}, {{ controller.dpo.contact.address }} |
+{% endif %}{% if controller.representative %}| **Representative (Art. 27)** | {{ controller.representative.name }} -- {{ controller.representative.contact.email }} |
+{% endif %}{% for jc in controller.joint_controllers %}| **Joint controller (Art. 26)** | {{ jc.name }} -- {{ jc.contact.email }} |
+{% endfor %}

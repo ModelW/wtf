@@ -23,6 +23,7 @@ from model_wtf.compliance.github_sync import (
     sync_comments,
 )
 from model_wtf.compliance.init import InitError, run_init
+from model_wtf.compliance.registry import render_registry
 from model_wtf.compliance.render import render_github, render_json, render_text
 from model_wtf.compliance.report import DeclarationError
 from model_wtf.compliance.stage import Aggressiveness, StageOptions, run_stage
@@ -377,3 +378,46 @@ def gh_sync_comments(
         for item in items:
             console.print(f"[green]{label}[/green] {item}")
     console.print("summary comment synced")
+
+
+@compliance.command()
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["registry"]),
+    required=True,
+    help="What to render. ``registry``: the Art. 30 record as Markdown.",
+)
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Write to this file instead of stdout (overwritten).",
+)
+@click.option(
+    "--root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Repository root. Defaults to the enclosing Git checkout, else the cwd.",
+)
+@click.pass_context
+def render(
+    ctx: click.Context, *, output_format: str, output: Path | None, root: Path | None
+) -> None:
+    """Derive documents from the declarations (no code, no AI).
+
+    Output is deterministic: rendering unchanged declarations twice gives
+    byte-identical results, so the file can be committed and diffed.
+    """
+    resolved_root = root.resolve() if root else find_repo_root(Path.cwd())
+    try:
+        text = render_registry(resolved_root)
+    except DeclarationError as exc:
+        Console(stderr=True).print(f"[red]{exc.diagnostic.message}[/red]")
+        ctx.exit(int(ExitCode.DECLARATION_ERROR))
+    if output is None:
+        click.echo(text, nl=False)
+        return
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(text, encoding="utf-8")
