@@ -119,20 +119,37 @@ def test_applicability_written_to_gen(make_repo: MakeRepo) -> None:
 
 
 def test_verify_rules_seeded_unknown_and_preserved(make_repo: MakeRepo) -> None:
-    root = make_repo(snow=SNOW_ONE_UNIT, files=valid_tree())
-    run_check(root, strict=True)
+    files = valid_tree()
+    del files["api/compliance/elements/data_object.billing.invoices.yaml"]
+    root = make_repo(snow=SNOW_ONE_UNIT, files=files)
+    report = run_check(root, strict=True)
     ledger = _ledger(root, "data_object.billing.invoices")
-    assert ledger["GDPR-ERASURE-PATH"] == {"status": "unknown"}
+    assert ledger["GDPR-ERASURE-PATH"] == {
+        "status": "unknown",
+        "staged_because": "new checkpoint",
+        "rule_version": 1,
+    }
+    # Unknown checkpoints block: the agent has not looked yet.
+    assert report.exit_code is ExitCode.FINDINGS
+    assert {d.code for d in report.diagnostics} == {
+        "GDPR-ERASURE-PATH",
+        "GDPR-RETENTION-ENFORCED",
+    }
 
     # The agent evaluated it; a re-run must not clobber it.
     path = root / "api/compliance/elements/data_object.billing.invoices.yaml"
-    ledger["GDPR-ERASURE-PATH"] = {"status": "ok", "evidence": "agent says so"}
+    ledger["GDPR-ERASURE-PATH"] = {
+        "status": "ok",
+        "evidence": "agent says so",
+        "rule_version": 1,
+    }
     path.write_text(yaml.safe_dump(ledger))
     run_check(root, strict=True)
 
     assert _ledger(root, "data_object.billing.invoices")["GDPR-ERASURE-PATH"] == {
         "status": "ok",
         "evidence": "agent says so",
+        "rule_version": 1,
     }
 
 
@@ -230,18 +247,22 @@ def test_accepted_checkpoint_is_not_reported(make_repo: MakeRepo) -> None:
     files["api/compliance/recipients/stripe.yaml"] = NO_DPA
     root = make_repo(snow=SNOW_ONE_UNIT, files=files)
     run_check(root, strict=False)
-    path = root / "api/compliance/elements/recipient.stripe.yaml"
-    ledger = yaml.safe_load(path.read_text())
-    ledger["GDPR-PROCESSOR-DPA"]["status"] = "accepted"
-    path.write_text(yaml.safe_dump(ledger))
+    # Acceptance is authored on the finding; the ledger follows.
+    finding_path = root / "api/compliance/findings/F-0002.yaml"
+    finding = yaml.safe_load(finding_path.read_text())
+    finding["accepted"] = {
+        "justification": "DPA being signed",
+        "review_by": "2999-01-01",
+    }
+    finding_path.write_text(yaml.safe_dump(finding))
 
     report = run_check(root, strict=False)
 
     assert report.exit_code is ExitCode.CLEAN, report.diagnostics
-    assert (
-        yaml.safe_load(path.read_text())["GDPR-PROCESSOR-DPA"]["status"] == "accepted"
-    )
-    assert (root / "api/compliance/findings/F-0002.yaml").exists()
+    entry = _ledger(root, "recipient.stripe")["GDPR-PROCESSOR-DPA"]
+    assert entry["status"] == "accepted"
+    assert finding_path.exists()
+    assert yaml.safe_load(finding_path.read_text())["accepted"]["justification"]
 
 
 # ---------------------------------------------------------------------------

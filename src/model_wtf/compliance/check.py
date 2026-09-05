@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import shutil
+import tempfile
+from contextlib import contextmanager
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-from model_wtf.compliance.declarations.loader import (
-    Kind,
-    load_declarations,
-    load_folder,
-)
+from model_wtf.compliance.declarations.loader import load_declarations, load_folder
 from model_wtf.compliance.declarations.schemas import CheckpointStatus
 from model_wtf.compliance.discovery import load_units, select_manifest
 from model_wtf.compliance.engine import apply_to_folder, evaluate_unit
 from model_wtf.compliance.exit_codes import ExitCode
+from model_wtf.compliance.ledger import LedgerStore, effective_status
 from model_wtf.compliance.report import (
     DeclarationError,
     Diagnostic,
@@ -24,10 +26,10 @@ from model_wtf.compliance.report import (
 from model_wtf.knowledge.loader import load_knowledge
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Iterator
 
-    from model_wtf.compliance.declarations.loader import DeclarationSet
-    from model_wtf.compliance.engine.engine import UnitEvaluation
+    from model_wtf.compliance.declarations.schemas import Finding
+    from model_wtf.knowledge.loader import Knowledge
 
 SHARED_FOLDER = "compliance"
 SHARED_SCOPE_ID = "shared"
@@ -97,7 +99,15 @@ def run_check(
         evaluation = evaluate_unit(ds, knowledge, framework)
         if write:
             apply_to_folder(unit.folder, evaluation, sha=sha, root=root)
-        diagnostics.extend(_gate_diagnostics(unit.id, ds, evaluation))
+            diagnostics.extend(
+                _verdict_diagnostics(unit.id, unit.folder, root, knowledge)
+            )
+        else:
+            with _scratch_copy(unit.folder) as scratch:
+                apply_to_folder(scratch, evaluation, sha=sha, root=root)
+                diagnostics.extend(
+                    _verdict_diagnostics(unit.id, scratch, root, knowledge)
+                )
 
     if all(scope.file_count == 0 for scope in scopes):
         diagnostics.append(
@@ -128,33 +138,100 @@ def _exit_code(diagnostics: list[Diagnostic]) -> ExitCode:
     return ExitCode.CLEAN
 
 
-def _gate_diagnostics(
-    unit_id: str, ds: DeclarationSet, evaluation: UnitEvaluation
+def _verdict_diagnostics(
+    unit_id: str, folder: Path, root: Path, knowledge: Knowledge
 ) -> list[Diagnostic]:
-    """One ``FINDING`` diagnostic per failed gate that no human accepted."""
+    """Read the reconciled ledgers + findings and report what blocks.
+
+    ``check`` judges the *files*, not the live evaluation: an ``unknown``
+    checkpoint (never evaluated, or re-staged) blocks just like an
+    unaccepted ``not_ok``; an ``accepted`` finding past its ``review_by``
+    only warns. Findings are annotated at their ``provenance`` (first
+    ``path[:line]``), so the GitHub renderer lands them on the right file.
+    """
+    store = LedgerStore(folder)
+    findings = store.all_findings()
+    today = datetime.now(tz=UTC).date()
     out: list[Diagnostic] = []
-    for gate in evaluation.failures:
-        ledger = ds.unit.get(Kind.LEDGER).get(
-            f"{gate.element.element_kind}.{gate.element.id}"
-        )
-        entry = (
-            ledger.model.checkpoints.get(gate.rule.id)
-            if ledger and ledger.model
-            else None
-        )
-        if entry is not None and entry.status is CheckpointStatus.ACCEPTED:
-            continue
-        refs = f" [{', '.join(gate.rule.references)}]" if gate.rule.references else ""
-        out.append(
-            Diagnostic(
-                Severity.FINDING,
-                gate.rule.id,
-                f"{gate.element.stable_id}: {gate.rule.title}{refs}",
-                unit_id,
-                gate.element.source.path,
+    for file_id, ledger in store.all_ledgers().items():
+        for rule_id, entry in sorted(ledger.items()):
+            rule = knowledge.rules.get(rule_id)
+            title = rule.title if rule else rule_id
+            refs = (
+                f" [{', '.join(rule.references)}]" if rule and rule.references else ""
             )
-        )
+            finding = findings.get(entry.finding or "")
+            path, line = _provenance(finding, root, store.ledger_path(file_id))
+            status = effective_status(entry, findings)
+            if status is CheckpointStatus.UNKNOWN:
+                why = f" ({entry.staged_because})" if entry.staged_because else ""
+                out.append(
+                    Diagnostic(
+                        Severity.FINDING,
+                        rule_id,
+                        f"{file_id}: {title}: not evaluated yet{why}",
+                        unit_id,
+                        store.ledger_path(file_id),
+                    )
+                )
+            elif status is CheckpointStatus.NOT_OK:
+                label = f"{entry.finding}: " if entry.finding else ""
+                out.append(
+                    Diagnostic(
+                        Severity.FINDING,
+                        rule_id,
+                        f"{label}{file_id}: {title}{refs}",
+                        unit_id,
+                        path,
+                        line,
+                    )
+                )
+            elif (
+                status is CheckpointStatus.ACCEPTED
+                and finding is not None
+                and finding.accepted is not None
+                and finding.accepted.review_by < today
+            ):
+                out.append(
+                    Diagnostic(
+                        Severity.WARNING,
+                        "review-overdue",
+                        f"{entry.finding}: accepted {rule_id} on {file_id} was due "
+                        f"for review on {finding.accepted.review_by.isoformat()}",
+                        unit_id,
+                        store.finding_path(entry.finding or ""),
+                    )
+                )
     return out
+
+
+def _provenance(
+    finding: Finding | None, root: Path, fallback: Path
+) -> tuple[Path, int | None]:
+    """First ``path[:line]`` of a finding as an absolute path + line."""
+    if finding is None or not finding.provenance:
+        return fallback, None
+    first = finding.provenance[0]
+    path_str, _, line_str = first.rpartition(":")
+    if path_str and line_str.isdigit():
+        return root / path_str, int(line_str)
+    return root / first, None
+
+
+@contextmanager
+def _scratch_copy(folder: Path) -> Iterator[Path]:
+    """A throwaway copy of ``folder`` so ``--no-write`` can still reconcile.
+
+    The verdict is a function of the reconciled files, so the cheapest way
+    to report without writing is to reconcile a copy.
+    """
+    with tempfile.TemporaryDirectory(prefix="model-wtf-") as tmp:
+        scratch = Path(tmp) / folder.name
+        if folder.is_dir():
+            shutil.copytree(folder, scratch)
+        else:
+            scratch.mkdir()
+        yield scratch
 
 
 def _inspect(scope_id: str, kind: ScopeKind, folder: Path) -> Scope:

@@ -92,6 +92,21 @@ GDPR-RETENTION-ENFORCED:
 INP03: {status: n_a, reason: "profile django: no SSI"}
 """
 
+# The agent already verified the two ``verify`` rules of the data object;
+# without this the tree is not "clean" (unknown checkpoints block ``check``).
+LEDGER_INVOICES_OBJECT = """
+GDPR-ERASURE-PATH:
+  status: ok
+  evidence: Invoice.delete() removes the PDF and cascades to line items.
+  evaluated: {sha: 3f9c1a2, model: test, at: 2026-09-05T13:02:00Z, by: agent}
+  rule_version: 1
+GDPR-RETENTION-ENFORCED:
+  status: ok
+  evidence: billing.tasks.purge_invoices runs daily via snow hooks.
+  evaluated: {sha: 3f9c1a2, model: test, at: 2026-09-05T13:02:00Z, by: agent}
+  rule_version: 1
+"""
+
 FINDING_0001 = """
 checkpoint: MW-SEC-001@http:POST:/back/api/invoices/
 severity: high
@@ -127,5 +142,6 @@ def valid_tree(prefix: str = "api/compliance") -> dict[str, str]:
         f"{prefix}/processing/billing.gen.yaml": ACTIVITY_BILLING_GEN,
         f"{prefix}/data/billing.invoices.yaml": DATA_INVOICES,
         f"{prefix}/elements/http.POST.back.api.invoices.yaml": LEDGER_POST_INVOICES,
+        f"{prefix}/elements/data_object.billing.invoices.yaml": LEDGER_INVOICES_OBJECT,
         f"{prefix}/findings/F-0001.yaml": FINDING_0001,
     }

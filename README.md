@@ -19,6 +19,34 @@ to `elements/<kind>.<id>.gen.yaml`, and each failing gate gets a
 rules are seeded as `unknown` for the agent. `--no-write` reports without
 touching the tree.
 
+### Checkpoints and findings
+
+A checkpoint is one `(element, rule)` pair, keyed `RULE@kind:id`. Its status
+(`unknown | ok | not_ok | n_a | accepted`) lives in the element's ledger; a
+`not_ok` has a `findings/F-NNNN.yaml` twin (numbers from `findings/.seq`,
+committed, never reused). The lifecycle is deterministic
+(`src/model_wtf/compliance/ledger.py`):
+
+- new applicable rule → `unknown`; rule no longer applicable → entry dropped;
+- Knowledge rule `version` bump → back to `unknown` (`staged_because`);
+- a human deletes a finding file → its checkpoint goes back to `unknown`;
+- a human adds an `accepted:` block (justification, `review_by`, optional
+  assumption) to the finding → the checkpoint is `accepted`; `check` warns once
+  `review_by` is past.
+
+`check` judges the files: any `unknown` or unaccepted `not_ok` exits 1,
+annotated at the finding's `provenance` under `--format github`.
+
+```
+uv run model-wtf compliance explain F-0042 | GDPR-PROCESSOR-DPA@recipient:stripe | recipient:stripe
+uv run model-wtf compliance whitelist <paths...>   # what the bot may commit (exit 1 otherwise)
+```
+
+The bot (`auto`, the GHA commit step) may only write
+`**/compliance/**/*.gen.yaml`, `**/compliance/elements/*.yaml`,
+`**/compliance/findings/**` and _new_ files under `data/`, `processing/`,
+`recipients/`. Everything else is a developer commit.
+
 ### Unit discovery
 
 Units are read from `snow.yml` at the repo root: every `images[]` entry that

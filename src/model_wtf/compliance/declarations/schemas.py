@@ -487,6 +487,11 @@ class Checkpoint(Strict):
         title="Staged because",
         description="Why the checkpoint went back to ``unknown``.",
     )
+    rule_version: int | None = Field(
+        default=None,
+        title="Rule version",
+        description="Knowledge version of the rule when last evaluated.",
+    )
 
 
 class Ledger(Strict):
