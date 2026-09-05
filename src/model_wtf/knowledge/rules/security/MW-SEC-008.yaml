@@ -1,0 +1,17 @@
+id: MW-SEC-008
+title: Mass assignment or unvalidated input schema
+frameworks: [stride]
+applies_to: {kind: http_route}
+kind: verify
+severity: medium
+version: 1
+description: >-
+  Writing request data straight onto a model (`**request.data`,
+  `fields = "__all__"`, unfiltered form data) lets clients set fields they
+  should not (`is_staff`, `price`, `owner`).
+mitigation: >-
+  Use an explicit input schema/serializer with an allow-list of fields;
+  never spread raw payloads into constructors or `update()`.
+evidence_hints:
+  - Serializer/schema definition for the route; `__all__`; `**data`.
+references: [CAPEC-77, CWE-915, STRIDE:Tampering]

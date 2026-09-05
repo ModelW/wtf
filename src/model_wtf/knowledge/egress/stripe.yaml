@@ -1,0 +1,10 @@
+name: Stripe
+kind: processor
+default_third_country: US
+detection:
+  packages: [stripe, "@stripe/stripe-js"]
+  hosts: [api.stripe.com, js.stripe.com]
+  env: [STRIPE_SECRET_KEY, STRIPE_API_KEY, PUBLIC_STRIPE_KEY]
+typical_items: [name, email, financial, address]
+sink: false
+notes: Payments. Card data never touches our servers when Elements is used.

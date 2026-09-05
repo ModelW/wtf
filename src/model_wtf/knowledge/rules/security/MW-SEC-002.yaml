@@ -1,0 +1,20 @@
+id: MW-SEC-002
+title: Upload without content validation
+frameworks: [stride]
+applies_to: {kind: http_route}
+kind: verify
+severity: high
+version: 1
+description: >-
+  File uploads that are stored without checking size, type and content can
+  carry malware, exhaust storage, or be served back as HTML/SVG to other
+  users (stored XSS).
+mitigation: >-
+  Enforce a maximum size, whitelist content types by sniffing (not by
+  extension), store outside the web root or in object storage with a
+  `Content-Disposition: attachment`, and never serve user files from the
+  application origin.
+evidence_hints:
+  - Route consumes `multipart/form-data` or a FileField/ImageField.
+  - Look for validators on the field/form/schema and for size limits.
+references: [CAPEC-17, CWE-434, STRIDE:Tampering]

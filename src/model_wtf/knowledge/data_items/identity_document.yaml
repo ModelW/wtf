@@ -1,0 +1,8 @@
+name: Identity document
+gdpr_category: identity
+special_art9: false
+classification: sensitive
+pii: true
+credentials: false
+dpia_trigger: true
+description: Scan or number of a passport, ID card, driving licence.

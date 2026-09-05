@@ -1,0 +1,20 @@
+id: MW-SEC-001
+title: Unauthenticated mutating route
+frameworks: [stride]
+applies_to: {kind: http_route}
+kind: verify
+severity: high
+version: 1
+description: >-
+  A route accepting POST/PUT/PATCH/DELETE without any authentication lets
+  anyone create or alter data. Public forms are legitimate but must be
+  deliberate and protected against abuse.
+mitigation: >-
+  Require authentication (`auth=` on the Ninja router, `permission_classes`
+  on DRF, `locals.user` check in SvelteKit actions) or, for intentionally
+  public forms, add rate limiting and a honeypot and document the decision.
+evidence_hints:
+  - The route's method set includes a mutating verb.
+  - No auth decorator/class/`auth=` argument, or `auth=None` / `AllowAny`.
+  - Check middleware/global defaults before concluding.
+references: [CAPEC-115, STRIDE:Spoofing, STRIDE:Tampering, "Art. 32"]

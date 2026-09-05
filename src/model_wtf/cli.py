@@ -3,6 +3,7 @@
 import rich_click as click
 
 from model_wtf.compliance.cli import compliance
+from model_wtf.knowledge.cli import rules
 
 
 @click.group()
@@ -11,3 +12,4 @@ def cli() -> None:
 
 
 cli.add_command(compliance)
+cli.add_command(rules)

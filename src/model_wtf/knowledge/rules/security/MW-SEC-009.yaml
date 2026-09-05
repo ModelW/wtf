@@ -1,0 +1,17 @@
+id: MW-SEC-009
+title: Secrets in code or logs
+frameworks: [stride]
+applies_to: {kind: http_route}
+kind: verify
+severity: critical
+version: 1
+description: >-
+  Hard-coded API keys, default passwords or tokens echoed in logs leak
+  through the repository and observability tooling.
+mitigation: >-
+  Read secrets from the environment/secret manager only, rotate anything
+  ever committed, and mask them in logs.
+evidence_hints:
+  - Literal strings shaped like keys (sk_live_, AKIA, -----BEGIN) near the route.
+  - Logging of headers/`Authorization`/settings dicts.
+references: [CWE-798, CWE-532, STRIDE:InformationDisclosure]

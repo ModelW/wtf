@@ -1,0 +1,16 @@
+id: GDPR-RETENTION-DECLARED
+title: Retention declared
+frameworks: [gdpr]
+applies_to: {kind: data_object}
+kind: gate
+severity: high
+version: 1
+description: >-
+  Every data object needs at least one erasure time limit. It is
+  mandatory (not "where possible") when the object is not linkable to a
+  person or when opaque fields likely hold undeclared personal data,
+  because no rights machinery can compensate.
+mitigation: >-
+  Add a `retention` entry with `time_limit`, `trigger` and `expiry_action`.
+condition: len(data_object.retention) > 0
+references: ["Art. 5(1)(e)", "Art. 30(1)(f)", "Art. 11(2)"]

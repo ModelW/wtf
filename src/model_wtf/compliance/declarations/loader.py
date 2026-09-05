@@ -36,10 +36,12 @@ from model_wtf.compliance.declarations.schemas import (
     Generated,
     Ledger,
     Recipient,
+    ScalarField,
     Security,
 )
 from model_wtf.compliance.declarations.yaml_lines import LineDict, line_of, load_yaml
 from model_wtf.compliance.report import Diagnostic, Severity
+from model_wtf.knowledge.loader import load_knowledge
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -375,7 +377,8 @@ def _check_activities(ds: DeclarationSet, scope_id: str) -> Iterator[Diagnostic]
 
 
 def _check_data_objects(ds: DeclarationSet, scope_id: str) -> Iterator[Diagnostic]:
-    """Data objects point at actors."""
+    """Data objects point at actors and use vocabulary items."""
+    vocabulary = load_knowledge().data_items
     for data_object in ds.unit.get(Kind.DATA_OBJECT).values():
         model: DataObject | None = data_object.model
         if model is None:
@@ -388,6 +391,36 @@ def _check_data_objects(ds: DeclarationSet, scope_id: str) -> Iterator[Diagnosti
             "subject_categories",
             scope_id,
         )
+        for name, spec in model.fields.items():
+            if isinstance(spec, ScalarField):
+                if spec.item not in vocabulary:
+                    yield _unknown_item(
+                        data_object, (name, "item"), spec.item, scope_id
+                    )
+                continue
+            for index, content in enumerate(spec.contents):
+                if content.item not in vocabulary:
+                    yield _unknown_item(
+                        data_object,
+                        (name, "contents", index, "item"),
+                        content.item,
+                        scope_id,
+                    )
+
+
+def _unknown_item(
+    source: Declared[Any], loc: tuple[str | int, ...], item: str, scope_id: str
+) -> Diagnostic:
+    """An ``item:`` value that is not in ``knowledge/data_items/``."""
+    return Diagnostic(
+        Severity.ERROR,
+        "unknown-data-item",
+        f"{source.path.name}: fields.{'.'.join(str(p) for p in loc)}: "
+        f"unknown data item {item!r}",
+        scope_id,
+        source.path,
+        _line(source.path, ("fields", *loc)),
+    )
 
 
 def _check_ledgers(ds: DeclarationSet, scope_id: str) -> Iterator[Diagnostic]:

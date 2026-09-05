@@ -1,0 +1,17 @@
+id: GDPR-SPECIAL-CATEGORY
+title: Special categories flagged and grounded
+frameworks: [gdpr]
+applies_to: {kind: data_object}
+kind: gate
+severity: critical
+version: 1
+description: >-
+  Health, biometric and other Art. 9 items are prohibited by default. A
+  data object holding them must be identified so that every activity
+  processing it is checked for an Art. 9(2) ground.
+mitigation: >-
+  Confirm the items are really special categories; if so, make sure the
+  activities processing this object use explicit consent or cite their
+  Art. 9(2) ground, and consider a DPIA.
+condition: not items_any(data_object, "special_art9") or data_object.identification != "none"
+references: ["Art. 9(1)", "Art. 9(2)", "Art. 35(3)(b)"]

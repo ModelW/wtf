@@ -1,0 +1,16 @@
+id: GDPR-PROCESSOR-DPA
+title: Processor has a data processing agreement
+frameworks: [gdpr]
+applies_to: {kind: recipient}
+kind: gate
+severity: high
+version: 1
+description: >-
+  A processor may only be used under a written contract meeting Art. 28(3).
+  The registry must point at that contract before the processor receives
+  data.
+mitigation: >-
+  Set `dpa_reference` to the contract location (repo path or URL); do not
+  ship the integration until the DPA is signed.
+condition: recipient.kind != "processor" or bool(recipient.dpa_reference)
+references: ["Art. 28(3)", "Art. 28(1)"]

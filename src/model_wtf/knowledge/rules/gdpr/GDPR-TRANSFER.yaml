@@ -1,0 +1,16 @@
+id: GDPR-TRANSFER
+title: Third-country transfer has safeguards
+frameworks: [gdpr]
+applies_to: {kind: recipient}
+kind: gate
+severity: high
+version: 1
+description: >-
+  Sending personal data outside the EU/EEA requires an adequacy decision,
+  standard contractual clauses, BCRs or a DPF certification, documented in
+  the record.
+mitigation: >-
+  Fill `transfer_safeguards` ("EU-US Data Privacy Framework (active
+  certification)", "SCCs 2021/914 module 2") or pick an EU region.
+condition: not recipient.third_country or bool(recipient.transfer_safeguards)
+references: ["Art. 44", "Art. 45", "Art. 46", "Art. 30(1)(e)"]

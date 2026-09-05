@@ -1,0 +1,17 @@
+id: MW-SEC-010
+title: Session cookie forwarded over a plaintext internal hop
+frameworks: [stride]
+applies_to: {kind: http_route, stack: [sveltekit]}
+kind: verify
+severity: medium
+version: 1
+description: >-
+  A SvelteKit server forwarding the browser's cookies to `http://api` puts
+  session tokens on the cluster network unencrypted; any compromised pod
+  on the path can replay them.
+mitigation: >-
+  Use an mTLS/TLS internal endpoint, or forward a short-lived derived token
+  rather than the session cookie, and set the cookie `Secure`.
+evidence_hints:
+  - "`fetch(\"http://...\")` in `+server.ts`/`load` with `cookie` header forwarding."
+references: [CAPEC-157, STRIDE:InformationDisclosure, STRIDE:Spoofing]

@@ -1,0 +1,10 @@
+name: DigitalOcean Spaces
+kind: processor
+default_third_country: null
+detection:
+  packages: [boto3, django-storages]
+  hosts: [digitaloceanspaces.com]
+  env: [AWS_S3_ENDPOINT_URL, DO_SPACES_KEY, AWS_STORAGE_BUCKET_NAME]
+typical_items: [identity_document, free_text, financial]
+sink: false
+notes: Object storage for uploads and generated files.

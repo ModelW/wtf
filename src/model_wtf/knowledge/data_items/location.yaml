@@ -1,0 +1,8 @@
+name: Location
+gdpr_category: profiling
+special_art9: false
+classification: sensitive
+pii: true
+credentials: false
+dpia_trigger: true
+description: Geolocation, GPS traces, cell/Wi-Fi positioning.

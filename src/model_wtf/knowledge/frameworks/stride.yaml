@@ -1,0 +1,5 @@
+name: STRIDE
+description: >-
+  Threat-model rules (Spoofing, Tampering, Repudiation, Information
+  disclosure, Denial of service, Elevation of privilege). Includes the
+  imported pytm library and Model W's own ``MW-SEC-*`` rules.

@@ -1,0 +1,8 @@
+name: Behavioural data
+gdpr_category: profiling
+special_art9: false
+classification: sensitive
+pii: true
+credentials: false
+dpia_trigger: true
+description: Browsing, clicks, usage analytics, preferences, scoring.

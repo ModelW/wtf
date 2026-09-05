@@ -1,0 +1,19 @@
+id: MW-SEC-005
+title: Personal data sent to an observability sink
+frameworks: [stride, gdpr]
+applies_to: {kind: http_route}
+kind: verify
+severity: medium
+version: 1
+description: >-
+  Logging request bodies, user emails or names, or attaching them to
+  Sentry events copies personal data into a system with its own retention
+  and access rules, usually undeclared in the registry.
+mitigation: >-
+  Scrub PII before logging (`send_default_pii=False`, `before_send`), log
+  identifiers instead of values, and declare the sink as a recipient with
+  retention if some PII must flow there.
+evidence_hints:
+  - "`logger.*` / `capture_*` calls with request data or model instances."
+  - Sentry `send_default_pii`, `before_send`, `set_user` usage.
+references: ["Art. 5(1)(c)", "Art. 30(1)(d)", STRIDE:InformationDisclosure]

@@ -1,0 +1,16 @@
+id: GDPR-PURPOSE
+title: Specific purpose stated
+frameworks: [gdpr]
+applies_to: {kind: activity}
+kind: gate
+severity: medium
+version: 1
+description: >-
+  "Improving our services" is not a purpose. The registry needs a
+  specific, explicit sentence explaining why the data is processed.
+mitigation: >-
+  Write a purpose of at least a dozen words naming the outcome for the
+  subject or the business ("Issue and archive invoices for purchased
+  services").
+condition: len(activity.purpose.split()) >= 5
+references: ["Art. 5(1)(b)", "Art. 30(1)(b)"]

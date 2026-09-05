@@ -1,0 +1,21 @@
+id: GDPR-ERASURE-PATH
+title: Erasure reaches every copy
+frameworks: [gdpr]
+applies_to: {kind: data_object}
+kind: verify
+severity: high
+version: 1
+description: >-
+  Deleting the main row is not erasure when the same data survives in
+  blobs, denormalised columns, JSON fields of other models, soft-deleted
+  rows, history tables or third-party sinks.
+mitigation: >-
+  Implement a single erase path per data object that deletes files,
+  cascades or nulls FKs deliberately, purges history/audit copies, and
+  calls the recipients' deletion APIs where data was sent.
+evidence_hints:
+  - "`on_delete` choices on FKs pointing at the source models; SET_NULL vs CASCADE vs PROTECT."
+  - Soft-delete mixins, django-simple-history, audit logs holding field values.
+  - "File fields: is the storage object removed on delete?"
+  - Copies in task payloads or email templates.
+references: ["Art. 17(1)", "Art. 17(2)", "Recital 26"]

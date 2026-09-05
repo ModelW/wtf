@@ -1,0 +1,18 @@
+id: MW-SEC-003
+title: Admin, debug or docs route on the public surface
+frameworks: [stride]
+applies_to: {kind: http_route}
+kind: verify
+severity: medium
+version: 1
+description: >-
+  Django admin, API docs (`/docs`, `/openapi.json`), debug toolbars and
+  similar routes reveal structure and widen the attack surface when they
+  are reachable from the public ingress.
+mitigation: >-
+  Serve them on an internal hostname or behind an allow-list / VPN, or
+  require a strong-auth session; disable docs in production if unused.
+evidence_hints:
+  - Path matches /admin, /docs, /openapi, /__debug__, /silk, /graphiql.
+  - Which ingress (public vs internal) routes to the component.
+references: [CAPEC-54, STRIDE:InformationDisclosure]

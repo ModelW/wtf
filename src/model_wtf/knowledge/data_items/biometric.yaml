@@ -1,0 +1,8 @@
+name: Biometric data
+gdpr_category: special
+special_art9: true
+classification: sensitive
+pii: true
+credentials: false
+dpia_trigger: true
+description: Fingerprints, face geometry, voice prints used to identify (Art. 9).

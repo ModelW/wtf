@@ -1,0 +1,10 @@
+name: Not personal data
+gdpr_category: none
+special_art9: false
+classification: public
+pii: false
+credentials: false
+dpia_trigger: false
+description: >-
+  The field was examined and holds nothing about a person (UTM campaign,
+  product SKU, feature flag).

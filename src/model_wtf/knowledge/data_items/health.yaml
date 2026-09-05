@@ -1,0 +1,8 @@
+name: Health data
+gdpr_category: special
+special_art9: true
+classification: sensitive
+pii: true
+credentials: false
+dpia_trigger: true
+description: Physical or mental health, care received, disabilities (Art. 9).

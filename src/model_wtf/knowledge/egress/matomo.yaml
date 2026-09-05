@@ -1,0 +1,10 @@
+name: Matomo
+kind: processor
+default_third_country: null
+detection:
+  packages: ["@jonkoops/matomo-tracker", matomo-tracker]
+  hosts: [matomo.cloud]
+  env: [PUBLIC_MATOMO_URL, MATOMO_SITE_ID]
+typical_items: [behavioural, identifier]
+sink: true
+notes: Web analytics; cookie-less mode possible.

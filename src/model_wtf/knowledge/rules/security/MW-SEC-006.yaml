@@ -1,0 +1,18 @@
+id: MW-SEC-006
+title: Webhook without signature verification
+frameworks: [stride]
+applies_to: {kind: http_route}
+kind: verify
+severity: high
+version: 1
+description: >-
+  A webhook endpoint that trusts its payload lets anyone forge events
+  (paid orders, signed documents, delivered emails).
+mitigation: >-
+  Verify the provider's signature header with the shared secret before
+  parsing (Stripe `construct_event`, Yousign HMAC, Mandrill signature), and
+  reject replays with the timestamp.
+evidence_hints:
+  - Path or name contains webhook/callback/hook; caller is a known egress.
+  - Look for signature verification before any side effect.
+references: [CAPEC-148, STRIDE:Spoofing, STRIDE:Tampering]

@@ -1,0 +1,8 @@
+name: Name
+gdpr_category: identity
+special_art9: false
+classification: restricted
+pii: true
+credentials: false
+dpia_trigger: false
+description: First name, last name, display name or full name.

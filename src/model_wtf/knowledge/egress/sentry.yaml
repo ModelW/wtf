@@ -1,0 +1,10 @@
+name: Sentry
+kind: processor
+default_third_country: US
+detection:
+  packages: [sentry-sdk, "@sentry/sveltekit", "@sentry/node", "@sentry/browser"]
+  hosts: [sentry.io, ingest.sentry.io]
+  env: [SENTRY_DSN, PUBLIC_SENTRY_DSN]
+typical_items: [identifier, email, free_text]
+sink: true
+notes: Error monitoring. Scrub PII or declare retention; events are kept 90 days by default.

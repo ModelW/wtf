@@ -1,0 +1,16 @@
+id: GDPR-DPIA
+title: DPIA referenced for likely high-risk processing
+frameworks: [gdpr]
+applies_to: {kind: activity}
+kind: gate
+severity: high
+version: 1
+description: >-
+  Processing special categories, location, behavioural profiling or
+  identity documents at scale is on every authority's Art. 35(4) list.
+  Such an activity must reference an impact assessment before it runs.
+mitigation: >-
+  Run a DPIA (CNIL PIA tool or equivalent) and set `dpia_reference`, or
+  narrow the data so no trigger item remains.
+condition: not items_any(activity, "dpia_trigger") or bool(activity.dpia_reference)
+references: ["Art. 35(1)", "Art. 35(3)", "Art. 35(4)"]

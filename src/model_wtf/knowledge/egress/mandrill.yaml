@@ -1,0 +1,10 @@
+name: Mandrill (Mailchimp Transactional)
+kind: processor
+default_third_country: US
+detection:
+  packages: [mailchimp-transactional, django-anymail]
+  hosts: [mandrillapp.com]
+  env: [MANDRILL_API_KEY, ANYMAIL_MANDRILL_API_KEY]
+typical_items: [email, name, free_text]
+sink: false
+notes: Transactional email delivery.

@@ -1,0 +1,10 @@
+name: Yousign
+kind: processor
+default_third_country: null
+detection:
+  packages: [yousign]
+  hosts: [api.yousign.com, api.yousign.app]
+  env: [YOUSIGN_API_KEY]
+typical_items: [name, email, phone, identity_document]
+sink: false
+notes: Electronic signature; documents and signer identity are transferred.

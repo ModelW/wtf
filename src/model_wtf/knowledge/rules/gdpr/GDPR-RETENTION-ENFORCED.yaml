@@ -1,0 +1,19 @@
+id: GDPR-RETENTION-ENFORCED
+title: Retention is enforced by scheduled code
+frameworks: [gdpr]
+applies_to: {kind: data_object}
+kind: verify
+severity: high
+version: 1
+description: >-
+  A declared time limit is worthless unless something deletes or
+  anonymises the rows when it expires. The executor must exist AND be
+  scheduled (cron, beat, procrastinate periodic, snow hook).
+mitigation: >-
+  Write a purge task honouring `trigger` + `time_limit`, delete or
+  anonymise every copy (rows, blobs, denormalised fields), and schedule it.
+evidence_hints:
+  - A management command / task whose name suggests purge/cleanup/expire for the source models.
+  - "Its schedule: CELERY_BEAT_SCHEDULE, procrastinate `periodic`, snow.yml hooks/cron, GitHub schedule."
+  - The deletion covers files and related objects, not just the main row.
+references: ["Art. 5(1)(e)", "Art. 17(1)(a)", "Art. 30(1)(f)"]

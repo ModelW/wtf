@@ -72,6 +72,22 @@ with its `file:line`.
 | 3    | Declaration errors (missing/invalid manifest, `--strict` hits) |
 | 4    | Tool error                                                     |
 
+## Knowledge
+
+The rules, the data-item vocabulary and the egress catalogue live as YAML under
+`src/model_wtf/knowledge/` (one file per rule/item/egress). `item:` values in
+data-object declarations must be vocabulary items.
+
+```
+uv run model-wtf rules --list [--framework gdpr|stride|all]
+uv run model-wtf rules explain GDPR-PROCESSOR-DPA
+```
+
+Every rule has `id`, `title`, `frameworks`, `applies_to: {kind, stack?}`,
+`kind: gate|verify`, `severity`, `version`, `description`, `mitigation`,
+`references`. Gates carry a `condition` (evaluated deterministically by the
+engine); verify rules carry `evidence_hints` for the agent.
+
 ## Development
 
 ```

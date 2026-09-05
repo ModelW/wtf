@@ -1,0 +1,10 @@
+name: Free text
+gdpr_category: content
+special_art9: false
+classification: restricted
+pii: true
+credentials: false
+dpia_trigger: false
+description: >-
+  Anything a person typed (comments, messages, notes). May contain any
+  other item, possibly about third parties.

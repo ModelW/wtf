@@ -1,0 +1,9 @@
+name: Google Tag Manager
+kind: third_party
+default_third_country: US
+detection:
+  hosts: [googletagmanager.com, google-analytics.com]
+  env: [PUBLIC_GTM_ID, GTM_CONTAINER_ID]
+typical_items: [behavioural, identifier, location]
+sink: true
+notes: Loads arbitrary third-party tags; requires consent gating.

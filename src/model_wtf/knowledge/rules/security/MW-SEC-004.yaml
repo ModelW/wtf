@@ -1,0 +1,18 @@
+id: MW-SEC-004
+title: Missing rate limiting on authentication or PII endpoints
+frameworks: [stride]
+applies_to: {kind: http_route}
+kind: verify
+severity: medium
+version: 1
+description: >-
+  Login, password reset, OTP, signup and endpoints returning personal data
+  are targets for credential stuffing and enumeration when unthrottled.
+mitigation: >-
+  Add per-IP and per-account throttling (django-axes, DRF throttles, Ninja
+  throttle, SvelteKit rate limiter) or an edge rate limit and document it
+  as an assumption.
+evidence_hints:
+  - Route handles credentials, tokens, or returns data objects with PII.
+  - Look for throttle classes/decorators, AXES settings, edge configuration.
+references: [CAPEC-49, CAPEC-600, STRIDE:DenialOfService, STRIDE:Spoofing]

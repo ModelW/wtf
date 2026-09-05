@@ -1,0 +1,10 @@
+name: Identifier
+gdpr_category: identity
+special_art9: false
+classification: restricted
+pii: true
+credentials: false
+dpia_trigger: false
+description: >-
+  Any number or code assigned to a person by us or a third party: customer
+  id, VAT number, social security number, licence plate, IP address.

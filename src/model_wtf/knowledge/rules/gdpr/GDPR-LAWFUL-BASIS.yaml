@@ -1,0 +1,20 @@
+id: GDPR-LAWFUL-BASIS
+title: Lawful basis declared and compatible with the data
+frameworks: [gdpr]
+applies_to: {kind: activity}
+kind: gate
+severity: high
+version: 1
+description: >-
+  Each activity must rest on one Art. 6(1) ground. When the activity
+  touches Art. 9 special categories, `consent` (explicit) is the only basis
+  this gate accepts without a documented Art. 9(2) ground.
+mitigation: >-
+  Set `lawful_basis` in the activity; for special categories, either use
+  explicit consent or record the Art. 9(2) ground in the purpose text.
+condition: >-
+  activity.lawful_basis is not None
+  and (not items_any(activity, "special_art9")
+       or activity.lawful_basis == "consent"
+       or "Art. 9(2)" in activity.purpose)
+references: ["Art. 6(1)", "Art. 9(2)", "Art. 13(1)(c)"]

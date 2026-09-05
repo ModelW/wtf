@@ -1,0 +1,8 @@
+name: Email address
+gdpr_category: contact
+special_art9: false
+classification: restricted
+pii: true
+credentials: false
+dpia_trigger: false
+description: Any electronic mail address that reaches a person.

@@ -1,0 +1,10 @@
+name: Brevo (ex Sendinblue)
+kind: processor
+default_third_country: null
+detection:
+  packages: [sib-api-v3-sdk, django-anymail]
+  hosts: [api.brevo.com, api.sendinblue.com]
+  env: [BREVO_API_KEY, SENDINBLUE_API_KEY]
+typical_items: [email, name, phone, behavioural]
+sink: false
+notes: Email and SMS campaigns; also a marketing CRM.

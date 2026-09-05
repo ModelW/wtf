@@ -1,0 +1,8 @@
+name: Financial data
+gdpr_category: financial
+special_art9: false
+classification: sensitive
+pii: true
+credentials: false
+dpia_trigger: false
+description: IBAN, card details, amounts, invoices, salary, credit scoring.

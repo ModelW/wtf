@@ -1,0 +1,17 @@
+id: MW-SEC-007
+title: Object access without ownership check (IDOR)
+frameworks: [stride]
+applies_to: {kind: http_route}
+kind: verify
+severity: high
+version: 1
+description: >-
+  Fetching or mutating a record by id without scoping the query to the
+  requesting user exposes every user's data to every other user.
+mitigation: >-
+  Scope querysets to the requester (`filter(owner=request.user)`), use
+  object-level permissions, or unguessable ids plus an ownership check.
+evidence_hints:
+  - Route takes an id/slug parameter and touches a data object with PII.
+  - "Look at the queryset/select: is it filtered by the authenticated user?"
+references: [CAPEC-1, CWE-639, STRIDE:ElevationOfPrivilege]
