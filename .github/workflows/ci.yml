@@ -1,0 +1,39 @@
+# Lint, type-check and test on every push/PR.
+
+name: CI
+
+on:
+    push:
+        branches: [production, develop]
+    pull_request:
+
+concurrency:
+    group: ci-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    lint:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: astral-sh/setup-uv@v5
+              with:
+                  enable-cache: true
+            - run: uv sync --frozen
+            - run: uv run ruff check --output-format=github .
+            - run: uv run ruff format --check .
+            - run: uv run mypy
+
+    test:
+        runs-on: ubuntu-latest
+        strategy:
+            matrix:
+                python: ["3.12", "3.13", "3.14"]
+        steps:
+            - uses: actions/checkout@v4
+            - uses: astral-sh/setup-uv@v5
+              with:
+                  enable-cache: true
+                  python-version: ${{ matrix.python }}
+            - run: uv sync --frozen
+            - run: uv run pytest

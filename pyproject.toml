@@ -1,0 +1,100 @@
+[project]
+name = "model-wtf"
+version = "0.1.0"
+description = "Model W Transformation Facilitator"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Rémy Sanchez", email = "remy.sanchez@hyperthese.net" },
+]
+requires-python = ">=3.12"
+dependencies = [
+    "rich",
+    "rich-click",
+    "click",
+    "httpx",
+    "pyyaml",
+]
+
+[project.scripts]
+model-wtf = "model_wtf.cli:cli"
+
+[dependency-groups]
+dev = [
+    "mypy",
+    "ruff",
+    "types-pyyaml",
+]
+test = [
+    "pytest",
+]
+
+[tool.uv]
+default-groups = ["dev", "test"]
+
+[build-system]
+requires = ["uv_build>=0.9.5,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.mypy]
+strict = true
+files = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = ["-q", "-ra", "--tb=short"]
+
+[tool.ruff]
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    # -- Core --
+    "E",  # pycodestyle (errors)
+    "W",  # pycodestyle (warnings)
+    "F",  # Pyflakes
+    "I",  # isort
+    "C90",  # McCabe Complexity
+    "D1",  # Mandatory docstrings
+    "S",  # Bandit
+
+    # -- Bonus --
+    "A",  # flake8-builtins
+    "B",  # flake8-bugbear
+    "DTZ",  # date/time zone
+    "T10",  # debugger
+    "EM",  # error messages
+    "EXE",  # executable
+    "G",  # logging
+    "UP",  # pyupgrade
+    "ASYNC",  # async
+    "INP",  # PEP 420
+    "T20",  # no print
+    "PT",  # pytest
+    "SLOT",  # slots
+    "TCH",  # type checking blocks
+    "PTH",  # Use pathlib
+    "FIX",  # Don't allow not done stuff in code
+    "ERA",  # Don't comment code
+    "RUF",  # Ruff stuff
+    "TID251",  # Banned imports (See below)
+]
+
+# D104 -- package __init__.py files don't need docstrings
+# D105 -- magic methods are self-describing
+ignore = ["D104", "D105"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests: fixtures shadow args, asserts are the point, docstrings are noise.
+"tests/*" = ["ARG001", "S101", "D", "INP001"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["model_wtf"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"requests".msg = "Use `httpx` instead, which has timeouts by default."
