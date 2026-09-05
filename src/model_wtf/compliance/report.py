@@ -73,6 +73,12 @@ class Diagnostic:
     line
         1-based line inside ``path`` when the problem is located inside a
         file (a bad YAML key, an unknown reference), else ``None``.
+    element
+        The element file id (``recipient.stripe``) for checkpoint-related
+        diagnostics, so summaries can group by element.
+    finding_id
+        The ``F-NNNN`` behind an open-finding diagnostic; goes into the
+        GitHub annotation title.
     """
 
     severity: Severity
@@ -81,6 +87,13 @@ class Diagnostic:
     scope_id: str | None = None
     path: Path | None = None
     line: int | None = None
+    element: str | None = None
+    finding_id: str | None = None
+
+    @property
+    def title(self) -> str:
+        """Annotation title: ``F-NNNN RULE`` for findings, else the code."""
+        return f"{self.finding_id} {self.code}" if self.finding_id else self.code
 
     @property
     def location(self) -> str | None:
@@ -222,6 +235,8 @@ class Report:
                     "scope": diag.scope_id,
                     "path": self.display_path(diag.path) if diag.path else None,
                     "line": diag.line,
+                    "element": diag.element,
+                    "finding": diag.finding_id,
                 }
                 for diag in self.diagnostics
             ],

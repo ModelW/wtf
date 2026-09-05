@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
+from model_wtf.compliance.blanks import OPEN
 from model_wtf.compliance.discovery import (
     FALLBACK_MANIFEST,
     SNOW_MANIFEST,
@@ -30,9 +31,6 @@ from model_wtf.compliance.discovery import (
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
-
-OPEN = "open"
-"""Marker for a human blank: schema-valid, obviously unfinished."""
 
 DEFAULT_TEAM_SUFFIX = "dpo"
 SKIP_DIRS = frozenset({".git", "node_modules", ".venv", "venv", "__pycache__", "dist"})

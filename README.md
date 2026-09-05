@@ -48,7 +48,21 @@ committed, never reused). The lifecycle is deterministic
   `review_by` is past.
 
 `check` judges the files: any `unknown` or unaccepted `not_ok` exits 1,
-annotated at the finding's `provenance` under `--format github`.
+annotated at the finding's `provenance` under `--format github`
+(`::error ... title=F-NNNN RULE::`). Fields still holding the `open` placeholder
+from `init` are `::warning ... title=blank::`. When `$GITHUB_STEP_SUMMARY` is
+set, a Markdown summary grouped by element is appended to it.
+
+```
+uv run model-wtf compliance gh-sync-comments [--pr N] [--repo owner/name] [--stage-report stage.json] [--budget-used $X]
+```
+
+Mirrors `findings/` onto the pull request through `gh api` (`GITHUB_TOKEN`): one
+review comment per finding at its provenance (or on the finding file when the
+provenance is outside the diff), marker `<!-- model-wtf F-NNNN -->`, updated in
+place, thread resolved when the finding disappears; one summary comment
+(open/accepted findings, blanks, agent budget, agent re-stages, how to accept)
+edited across runs.
 
 ```
 uv run model-wtf compliance stage [--base REF] [--element ID] [--rule ID] [--all] [--format text|json]

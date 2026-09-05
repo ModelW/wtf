@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from model_wtf.compliance.blanks import find_blanks
 from model_wtf.compliance.declarations.loader import load_declarations, load_folder
 from model_wtf.compliance.declarations.schemas import CheckpointStatus
 from model_wtf.compliance.discovery import load_units, select_manifest
@@ -88,12 +89,15 @@ def run_check(
     # folder *is* the shared folder (single-image repo) is not re-reported.
     _, shared_diags = load_folder(shared_folder, SHARED_SCOPE_ID)
     diagnostics.extend(shared_diags)
+    diagnostics.extend(find_blanks(shared_folder, SHARED_SCOPE_ID))
     knowledge = load_knowledge()
     for unit in units:
         ds, unit_diags = load_declarations(unit.folder, shared_folder, unit.id)
         if unit.folder.resolve() == shared_folder.resolve():
             unit_diags = [d for d in unit_diags if d.code == "unknown-reference"]
         diagnostics.extend(unit_diags)
+        if unit.folder.resolve() != shared_folder.resolve():
+            diagnostics.extend(find_blanks(unit.folder, unit.id))
         if any(d.severity is Severity.ERROR for d in unit_diags + shared_diags):
             continue
         evaluation = evaluate_unit(ds, knowledge, framework)
@@ -172,6 +176,7 @@ def _verdict_diagnostics(
                         f"{file_id}: {title}: not evaluated yet{why}",
                         unit_id,
                         store.ledger_path(file_id),
+                        element=file_id,
                     )
                 )
             elif status is CheckpointStatus.NOT_OK:
@@ -184,6 +189,8 @@ def _verdict_diagnostics(
                         unit_id,
                         path,
                         line,
+                        element=file_id,
+                        finding_id=entry.finding,
                     )
                 )
             elif (
@@ -200,6 +207,8 @@ def _verdict_diagnostics(
                         f"for review on {finding.accepted.review_by.isoformat()}",
                         unit_id,
                         store.finding_path(entry.finding or ""),
+                        element=file_id,
+                        finding_id=entry.finding,
                     )
                 )
     return out

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,13 @@ from model_wtf.compliance.check import run_check
 from model_wtf.compliance.discovery import find_repo_root, git_sha
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.explain import explain_target
+from model_wtf.compliance.github_sync import (
+    GhClient,
+    GitHubError,
+    SyncContext,
+    detect_repo_and_pr,
+    sync_comments,
+)
 from model_wtf.compliance.init import InitError, run_init
 from model_wtf.compliance.render import render_github, render_json, render_text
 from model_wtf.compliance.report import DeclarationError
@@ -88,7 +96,12 @@ def check(
             click.echo(render_json(report))
         elif output_format == "github":
             # No colour/width games: the annotations must stay one per line.
-            render_github(report, Console(no_color=True, width=200))
+            summary = os.environ.get("GITHUB_STEP_SUMMARY")
+            render_github(
+                report,
+                Console(no_color=True, width=200),
+                Path(summary) if summary else None,
+            )
         else:
             render_text(report, console)
     except Exception as exc:
@@ -301,3 +314,66 @@ def stage(
         console.print(f"renumbered {old} -> {new}")
     for note in report.notes:
         console.print(f"[yellow]note[/yellow]: {escape(note)}")
+
+
+@compliance.command("gh-sync-comments")
+@click.option("--pr", type=int, default=None, help="PR number (default: $GITHUB_REF).")
+@click.option("--repo", default=None, help="owner/name (default: $GITHUB_REPOSITORY).")
+@click.option(
+    "--stage-report",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="JSON from `compliance stage --format json`, to list agent re-stages.",
+)
+@click.option("--budget-used", default=None, help="Agent spend to show, e.g. '$0.42'.")
+@click.option(
+    "--root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Repository root. Defaults to the enclosing Git checkout, else the cwd.",
+)
+@click.pass_context
+def gh_sync_comments(
+    ctx: click.Context,
+    *,
+    pr: int | None,
+    repo: str | None,
+    stage_report: Path | None,
+    budget_used: str | None,
+    root: Path | None,
+) -> None:
+    """Mirror findings/ onto the pull request as review comments.
+
+    One comment per finding (marker ``<!-- model-wtf F-NNNN -->``, updated
+    in place), threads resolved when a finding disappears, one summary
+    comment edited across runs. Uses ``gh api`` with ``GITHUB_TOKEN``.
+    """
+    resolved_root = root.resolve() if root else find_repo_root(Path.cwd())
+    console = Console()
+    try:
+        repo_name, pr_number = detect_repo_and_pr(repo, pr)
+        ai_staged: list[str] = []
+        if stage_report is not None:
+            data = json.loads(stage_report.read_text(encoding="utf-8"))
+            ai_staged = [f"{k}: {data['reasons'][k]}" for k in data.get("ai", [])]
+        blanks = sum(
+            1
+            for d in run_check(resolved_root, strict=False, write=False).diagnostics
+            if d.code == "blank"
+        )
+        report = sync_comments(
+            resolved_root,
+            GhClient(repo_name, pr_number),
+            SyncContext(blanks=blanks, budget_used=budget_used, ai_staged=ai_staged),
+        )
+    except GitHubError as exc:
+        Console(stderr=True).print(f"[red]{exc}[/red]")
+        ctx.exit(int(ExitCode.TOOL_ERROR))
+    for label, items in (
+        ("created", report.created),
+        ("updated", report.updated),
+        ("resolved", report.resolved),
+    ):
+        for item in items:
+            console.print(f"[green]{label}[/green] {item}")
+    console.print("summary comment synced")

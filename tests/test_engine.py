@@ -408,6 +408,6 @@ def test_github_renders_findings_as_errors(make_repo: MakeRepo, invoke: Invoke) 
 
     assert result.exit_code == 1
     assert (
-        "::error file=api/compliance/recipients/stripe.yaml,title=GDPR-PROCESSOR-DPA::"
-        in result.output
+        "::error file=api/compliance/recipients/stripe.yaml,"
+        "title=F-0002 GDPR-PROCESSOR-DPA::" in result.output
     )

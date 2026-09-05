@@ -15,6 +15,8 @@ from rich.table import Table
 from model_wtf.compliance.report import ScopeStatus, Severity
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from rich.console import Console
 
     from model_wtf.compliance.report import Diagnostic, Report
@@ -63,15 +65,19 @@ def render_json(report: Report) -> str:
     return json.dumps(report.to_dict(), indent=2)
 
 
-def render_github(report: Report, console: Console) -> None:
+def render_github(
+    report: Report, console: Console, summary_path: Path | None = None
+) -> None:
     """Emit GitHub Actions annotations followed by a plain summary.
 
     Annotations must be the only thing on their line and use ``%``-escaping
     for the characters that would break the command syntax. The table is
     printed afterwards so it lands in the step log without interfering.
+    When ``summary_path`` (``$GITHUB_STEP_SUMMARY``) is given, a Markdown
+    summary grouped by element is appended to it.
     """
     for diag in report.diagnostics:
-        props = [f"title={_escape(diag.code)}"]
+        props = [f"title={_escape(diag.title)}"]
         if diag.path:
             props.insert(0, f"file={_escape(report.display_path(diag.path))}")
             if diag.line:
@@ -84,6 +90,71 @@ def render_github(report: Report, console: Console) -> None:
         )
     if report.scopes:
         console.print(_summary_table(report))
+    if summary_path is not None:
+        with summary_path.open("a", encoding="utf-8") as handle:
+            handle.write(step_summary_markdown(report))
+
+
+def step_summary_markdown(report: Report) -> str:
+    """Markdown for ``$GITHUB_STEP_SUMMARY``: verdict, then one table per element.
+
+    Element-less diagnostics (manifest problems, blanks, unknown files) go
+    in a final "Other" table so nothing is silently dropped.
+    """
+    by_element: dict[str, list[Diagnostic]] = {}
+    for diag in report.diagnostics:
+        by_element.setdefault(diag.element or "", []).append(diag)
+
+    findings = sum(1 for d in report.diagnostics if d.severity is Severity.FINDING)
+    errors = sum(1 for d in report.diagnostics if d.severity is Severity.ERROR)
+    blanks = sum(1 for d in report.diagnostics if d.code == "blank")
+    verdict = {
+        0: "clean",
+        1: f"{findings} open checkpoint(s)",
+        2: "stale attestation",
+        3: f"{errors} declaration error(s)",
+        4: "tool error",
+    }.get(int(report.exit_code), str(report.exit_code))
+    lines = [
+        "## model-wtf compliance check",
+        "",
+        f"**Verdict:** {verdict} (exit {int(report.exit_code)})"
+        + (f" · {blanks} human blank(s)" if blanks else ""),
+        "",
+    ]
+    for element in sorted(by_element, key=lambda e: (e == "", e)):
+        lines.append(f"### {element or 'Other'}")
+        lines.append("")
+        lines.append("| Severity | Code | Finding | Message | Location |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        for diag in by_element[element]:
+            where = report.display_path(diag.path) if diag.path else ""
+            if diag.line:
+                where += f":{diag.line}"
+            lines.append(
+                "| "
+                + " | ".join(
+                    _md(cell)
+                    for cell in (
+                        diag.severity.value,
+                        diag.code,
+                        diag.finding_id or "",
+                        diag.message,
+                        where,
+                    )
+                )
+                + " |"
+            )
+        lines.append("")
+    if not by_element:
+        lines.append("Nothing to report.")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _md(value: str) -> str:
+    """Make a value safe inside a Markdown table cell."""
+    return value.replace("|", "\\|").replace("\n", " ")
 
 
 def _summary_table(report: Report) -> Table:

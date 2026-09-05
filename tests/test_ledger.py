@@ -368,7 +368,7 @@ def test_github_annotates_at_provenance(make_repo: MakeRepo) -> None:
 
     assert result.exit_code == 1
     assert (
-        "::error file=apps/billing/api.py,line=14,title=MW-SEC-001::F-0001: "
+        "::error file=apps/billing/api.py,line=14,title=F-0001 MW-SEC-001::F-0001: "
         in result.output
     )
 
