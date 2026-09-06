@@ -420,7 +420,7 @@ def auto_review_cmd(
             model=model,
             python=python,
             max_tokens=max_tokens,
-            log=lambda line: console.print(Text(line, style="dim")),
+            console=console,
             keep_scratch=keep_scratch,
         )
     except OpenCodeUnavailable as exc:

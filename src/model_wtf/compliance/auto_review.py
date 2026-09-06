@@ -24,12 +24,23 @@ from importlib import resources
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
+from rich.text import Text
+
 from model_wtf.compliance.data import collect_unit
 from model_wtf.compliance.mcp_server import MODEL_ENV, model_of
 from model_wtf.compliance.review import Lock
 from model_wtf.opencode import (
     DEFAULT_MODEL,
     Agent,
+    Event,
     McpServer,
     OpenCodeUnavailable,
     Sandbox,
@@ -37,7 +48,7 @@ from model_wtf.opencode import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from rich.console import Console
 
     from model_wtf.compliance.knowledge import Knowledge
     from model_wtf.compliance.report import Unit
@@ -183,6 +194,72 @@ def round_prompt(base: str | None) -> str:
     return "Review all pending models."
 
 
+class Reporter:
+    """Console feedback for a run: a progress bar over models plus a live log.
+
+    Each MCP tool call the agent makes is echoed as it happens, so a long
+    round visibly does something; the bar advances when a model is closed
+    (``data_review_model`` returned) and is re-synced with the on-disk state
+    after every round.
+    """
+
+    def __init__(self, console: Console, total: int) -> None:
+        self.console = console
+        self.progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[bold]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TextColumn("models"),
+            TimeElapsedColumn(),
+            TextColumn("{task.fields[extra]}"),
+            console=console,
+        )
+        self.task = self.progress.add_task("reviewing", total=total, extra="")
+        self.tokens = 0
+
+    def __enter__(self) -> Reporter:
+        self.progress.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.progress.stop()
+
+    def log(self, text: Text | str) -> None:
+        """A line above the bar."""
+        self.progress.console.print(text)
+
+    def on_event(self, event: Event) -> None:
+        """Echo tool calls and keep the token counter current."""
+        if event.kind == "tool" and event.tool:
+            name = event.tool.removeprefix("model-wtf_")
+            target = (
+                event.args.get("model")
+                or event.args.get("unit")
+                or event.args.get("filePath")
+                or event.args.get("pattern")
+                or event.args.get("subagent_type")
+                or ""
+            )
+            style = "cyan" if event.tool.startswith("model-wtf_") else "dim"
+            line = Text.assemble(("  ", ""), (name, style), ("  ", ""), str(target))
+            if name == "data_review_model":
+                first = event.output.splitlines()[0] if event.output else ""
+                line.append(f"  -> {first}", style="green")
+                if "still pending" not in first and not first.startswith("Error"):
+                    self.progress.advance(self.task)
+            elif event.output.startswith("Error"):
+                line.append(f"  -> {event.output.splitlines()[0]}", style="red")
+            self.log(line)
+        elif event.kind == "step":
+            self.tokens += event.tokens
+            self.progress.update(self.task, extra=f"{self.tokens:,} tokens")
+
+    def sync(self, done: int) -> None:
+        """Re-align the bar with what the lock files actually say."""
+        self.progress.update(self.task, completed=done)
+
+
 def auto_review(
     repo_root: Path,
     units: list[Unit],
@@ -194,7 +271,7 @@ def auto_review(
     model: str,
     python: str | None,
     max_tokens: int | None,
-    log: Callable[[str], None],
+    console: Console,
     keep_scratch: bool = False,
 ) -> LoopResult:
     """Run rounds until nothing is pending, progress stalls or rounds run out.
@@ -221,26 +298,50 @@ def auto_review(
     stalled = 0
     last_message = ""
     prompt = round_prompt(base)
-    with get_opencode(box, keep_scratch=keep_scratch) as oc:
+    with (
+        get_opencode(box, keep_scratch=keep_scratch) as oc,
+        Reporter(console, total=len(before)) as reporter,
+    ):
         while rounds < max_rounds and oc.budget_left() != 0:
             rounds += 1
-            log(f"round {rounds}/{max_rounds}: {len(remaining)} model(s) pending")
-            result = oc.run_task(prompt, agent="dispatcher", timeout=ROUND_TIMEOUT)
+            reporter.log(
+                Text(
+                    f"round {rounds}/{max_rounds}: {len(remaining)} model(s) pending",
+                    style="bold",
+                )
+            )
+            result = oc.run_task(
+                prompt,
+                agent="dispatcher",
+                timeout=ROUND_TIMEOUT,
+                on_event=reporter.on_event,
+            )
             last_message = result.final_text or result.stderr_tail
             if not result.ok:
-                log(f"opencode exited {result.returncode}: {result.stderr_tail}")
+                reporter.log(
+                    Text(
+                        f"opencode exited {result.returncode}: {result.stderr_tail}",
+                        style="red",
+                    )
+                )
             now, _ = pending_models(units, knowledge, python=python)
             progressed = len(now) < len(remaining)
             remaining = now
-            log(
-                f"  -> {len(remaining)} pending, {result.tool_calls} tool calls, "
-                f"{result.tokens} tokens, ${result.cost:.4f}"
+            reporter.sync(len(before) - len(remaining))
+            reporter.log(
+                Text(
+                    f"  -> {len(remaining)} pending, {result.tool_calls} tool calls, "
+                    f"{result.tokens:,} tokens, ${result.cost:.4f}",
+                    style="dim",
+                )
             )
             if not remaining:
                 break
             stalled = 0 if progressed else stalled + 1
             if stalled >= NO_PROGRESS_LIMIT:
-                log("no progress for two rounds; stopping")
+                reporter.log(
+                    Text("no progress for two rounds; stopping", style="yellow")
+                )
                 break
             prompt = round_prompt(None)
         return LoopResult(

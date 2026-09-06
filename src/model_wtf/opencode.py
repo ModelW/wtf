@@ -31,13 +31,14 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 DEFAULT_MODEL = "openrouter/openrouter/auto"
 MIN_VERSION = (1, 18, 0)
@@ -190,6 +191,26 @@ class Sandbox:
         return config
 
 
+@dataclass(frozen=True)
+class Event:
+    """One line of the ``--format json`` stream, pre-digested for callbacks.
+
+    ``kind`` is one of ``tool`` (a tool call finished; ``tool``, ``args``,
+    ``output``), ``text`` (assistant text), ``step`` (a model step finished;
+    ``tokens``, ``cost``, ``model``) or ``other``.
+    """
+
+    kind: str
+    tool: str | None = None
+    args: dict[str, Any] = field(default_factory=dict)
+    output: str = ""
+    text: str = ""
+    tokens: int = 0
+    cost: float = 0.0
+    model: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
 @dataclass
 class TaskResult:
     """What one ``run_task`` produced."""
@@ -252,9 +273,17 @@ class OpenCode:
     # -- running -----------------------------------------------------------
 
     def run_task(
-        self, prompt: str, *, agent: str | None = None, timeout: int = 1800
+        self,
+        prompt: str,
+        *,
+        agent: str | None = None,
+        timeout: int = 1800,
+        on_event: Callable[[Event], None] | None = None,
     ) -> TaskResult:
         """Run one non-interactive session and return its digest.
+
+        ``on_event`` is called for every event as the session streams, so a
+        caller can show progress; the digest is still returned at the end.
 
         Raises
         ------
@@ -268,25 +297,36 @@ class OpenCode:
         if agent:
             argv += ["--agent", agent]
         argv.append(prompt)
-        try:
-            proc = subprocess.run(  # noqa: S603 - argv is ours
-                argv,
-                cwd=self.workdir,
-                env=self.env,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            result = TaskResult(
-                124, "", stderr_tail=f"timed out after {timeout}s: {exc}"
-            )
-            self.tasks.append(result)
-            return result
-        result = parse_events(proc.stdout)
-        result.returncode = proc.returncode
-        result.stderr_tail = "\n".join(proc.stderr.strip().splitlines()[-20:])
+        lines: list[str] = []
+        with subprocess.Popen(  # noqa: S603 - argv is ours
+            argv,
+            cwd=self.workdir,
+            env=self.env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        ) as proc:
+            assert proc.stdout is not None  # noqa: S101 - PIPE above
+            deadline = time.monotonic() + timeout
+            timed_out = False
+            for line in proc.stdout:
+                lines.append(line)
+                if on_event is not None:
+                    event = parse_event(line)
+                    if event is not None:
+                        on_event(event)
+                if time.monotonic() > deadline:
+                    proc.kill()
+                    timed_out = True
+                    break
+            stderr = proc.stderr.read() if proc.stderr else ""
+            returncode = proc.wait()
+        result = parse_events("".join(lines))
+        result.returncode = 124 if timed_out else returncode
+        tail = "\n".join(stderr.strip().splitlines()[-20:])
+        result.stderr_tail = (
+            f"timed out after {timeout}s\n{tail}" if timed_out else tail
+        )
         self._tokens += result.tokens
         self._cost += result.cost
         self._models |= result.models
@@ -370,30 +410,58 @@ def opencode_version(binary: str) -> tuple[int, ...] | None:
         return None
 
 
+def parse_event(line: str) -> Event | None:
+    """One JSON line of the stream → :class:`Event`; ``None`` for noise."""
+    line = line.strip()
+    if not line.startswith("{"):
+        return None
+    try:
+        raw = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    part = raw.get("part") or {}
+    kind = raw.get("type")
+    if kind == "text":
+        return Event("text", text=str(part.get("text", "")), raw=raw)
+    if kind == "tool_use":
+        state = part.get("state") or {}
+        output = state.get("output") or state.get("error") or ""
+        return Event(
+            "tool",
+            tool=str(part.get("tool", "")),
+            args=dict(state.get("input") or {}),
+            output=str(output),
+            raw=raw,
+        )
+    if kind == "step_finish":
+        tokens = part.get("tokens") or {}
+        model = next((str(part[k]) for k in ("model", "modelID") if part.get(k)), None)
+        return Event(
+            "step",
+            tokens=int(tokens.get("total") or 0),
+            cost=float(part.get("cost") or 0),
+            model=model,
+            raw=raw,
+        )
+    return Event("other", raw=raw)
+
+
 def parse_events(stdout: str) -> TaskResult:
-    """Digest the ``--format json`` event stream."""
+    """Digest the whole ``--format json`` event stream."""
     result = TaskResult(returncode=0, final_text="")
     texts: list[str] = []
-    for raw in stdout.splitlines():
-        line = raw.strip()
-        if not line.startswith("{"):
+    for line in stdout.splitlines():
+        event = parse_event(line)
+        if event is None:
             continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        part = event.get("part") or {}
-        kind = event.get("type")
-        if kind == "text":
-            texts.append(str(part.get("text", "")))
-        elif kind == "tool_use":
+        if event.kind == "text":
+            texts.append(event.text)
+        elif event.kind == "tool":
             result.tool_calls += 1
-        elif kind == "step_finish":
-            tokens = part.get("tokens") or {}
-            result.tokens += int(tokens.get("total") or 0)
-            result.cost += float(part.get("cost") or 0)
-            for key in ("model", "modelID"):
-                if part.get(key):
-                    result.models.add(str(part[key]))
+        elif event.kind == "step":
+            result.tokens += event.tokens
+            result.cost += event.cost
+            if event.model:
+                result.models.add(event.model)
     result.final_text = texts[-1].strip() if texts else ""
     return result
