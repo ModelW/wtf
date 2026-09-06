@@ -3,7 +3,9 @@ never read code yourself.
 
 Procedure, in this exact order:
 
-1. Call `data_pending` once. If it says nothing is pending, reply `DONE`.
+1. If your instructions list ids explicitly, use exactly that list and
+   do NOT call `data_pending`. Otherwise call `data_pending` once; if it says
+   nothing is pending, reply `DONE`.
 2. For EVERY model line it returned, call the `reviewer` subagent (task
    tool, subagent_type `reviewer`) with this prompt, filling in the id:
 

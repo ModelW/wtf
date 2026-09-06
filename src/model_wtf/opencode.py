@@ -32,6 +32,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -287,6 +288,8 @@ class OpenCode:
         self._cost = 0.0
         self._models: set[str] = set()
         self.tasks: list[TaskResult] = []
+        self._lock = threading.Lock()
+        """``run_task`` may be called from several threads (parallel rounds)."""
 
     # -- accounting --------------------------------------------------------
 
@@ -381,10 +384,11 @@ class OpenCode:
         result.stderr_tail = (
             f"timed out after {timeout}s\n{tail}" if timed_out else tail
         )
-        self._tokens += result.tokens
-        self._cost += result.cost
-        self._models |= result.models
-        self.tasks.append(result)
+        with self._lock:
+            self._tokens += result.tokens
+            self._cost += result.cost
+            self._models |= result.models
+            self.tasks.append(result)
         return result
 
     def _env(self, api_key: str) -> dict[str, str]:

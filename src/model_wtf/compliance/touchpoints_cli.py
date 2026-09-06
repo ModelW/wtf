@@ -19,12 +19,14 @@ from model_wtf.compliance.activities import (
     add_touchpoints,
     write_activity,
 )
+from model_wtf.compliance.auto_review import DEFAULT_MODEL, TOUCHPOINTS_TARGET
 from model_wtf.compliance.data import parse_full_id
-from model_wtf.compliance.data_cli import data, load_context
+from model_wtf.compliance.data_cli import data, load_context, run_auto_review
+from model_wtf.compliance.declarations import load_declarations
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.options import ROOT_OPTION
 from model_wtf.compliance.report import Severity
-from model_wtf.compliance.touchpoints import Kind, write_manifest
+from model_wtf.compliance.touchpoints import Export, Kind, write_manifest
 from model_wtf.compliance.workspace import Workspace, load_workspace
 from model_wtf.compliance.yaml_io import Todo
 from model_wtf.introspect.runner import IntrospectionFailed
@@ -247,6 +249,12 @@ def render_touchpoint(tp: Touchpoint, ws: Workspace) -> Text:
                 out.append(f"    {name}: {kind}\n")
     out.append("\n")
     _render_declared_data(out, tp, ws)
+    for export in tp.exporting:
+        out.append("  exporting to ", style="dim")
+        out.append(export.party, style="bold red")
+        if export.purpose:
+            out.append(f" ({export.purpose})", style="dim")
+        out.append(": " + (", ".join(export.data) or "no inventory item") + "\n")
     if tp.note:
         line("note", tp.note)
     acts = ws.activities.of_touchpoint(tp.full_id)
@@ -259,7 +267,7 @@ def _render_declared_data(out: Text, tp: Touchpoint, ws: Workspace) -> None:
     if tp.data is None:
         out.append("  data: not declared yet (pending)\n", style="yellow")
     elif not tp.data:
-        out.append("  data: [] — touches nothing personal\n", style="green")
+        out.append("  data: [] — touches no inventory item\n", style="green")
     else:
         out.append("  data:\n", style="dim")
         for ref in tp.data:
@@ -292,6 +300,12 @@ def _unknown_touchpoint(ref: str, ws: Workspace) -> str:
 @click.option("--add", "mode", flag_value="add", help="Append to the current list.")
 @click.option("--remove", "mode", flag_value="remove", help="Remove from the list.")
 @click.option("--ignore", is_flag=True, help="Mark the touchpoint as carrying nothing.")
+@click.option(
+    "--export",
+    "exports",
+    multiple=True,
+    help="party=ref,ref[;purpose] — data sent to an external party; repeatable.",
+)
 @click.option("--note", default=None, help="One line on what was looked at.")
 @PYTHON_OPTION
 @ROOT_OPTION
@@ -303,6 +317,7 @@ def tp_set_data(
     refs: tuple[str, ...],
     mode: str | None,
     ignore: bool,
+    exports: tuple[str, ...],
     note: str | None,
     python: str | None,
     root: Path | None,
@@ -312,7 +327,7 @@ def tp_set_data(
     REFS are ``<unit>:<app.Model.field>`` data ids (``@json``/``@files`` rows
     allowed; a ref without unit means the touchpoint's unit). ``ref=write``
     or ``ref=read`` sets the direction. No REF at all declares an empty list:
-    "touches nothing personal, checked".
+    "touches no inventory item, checked".
     """
     console = Console()
     ws = workspace_or_exit(ctx, root, python=python)
@@ -346,11 +361,131 @@ def tp_set_data(
     else:
         final = wanted
     direction = {k: v for k, v in direction.items() if k in final}
+    parties = set(load_declarations(ws.shared).parties)
+    exporting = list(tp.exporting) if mode in ("add", "remove") else []
+    for raw in exports:
+        exporting.append(_parse_export(raw, tp.unit, ws, parties))
     path = write_manifest(
-        unit, tp, final, direction=direction, note=note or tp.note, ignore=ignore
+        unit,
+        tp,
+        final,
+        direction=direction,
+        exporting=exporting,
+        note=note or tp.note,
+        ignore=ignore,
     )
     console.print(Text.assemble(("wrote", "green"), "  ", str(path)))
     ctx.exit(0)
+
+
+@touchpoints.command("auto-review")
+@click.option("--unit", "only", default=None, help="Restrict to one unit.")
+@click.option("--max-rounds", default=20, show_default=True, type=int)
+@click.option(
+    "--batch", default=8, show_default=True, type=int, help="Touchpoints per round."
+)
+@click.option(
+    "--model", default=DEFAULT_MODEL, show_default=True, help="provider/model."
+)
+@click.option(
+    "--max-tokens",
+    default=None,
+    type=int,
+    help="Stop starting new rounds once this many tokens were used.",
+)
+@click.option(
+    "--group/--no-group",
+    default=True,
+    show_default=True,
+    help="Group PII-touching touchpoints into activities once nothing is pending.",
+)
+@click.option(
+    "--group-only",
+    is_flag=True,
+    help="Skip the per-touchpoint pass; only run the grouping session.",
+)
+@click.option(
+    "--workers",
+    default=16,
+    show_default=True,
+    type=click.IntRange(1, 32),
+    help="Parallel OpenCode sessions per round, each reviewing --batch touchpoints.",
+)
+@click.option("--keep-scratch", is_flag=True, hidden=True)
+@PYTHON_OPTION
+@ROOT_OPTION
+@click.pass_context
+def tp_auto_review(
+    ctx: click.Context,
+    *,
+    only: str | None,
+    max_rounds: int,
+    batch: int,
+    model: str,
+    max_tokens: int | None,
+    group: bool,
+    group_only: bool,
+    workers: int,
+    keep_scratch: bool,
+    python: str | None,
+    root: Path | None,
+) -> None:
+    """Have an OpenCode agent declare what each touchpoint handles, then group.
+
+    Pass 1 reviews pending touchpoints one at a time (reading the view or
+    task code, referencing inventory items, adding transient manual items
+    when the code handles personal data that is never persisted). Pass 2,
+    once nothing is pending, groups every PII-touching touchpoint into
+    processing activities following the front -> api -> task edges; fields
+    the agent cannot know stay `!todo`. Same sandbox and exit codes as
+    `data auto-review`.
+    """
+    resolved, units, knowledge = load_context(root)
+    if only is not None:
+        units = [u for u in units if u.id == only]
+        if not units:
+            msg = f"unknown unit {only!r}"
+            raise click.ClickException(msg)
+    run_auto_review(
+        ctx,
+        resolved,
+        units,
+        knowledge,
+        base=None,
+        max_rounds=0 if group_only else max_rounds,
+        batch=batch,
+        model=model,
+        python=python,
+        max_tokens=max_tokens,
+        keep_scratch=keep_scratch,
+        target=TOUCHPOINTS_TARGET,
+        group=group or group_only,
+        workers=workers,
+    )
+
+
+def _parse_export(raw: str, unit_id: str, ws: Workspace, parties: set[str]) -> Export:
+    """``mapbox=geo.Address.position,geo.Address.text;geocoding`` → :class:`Export`."""
+    spec, _, purpose = raw.partition(";")
+    party, sep, refs_text = spec.partition("=")
+    if not sep or not party:
+        msg = f"{raw!r}: expected party=ref,ref[;purpose]"
+        raise click.UsageError(msg)
+    if party not in parties:
+        known = ", ".join(sorted(parties)) or "none"
+        msg = (
+            f"unknown party {party!r}; known: {known} "
+            f"(add compliance/parties/{party}.yaml)"
+        )
+        raise click.UsageError(msg)
+    refs = []
+    for ref in filter(None, (r.strip() for r in refs_text.split(","))):
+        full = ref if ":" in ref else f"{unit_id}:{ref}"
+        if full not in ws.rows:
+            msg = f"{raw!r}: no data item {full!r}"
+            raise click.UsageError(msg)
+        refs.append(full)
+    return Export(party=party, data=refs, purpose=purpose.strip() or None)
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +583,9 @@ def act_explain(
     ctx.exit(0)
 
 
-def render_activity(a: Activity, ws: Workspace) -> Text:
+def render_activity(  # noqa: C901 - one block per section
+    a: Activity, ws: Workspace
+) -> Text:
     """Multi-line description of one activity (also used by the MCP tool)."""
     out = Text.assemble((a.slug, "bold"), "  ", _text(a.spec.name), "\n")
     spec = a.spec
@@ -483,6 +620,10 @@ def render_activity(a: Activity, ws: Workspace) -> Text:
     out.append(f"    categories: {', '.join(d.categories) or '-'}\n")
     out.append(f"    max sensitivity: {d.max_sensitivity or '-'}\n")
     out.append(f"    dpia: {d.dpia.value if d.dpia else '-'}\n")
+    if d.recipients:
+        out.append("    recipients (from exports):\n")
+        for party, refs in d.recipients.items():
+            out.append(f"      {party}: {', '.join(refs)}\n")
     out.append(f"    data ({len(d.pii_data)} personal of {len(d.data)}):\n")
     for ref in d.data:
         row = ws.rows.get(ref)

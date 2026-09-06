@@ -13,8 +13,10 @@ from rich.table import Table
 from rich.text import Text
 
 from model_wtf.compliance.auto_review import (
+    DATA_TARGET,
     DEFAULT_MODEL,
     OpenCodeUnavailable,
+    Target,
     auto_review,
     pending_models,
     sandbox,
@@ -455,6 +457,13 @@ def reviewed_cmd(
     help="Stop starting new rounds once this many tokens were used.",
 )
 @click.option(
+    "--workers",
+    default=16,
+    show_default=True,
+    type=click.IntRange(1, 32),
+    help="Parallel OpenCode sessions per round, each reviewing --batch items.",
+)
+@click.option(
     "--dry-run", is_flag=True, help="Print the generated OpenCode config and stop."
 )
 @click.option("--keep-scratch", is_flag=True, hidden=True)
@@ -470,6 +479,7 @@ def auto_review_cmd(
     model: str,
     python: str | None,
     max_tokens: int | None,
+    workers: int,
     dry_run: bool,
     keep_scratch: bool,
     root: Path | None,
@@ -481,7 +491,6 @@ def auto_review_cmd(
     OpenRouter, in rounds, until nothing is pending. Exit 0 when complete,
     1 when items remain, 4 when OpenCode or OPENROUTER_API_KEY is missing.
     """
-    console = Console()
     resolved, units, knowledge = load_context(root)
     if only is not None:
         units = [u for u in units if u.id == only]
@@ -500,6 +509,41 @@ def auto_review_cmd(
         )
         click.echo(json.dumps(box.to_config(), indent=2))
         ctx.exit(0)
+    run_auto_review(
+        ctx,
+        resolved,
+        units,
+        knowledge,
+        base=base,
+        max_rounds=max_rounds,
+        batch=batch,
+        model=model,
+        python=python,
+        max_tokens=max_tokens,
+        keep_scratch=keep_scratch,
+        workers=workers,
+    )
+
+
+def run_auto_review(
+    ctx: click.Context,
+    resolved: Path,
+    units: list[Unit],
+    knowledge: Knowledge,
+    *,
+    base: str | None,
+    max_rounds: int,
+    batch: int,
+    model: str,
+    python: str | None,
+    max_tokens: int | None,
+    keep_scratch: bool,
+    target: Target = DATA_TARGET,
+    group: bool = False,
+    workers: int = 1,
+) -> None:
+    """Run the loop, print the summary, exit with the right code (shared CLI tail)."""
+    console = Console()
     try:
         result = auto_review(
             resolved,
@@ -513,6 +557,9 @@ def auto_review_cmd(
             max_tokens=max_tokens,
             console=console,
             keep_scratch=keep_scratch,
+            target=target,
+            group=group,
+            workers=workers,
         )
     except OpenCodeUnavailable as exc:
         Console(stderr=True).print(Text.assemble(("Tool error: ", "red"), str(exc)))

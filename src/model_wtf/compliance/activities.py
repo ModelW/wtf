@@ -86,6 +86,9 @@ class Derived:
     units: list[str] = field(default_factory=list)
     max_sensitivity: str | None = None
     dpia: Dpia | None = None
+    recipients: dict[str, list[str]] = field(default_factory=dict)
+    """Party id → data items exported to it by the touchpoints (derived, on
+    top of the declared ``recipients`` list)."""
 
 
 @dataclass
@@ -121,6 +124,7 @@ class Activity:
                 "units": self.derived.units,
                 "max_sensitivity": self.derived.max_sensitivity,
                 "dpia": self.derived.dpia.value if self.derived.dpia else None,
+                "recipients": self.derived.recipients,
             },
         }
 
@@ -213,8 +217,12 @@ def derive(
 ) -> Derived:
     """Union of the touchpoints' data, then the register-level aggregates."""
     refs: set[str] = set()
+    recipients: dict[str, set[str]] = {}
     for tp in touchpoints:
         refs.update(tp.data or ())
+        for export in tp.exporting:
+            recipients.setdefault(export.party, set()).update(export.data)
+            refs.update(export.data)
     items = [rows[r] for r in sorted(refs) if r in rows]
     pii = [r.full_id for r in items if r.pii]
     categories = sorted(
@@ -235,6 +243,7 @@ def derive(
         units=sorted({tp.unit for tp in touchpoints}),
         max_sensitivity=level,
         dpia=dpia,
+        recipients={k: sorted(v) for k, v in sorted(recipients.items())},
     )
 
 

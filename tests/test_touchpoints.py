@@ -64,6 +64,11 @@ def repo(make_repo: MakeRepo, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
+def folder_of_tp(root: Path) -> Path:
+    """The ``api`` unit's touchpoints folder."""
+    return root / "api" / "compliance" / "touchpoints"
+
+
 def _units(root: Path) -> list[Unit]:
     return [
         Unit("api", root / "api" / "compliance", "django", root / "api"),
@@ -170,9 +175,8 @@ def test_manifests_and_reference_checks(repo: Path) -> None:
     folder = repo / "api" / "compliance" / "touchpoints"
     folder.mkdir(parents=True)
     (folder / "checkout.yaml").write_text(
-        "data:\n  - shop.Customer.email\n  - api:shop.Order.total\n"
+        "data:\n  - shop.Customer.email: write\n  - api:shop.Order.total\n"
         "  - shop.Customer.nope\n  - other:shop.Customer.email\n"
-        "direction:\n  shop.Customer.email: write\n"
     )
     (folder / "whealth_recap.yaml").write_text("ignore: true\n")
     (folder / "getCustomer.yaml").write_text("data: []\n")
@@ -302,8 +306,7 @@ def test_cli_touchpoints_activities_why(repo: Path) -> None:
     assert set_ok.exit_code == 0, set_ok.output
     manifest = repo / "api" / "compliance" / "touchpoints" / "checkout.yaml"
     assert manifest.read_text() == (
-        "data:\n  - api:shop.Customer.email\n  - api:shop.Customer.iban\n"
-        "direction:\n  api:shop.Customer.email: write\n"
+        "data:\n  - api:shop.Customer.email: write\n  - api:shop.Customer.iban\n"
         "note: api.py:24\n"
     )
     added = runner.invoke(
@@ -407,3 +410,247 @@ def test_mcp_read_tools(repo: Path) -> None:
     )
     with pytest.raises(ValueError, match="no data item"):
         tools.data_why("api:shop.Customer.nope")
+
+
+# ---------------------------------------------------------------------------
+# MCP write tools (what the agent calls) and the loop
+# ---------------------------------------------------------------------------
+
+
+def test_mcp_touchpoint_write_tools(repo: Path) -> None:
+    from model_wtf.compliance.mcp_server import DataRef
+
+    tools = Tools(repo)
+
+    found = tools.data_search("customer.email", "api")
+    assert "api:shop.Customer.email | pii=yes" in found
+    assert "no data item matches" in tools.data_search("zzzz")
+
+    with pytest.raises(ValueError, match="lowercase"):
+        tools.data_add_manual("api", "Bad Id", "d", True, "personal", "financial", "r")
+    with pytest.raises(ValueError, match="unknown sensitivity"):
+        tools.data_add_manual(
+            "api", "checkout.card", "d", True, "top", "financial", "r"
+        )
+    created = tools.data_add_manual(
+        "api",
+        "checkout.card_number",
+        "Card number forwarded to the PSP, never stored",
+        True,
+        "confidential",
+        "financial",
+        "api.py:22 forwards payload.card to stripe",
+    )
+    assert "created api:checkout.card_number" in created
+    with pytest.raises(ValueError, match="already exists"):
+        tools.data_add_manual(
+            "api", "checkout.card_number", "d", True, "confidential", "financial", "r"
+        )
+    manual = repo / "api" / "compliance" / "data" / "checkout.card_number.yaml"
+    assert "description:" in manual.read_text()
+    assert "api:checkout.card_number" in tools.data_search("card_number")
+
+    bad = tools.touchpoint_set_data(
+        "api:checkout", [DataRef(ref="shop.Customer.emaill")], reason="x"
+    )
+    assert bad.startswith("Error: nothing written")
+    assert "did you mean api:shop.Customer.email" in bad
+    with pytest.raises(ValueError, match="ignored"):
+        tools.touchpoint_set_data("api:whealth_recap", [], reason="x")
+    with pytest.raises(ValueError, match="reason"):
+        tools.touchpoint_set_data("api:checkout", [], reason="  ")
+    ok = tools.touchpoint_set_data(
+        "api:checkout",
+        [
+            DataRef(ref="shop.Customer.email", direction="write"),
+            DataRef(ref="api:checkout.card_number"),
+        ],
+        reason="api.py:22-30",
+    )
+    assert "2 data item(s) declared" in ok
+    manifest = repo / "api" / "compliance" / "touchpoints" / "checkout.yaml"
+    assert manifest.read_text() == (
+        "data:\n  - api:shop.Customer.email: write\n  - api:checkout.card_number\n"
+        "note: api.py:22-30\n"
+    )
+    empty = tools.touchpoint_set_data("api:getCustomer", [], reason="returns ids only")
+    assert "0 data item(s)" in empty
+    assert "api:checkout" not in tools.touchpoint_pending()
+
+    graph = tools.activities_graph()
+    assert "api:checkout | route | 2 items, 2 personal (contact, financial)" in graph
+    assert "defers send_receipt" in graph
+    assert "activities: NONE" in graph
+
+    with pytest.raises(ValueError, match="kebab"):
+        tools.activity_create("Bad Slug", "n", "p", ["api:checkout"], "r")
+    with pytest.raises(ValueError, match="unknown legal_basis"):
+        tools.activity_create("x", "n", "p", ["api:checkout"], "r", legal_basis="vibes")
+    with pytest.raises(ValueError, match="unknown touchpoints"):
+        tools.activity_create("x", "n", "p", ["api:nope"], "r")
+    made = tools.activity_create(
+        "ordering",
+        "Ordering",
+        "Take orders",
+        ["api:checkout"],
+        "chain checkout -> send_receipt",
+        legal_basis="contract",
+        data_subjects=["customers"],
+    )
+    assert "created activity ordering" in made
+    with pytest.raises(ValueError, match="exists"):
+        tools.activity_create("ordering", "n", "p", ["api:checkout"], "r")
+    added = tools.activity_add_touchpoints("ordering", ["api:task:shop.send_receipt"])
+    assert "1 touchpoint(s) added" in added
+    with pytest.raises(ValueError, match="no activity"):
+        tools.activity_add_touchpoints("nope", ["api:checkout"])
+    text = (repo / "compliance" / "activities" / "ordering.yaml").read_text()
+    assert "legal_basis: contract" in text
+    assert "retention: !todo" in text
+    assert "api:task:shop.send_receipt" in text
+    assert "activities: NONE" not in tools.activities_graph()
+    assert "ordering | Take orders | 2 touchpoints" in tools.activities_list()
+    assert "held by 1 activity" in tools.data_why("api:shop.Customer.email")
+
+
+def test_touchpoint_targets_and_orphans(repo: Path) -> None:
+    from model_wtf.compliance.auto_review import (
+        TOUCHPOINTS_TARGET,
+        orphan_touchpoints,
+        pending_touchpoints,
+    )
+
+    units = _units(repo)
+    knowledge = load_knowledge(None)
+    pending, roots = pending_touchpoints(repo, units, knowledge, python=None)
+    assert "api:checkout" in pending
+    assert "api:whealth_recap" not in pending
+    assert roots
+    assert TOUCHPOINTS_TARGET.dispatcher == "tp_dispatcher"
+    assert TOUCHPOINTS_TARGET.closing_tool == "touchpoint_set_data"
+    assert orphan_touchpoints(repo, units, knowledge, python=None) == []
+
+    folder = repo / "api" / "compliance" / "touchpoints"
+    folder.mkdir(parents=True)
+    (folder / "checkout.yaml").write_text("data: [shop.Customer.email]\n")
+    (folder / "getCustomer.yaml").write_text("data: []\n")
+    assert orphan_touchpoints(repo, units, knowledge, python=None) == ["api:checkout"]
+
+
+def test_touchpoints_auto_review_cli_dry_paths(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without opencode the command fails cleanly with exit 4."""
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("PATH", str(repo))
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "compliance",
+            "touchpoints",
+            "auto-review",
+            "--root",
+            str(repo),
+            "--unit",
+            "api",
+        ],
+    )
+    assert result.exit_code == 4, result.output
+    assert "opencode" in result.output or "OPENROUTER" in result.output
+    bad_unit = runner.invoke(
+        cli,
+        [
+            "compliance",
+            "touchpoints",
+            "auto-review",
+            "--root",
+            str(repo),
+            "--unit",
+            "x",
+        ],
+    )
+    assert bad_unit.exit_code == 1
+
+
+def test_exports_and_parties(repo: Path) -> None:
+    from model_wtf.compliance.mcp_server import DataRef, ExportDecision
+
+    tools = Tools(repo)
+    assert "acme | " in tools.parties_list()
+
+    with pytest.raises(ValueError, match="kebab"):
+        tools.party_add("Map Box", "Mapbox")
+    with pytest.raises(ValueError, match="alpha-2"):
+        tools.party_add("mapbox", "Mapbox", country="usa")
+    made = tools.party_add("mapbox", "Mapbox, Inc.", website="https://mapbox.com")
+    assert "created party mapbox" in made
+    party = repo / "compliance" / "parties" / "mapbox.yaml"
+    assert "address: !todo" in party.read_text()
+    assert 'website: "https://mapbox.com"' in party.read_text()
+    assert "already exists" in tools.party_add("mapbox", "Mapbox")
+
+    unknown_party = tools.touchpoint_set_data(
+        "api:checkout",
+        [DataRef(ref="shop.Customer.email")],
+        reason="x",
+        exporting=[ExportDecision(party="stripe", data=["shop.Customer.iban"])],
+    )
+    assert "party 'stripe' is not declared" in unknown_party
+    ok = tools.touchpoint_set_data(
+        "api:checkout",
+        [DataRef(ref="shop.Customer.email")],
+        reason="api.py:22",
+        exporting=[
+            ExportDecision(
+                party="mapbox", data=["shop.Customer.phone"], purpose="geocoding"
+            )
+        ],
+    )
+    assert "exporting to 1 party" in ok
+    manifest = repo / "api" / "compliance" / "touchpoints" / "checkout.yaml"
+    assert manifest.read_text() == (
+        "data:\n  - api:shop.Customer.email\n"
+        "exporting:\n  - party: mapbox\n    data: [api:shop.Customer.phone]\n"
+        "    purpose: geocoding\n"
+        "note: api.py:22\n"
+    )
+    shown = tools.touchpoint_show("api:checkout")
+    assert "exporting to mapbox (geocoding): api:shop.Customer.phone" in shown
+
+    tools.activity_create("ordering", "Ordering", "p", ["api:checkout"], "r")
+    ws = _ws(repo)
+    ordering = ws.activities.items["ordering"]
+    assert ordering.derived.recipients == {"mapbox": ["api:shop.Customer.phone"]}
+    # Exported items count as handled by the activity even if not in `data`.
+    assert "api:shop.Customer.phone" in ordering.derived.data
+
+    # A manifest naming an undeclared party is a declaration error.
+    manifest.write_text(
+        "data: []\nexporting:\n  - party: ghost\n    data: [shop.Customer.email]\n"
+    )
+    ws = _ws(repo)
+    codes = [d.code for d in ws.touchpoints["api"].diagnostics]
+    assert "party-unknown" in codes
+
+    runner = CliRunner()
+    root = ["--root", str(repo)]
+    set_data = ["compliance", "touchpoints", "set-data", "api:getCustomer", *root]
+    bad = runner.invoke(cli, [*set_data, "--export", "nope=shop.Customer.email"])
+    assert bad.exit_code == 2
+    assert "unknown party" in bad.output
+    good = runner.invoke(
+        cli,
+        [
+            *set_data,
+            "shop.Customer.email",
+            "--export",
+            "mapbox=shop.Customer.email;lookup",
+        ],
+    )
+    assert good.exit_code == 0, good.output
+    text = (
+        repo / "api" / "compliance" / "touchpoints" / "getCustomer.yaml"
+    ).read_text()
+    assert "party: mapbox" in text
+    assert "purpose: lookup" in text
