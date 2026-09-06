@@ -44,6 +44,7 @@ from model_wtf.compliance.data import (
 from model_wtf.compliance.discovery import find_repo_root, load_units, select_manifest
 from model_wtf.compliance.knowledge import Knowledge, load_knowledge
 from model_wtf.compliance.review import Lock
+from model_wtf.compliance.workspace import Workspace, load_workspace
 from model_wtf.compliance.yaml_io import todo_text
 from model_wtf.introspect.runner import IntrospectionFailed
 
@@ -144,6 +145,7 @@ class Tools:
         self.units: list[Unit] = load_units(manifest, root, strict=False)[0]
         self.knowledge: Knowledge = load_knowledge(root / SHARED_FOLDER)
         self._data: dict[str, UnitData] = {}
+        self._workspace: Workspace | None = None
 
     # -- lookups -----------------------------------------------------------
 
@@ -299,6 +301,70 @@ class Tools:
                 backend = store.backend or "-"
                 lines.append(f"{unit.id}:{store.slug} | {store.type.value} | {backend}")
         return "\n".join(lines) or "no store found"
+
+    # -- touchpoints & activities (read-only here; writes come with KFF-201) --
+
+    def workspace(self, *, refresh: bool = False) -> Workspace:
+        """The cross-linked workspace, built on first use."""
+        if refresh or self._workspace is None:
+            self._workspace = load_workspace(self.root, self.units, self.knowledge)
+        return self._workspace
+
+    def touchpoint_pending(self, unit_id: str | None = None) -> str:
+        """``touchpoint_pending``: touchpoints without a data declaration."""
+        ws = self.workspace()
+        lines = [
+            f"{t.full_id} | {t.facts.kind.value} | {t.facts.framework or '-'} | "
+            f"{len(t.facts.request) + len(t.facts.response) + len(t.facts.data)} "
+            "fields"
+            for t in ws.all_touchpoints.values()
+            if t.pending and not t.ignore and (unit_id is None or t.unit == unit_id)
+        ]
+        if not lines:
+            return "Nothing pending. Every touchpoint declares its data."
+        shown = lines[: self.batch]
+        more = (
+            f"\n... {len(lines) - len(shown)} more" if len(lines) > len(shown) else ""
+        )
+        return (
+            f"{len(lines)} pending (showing {len(shown)}):\n" + "\n".join(shown) + more
+        )
+
+    def touchpoint_show(self, ref: str) -> str:
+        """``touchpoint_show``: facts, schemas, manifest and activities."""
+        from model_wtf.compliance.touchpoints_cli import render_touchpoint
+
+        ws = self.workspace()
+        tp = ws.all_touchpoints.get(ref)
+        if tp is None:
+            msg = f"no touchpoint {ref!r}; call touchpoint_pending for ids"
+            raise ValueError(msg)
+        return render_touchpoint(tp, ws).plain
+
+    def activities_list(self) -> str:
+        """``activities_list``: one line per activity with its derivation."""
+        ws = self.workspace()
+        if not ws.activities.items:
+            return "No activity declared yet."
+        lines = []
+        for a in ws.activities.items.values():
+            purpose = a.spec.purpose if isinstance(a.spec.purpose, str) else "!todo"
+            lines.append(
+                f"{a.slug} | {purpose} | {len(a.touchpoints)} touchpoints | "
+                f"{len(a.derived.pii_data)} personal items | "
+                f"{', '.join(a.derived.categories) or '-'}"
+            )
+        return "\n".join(lines)
+
+    def data_why(self, ref: str) -> str:
+        """``data_why``: who handles and who holds one data item."""
+        from model_wtf.compliance.touchpoints_cli import render_why, why
+
+        ws = self.workspace()
+        if ref not in ws.rows:
+            msg = f"no data item {ref!r}; data_model shows the ids of a model"
+            raise ValueError(msg)
+        return render_why(why(ref, ws), ws, manifests=False).plain
 
     def review_model(self, ref_text: str, decisions: list[Decision], note: str) -> str:
         """``data_review_model``: record every decision for one model."""
@@ -539,6 +605,45 @@ def build_server(root: Path, *, batch: int = DEFAULT_BATCH) -> MCPServer:
     )
     def stores_list(unit: str | None = None) -> str:
         return _guard(lambda: tools.stores(unit))
+
+    @server.tool(
+        name="touchpoint_pending",
+        description=(
+            "Touchpoints (routes, tasks, admin screens) that do not declare the "
+            "data they handle yet. One line each: `unit:id | kind | framework | N "
+            "fields`."
+        ),
+    )
+    def touchpoint_pending(unit: str | None = None) -> str:
+        return _guard(lambda: tools.touchpoint_pending(unit))
+
+    @server.tool(
+        name="touchpoint_show",
+        description=(
+            "Everything known about one touchpoint: code location, auth, request/"
+            "response or page-data shapes, the API operations it calls, the data "
+            "it declares and the activities holding it."
+        ),
+    )
+    def touchpoint_show(touchpoint: str) -> str:
+        return _guard(lambda: tools.touchpoint_show(touchpoint))
+
+    @server.tool(
+        name="activities_list",
+        description="The GDPR processing activities declared, with what they derive.",
+    )
+    def activities_list() -> str:
+        return _guard(tools.activities_list)
+
+    @server.tool(
+        name="data_why",
+        description=(
+            "For one data item (unit:id): the touchpoints handling it and the "
+            "activities holding it, or that nobody declares it."
+        ),
+    )
+    def data_why(item: str) -> str:
+        return _guard(lambda: tools.data_why(item))
 
     return server
 

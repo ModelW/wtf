@@ -26,6 +26,9 @@ class Severity(StrEnum):
     time, so renderers never need to know about strictness.
     """
 
+    INFO = "info"
+    """Worth knowing, never a finding."""
+
     WARNING = "warning"
     ERROR = "error"
 

@@ -21,6 +21,7 @@ from model_wtf.compliance.init_cmd import (
 from model_wtf.compliance.options import ROOT_OPTION, resolve_root
 from model_wtf.compliance.render import render_github, render_json, render_text
 from model_wtf.compliance.stores_cli import stores
+from model_wtf.compliance.touchpoints_cli import activities, touchpoints
 
 
 @click.group()
@@ -30,6 +31,8 @@ def compliance() -> None:
 
 compliance.add_command(data)
 compliance.add_command(stores)
+compliance.add_command(touchpoints)
+compliance.add_command(activities)
 
 
 @compliance.command()

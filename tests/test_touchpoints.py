@@ -1,0 +1,409 @@
+"""Touchpoints, activities and `data why`: introspection, manifests, derivation."""
+
+from __future__ import annotations
+
+import json
+import shutil
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+import pytest
+from click.testing import CliRunner
+
+from conftest import FILES_ALL_OK
+from model_wtf.cli import cli
+from model_wtf.compliance.check import run_check
+from model_wtf.compliance.exit_codes import ExitCode
+from model_wtf.compliance.knowledge import load_knowledge
+from model_wtf.compliance.mcp_server import Tools
+from model_wtf.compliance.report import Unit
+from model_wtf.compliance.touchpoints import slugify
+from model_wtf.compliance.workspace import load_workspace
+from model_wtf.introspect.runner import run_node_script
+
+if TYPE_CHECKING:
+    from conftest import MakeRepo
+
+FIXTURES = Path(__file__).parent / "fixtures"
+SNOW_BOTH = """
+images:
+  - id: api
+    context: api
+    compliance:
+      discover: django
+  - id: front
+    context: front
+    compliance:
+      discover: sveltekit
+"""
+HAS_NODE = (
+    shutil.which("node") is not None
+    and (FIXTURES / "skproj" / "node_modules" / "typescript").is_dir()
+)
+
+
+@pytest.fixture
+def repo(make_repo: MakeRepo, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Django fixture as ``api`` and, when node is available, SvelteKit as ``front``."""
+    root = make_repo(snow=SNOW_BOTH, files=FILES_ALL_OK)
+    shutil.copytree(FIXTURES / "djproj", root / "api", dirs_exist_ok=True)
+    (root / "front").mkdir(exist_ok=True)
+    (root / "front" / "compliance").mkdir(exist_ok=True)
+    if HAS_NODE:
+        src = FIXTURES / "skproj"
+        for name in ("package.json", "svelte.config.js", "tsconfig.json", "src"):
+            target = root / "front" / name
+            if (src / name).is_dir():
+                shutil.copytree(src / name, target)
+            else:
+                shutil.copy(src / name, target)
+        (root / "front" / "node_modules").symlink_to(src / "node_modules")
+    monkeypatch.setenv("MODEL_WTF_PYTHON", sys.executable)
+    monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
+    return root
+
+
+def _units(root: Path) -> list[Unit]:
+    return [
+        Unit("api", root / "api" / "compliance", "django", root / "api"),
+        Unit("front", root / "front" / "compliance", "sveltekit", root / "front"),
+    ]
+
+
+def _ws(root: Path):
+    return load_workspace(root, _units(root), load_knowledge(None))
+
+
+def test_django_touchpoints_introspected(repo: Path) -> None:
+    ws = _ws(repo)
+    tps = ws.touchpoints["api"]
+    ids = {t.id for t in tps.items}
+    assert {"checkout", "getCustomer", "contact", "task:shop.send_receipt"} <= ids
+    assert {"task:shop.purge_carts", "admin:shop.Customer"} <= ids
+
+    checkout = tps.get("checkout")
+    assert checkout is not None
+    assert checkout.facts.framework == "ninja"
+    assert checkout.facts.methods == ["POST"]
+    assert checkout.facts.request == {
+        "cart_id": "string(uuid)",
+        "email": "string",
+        "delivery_instructions": "string",
+    }
+    assert checkout.facts.response == {"reference": "string", "total": "string"}
+    assert checkout.facts.defers == ["send_receipt"]
+    assert checkout.location(repo) == "api/shop/api.py:22"
+    assert checkout.pending is True
+
+    customer = tps.get("getCustomer")
+    assert customer is not None
+    assert customer.facts.request == {"{}customer_id": "integer", "?verbose": "boolean"}
+
+    contact = tps.get("contact")
+    assert contact is not None
+    assert (contact.facts.framework, contact.facts.request) == (
+        "form",
+        {"email": "EmailField", "message": "CharField"},
+    )
+
+    purge = tps.get("task:shop.purge_carts")
+    assert purge is not None
+    assert purge.facts.periodic is True
+    receipt = tps.get("task:shop.send_receipt")
+    assert receipt is not None
+    assert receipt.facts.request == {"order_id": "int"}
+
+    admin = tps.get("admin:shop.Customer")
+    assert admin is not None
+    assert admin.facts.request["iban"] == "readonly_fields"
+    assert admin.facts.request["email"] == "list_display"
+
+    # Plumbing is hidden by default; the health check pattern as well.
+    hidden = {t.id for t in tps.items if t.ignore}
+    assert "whealth_recap" in hidden
+    assert any(h.startswith("admin:") and "_" in h for h in hidden)
+    assert "admin:shop.Customer" not in hidden
+
+
+@pytest.mark.skipif(not HAS_NODE, reason="node + fixture node_modules needed")
+def test_sveltekit_touchpoints_and_call_linking(repo: Path) -> None:
+    ws = _ws(repo)
+    front = ws.touchpoints["front"]
+    ids = {t.id for t in front.items}
+    assert {"/", "/contact", "/orders/[id]"} <= ids
+
+    order = front.get("/orders/[id]")
+    assert order is not None
+    assert order.facts.params == ["id"]
+    assert order.facts.data == {
+        "order.reference": "string",
+        "order.customerEmail": "string",
+        "order.total": "number",
+    }
+    # No api touchpoint named getOrder in the Django fixture: kept verbatim.
+    assert order.calls == ("getOrder",)
+
+    contact = front.get("/contact")
+    assert contact is not None
+    assert contact.facts.actions == ["send"]
+    assert contact.facts.form_fields == ["email", "message"]
+    assert contact.facts.fetches == ["/back/api/contact"]
+    assert contact.facts.action_data == {"sent": "boolean"}
+
+    layout = front.get("/")
+    assert layout is not None
+    assert layout.facts.layout_only is True
+    assert layout.facts.data == {}
+
+
+@pytest.mark.skipif(not HAS_NODE, reason="node needed")
+def test_run_node_script_requires_node_modules(tmp_path: Path) -> None:
+    from model_wtf.introspect.runner import IntrospectionUnavailable
+
+    (tmp_path / "package.json").write_text("{}")
+    with pytest.raises(IntrospectionUnavailable, match="node_modules"):
+        run_node_script(tmp_path, "sveltekit_touchpoints.mjs")
+
+
+def test_manifests_and_reference_checks(repo: Path) -> None:
+    folder = repo / "api" / "compliance" / "touchpoints"
+    folder.mkdir(parents=True)
+    (folder / "checkout.yaml").write_text(
+        "data:\n  - shop.Customer.email\n  - api:shop.Order.total\n"
+        "  - shop.Customer.nope\n  - other:shop.Customer.email\n"
+        "direction:\n  shop.Customer.email: write\n"
+    )
+    (folder / "whealth_recap.yaml").write_text("ignore: true\n")
+    (folder / "getCustomer.yaml").write_text("data: []\n")
+    (folder / "ghost.yaml").write_text("data: []\n")
+    (folder / "contact.yaml").write_text("data: []\ncolour: red\n")
+
+    ws = _ws(repo)
+    tps = ws.touchpoints["api"]
+    checkout = tps.get("checkout")
+    assert checkout is not None
+    assert checkout.data == ("api:shop.Customer.email", "api:shop.Order.total")
+    assert checkout.direction == {"api:shop.Customer.email": "write"}
+    assert checkout.pending is False
+    assert tps.get("getCustomer").pending is False  # type: ignore[union-attr]
+    codes = sorted(d.code for d in tps.diagnostics)
+    assert codes == [
+        "data-ref-unknown",
+        "data-ref-unknown-unit",
+        "schema-error",
+        "touchpoint-orphan-manifest",
+    ]
+    assert slugify("/kitchen/[restaurant_uuid]") == "kitchen__[restaurant_uuid]"
+    assert slugify("/") == "__root__"
+    assert slugify("admin:orders.Order") == "admin__orders.Order"
+
+
+def test_activities_derivation_and_check(repo: Path) -> None:
+    folder = repo / "api" / "compliance" / "touchpoints"
+    folder.mkdir(parents=True)
+    (folder / "checkout.yaml").write_text(
+        "data:\n  - shop.Customer.email\n  - shop.Customer.iban\n  - shop.Order.total\n"
+    )
+    (folder / "task__shop.send_receipt.yaml").write_text(
+        "data:\n  - shop.Customer.email\n"
+    )
+    (folder / "admin__shop.Customer.yaml").write_text(
+        "data:\n  - shop.Customer.email\n  - shop.Customer.phone\n"
+    )
+    acts = repo / "compliance" / "activities"
+    acts.mkdir()
+    (acts / "ordering.yaml").write_text(
+        "name: Ordering\npurpose: Take and deliver orders\nlegal_basis: contract\n"
+        "data_subjects: [customers]\n"
+        "touchpoints: [api:checkout, api:task:shop.send_receipt, api:ghost]\n"
+        "recipients: [stripe]\nretention: !todo\n"
+    )
+
+    ws = _ws(repo)
+    ordering = ws.activities.items["ordering"]
+    assert [t.id for t in ordering.touchpoints] == [
+        "checkout",
+        "task:shop.send_receipt",
+    ]
+    d = ordering.derived
+    assert d.data == [
+        "api:shop.Customer.email",
+        "api:shop.Customer.iban",
+        "api:shop.Order.total",
+    ]
+    # ``total`` is financial data tied to a person: personal by the rules.
+    assert d.pii_data == d.data
+    assert d.categories == ["contact", "financial"]
+    assert d.stores == ["api:db-default"]
+    assert d.units == ["api"]
+    assert d.max_sensitivity == "confidential"
+    assert d.dpia is not None
+    codes = sorted(d.code for d in ws.activities.diagnostics)
+    assert codes == ["activity-unknown-touchpoint", "party-unknown", "todo"]
+
+    report = run_check(repo, strict=False)
+    report_codes = {d.code for d in report.diagnostics}
+    assert "touchpoint-orphan" in report_codes  # admin:shop.Customer handles PII
+    assert "touchpoint-pending" in report_codes
+    assert "activity-unknown-touchpoint" in report_codes
+    assert report.exit_code is ExitCode.DECLARATION_ERROR
+    orphan = next(d for d in report.diagnostics if d.code == "touchpoint-orphan")
+    assert "api:admin:shop.Customer" in orphan.message
+
+
+def test_cli_touchpoints_activities_why(repo: Path) -> None:
+    runner = CliRunner()
+    root = ["--root", str(repo)]
+    tp = ["compliance", "touchpoints"]
+
+    listed = runner.invoke(cli, [*tp, "list", *root, "--format", "json"])
+    assert listed.exit_code == 0, listed.output
+    ids = {t["id"] for t in json.loads(listed.output)}
+    assert "checkout" in ids
+    assert "whealth_recap" not in ids  # ignored by default
+
+    table = runner.invoke(
+        cli, [*tp, "list", *root, "--pending"], env={"COLUMNS": "200"}
+    )
+    assert "checkout" in table.output
+    assert "pending" in table.output
+
+    bad = runner.invoke(cli, [*tp, "show", "api:checkut", *root])
+    assert bad.exit_code == 2
+    assert "did you mean api:checkout" in bad.output
+
+    shown = runner.invoke(
+        cli, [*tp, "show", "api:checkout", *root], env={"COLUMNS": "200"}
+    )
+    assert shown.exit_code == 0, shown.output
+    assert "cart_id: string(uuid)" in shown.output
+    assert "not declared yet" in shown.output
+
+    set_bad = runner.invoke(
+        cli, [*tp, "set-data", "api:checkout", "shop.Customer.emaill", *root]
+    )
+    assert set_bad.exit_code == 2
+    assert "did you mean" in set_bad.output
+
+    set_ok = runner.invoke(
+        cli,
+        [
+            *tp,
+            "set-data",
+            "api:checkout",
+            "shop.Customer.email=write",
+            "shop.Customer.iban",
+            *root,
+            "--note",
+            "api.py:24",
+        ],
+    )
+    assert set_ok.exit_code == 0, set_ok.output
+    manifest = repo / "api" / "compliance" / "touchpoints" / "checkout.yaml"
+    assert manifest.read_text() == (
+        "data:\n  - api:shop.Customer.email\n  - api:shop.Customer.iban\n"
+        "direction:\n  api:shop.Customer.email: write\n"
+        "note: api.py:24\n"
+    )
+    added = runner.invoke(
+        cli, [*tp, "set-data", "api:checkout", "shop.Order.total", *root, "--add"]
+    )
+    assert added.exit_code == 0, added.output
+    assert "api:shop.Order.total" in manifest.read_text()
+    nothing = runner.invoke(cli, [*tp, "set-data", "api:getCustomer", *root])
+    assert nothing.exit_code == 0
+    assert (manifest.parent / "getCustomer.yaml").read_text() == "data: []\n"
+
+    act = ["compliance", "activities"]
+    empty = runner.invoke(cli, [*act, "list", *root])
+    assert "no activity declared" in empty.output
+    created = runner.invoke(
+        cli,
+        [
+            *act,
+            "create",
+            "ordering",
+            *root,
+            "--name",
+            "Ordering",
+            "--purpose",
+            "Take orders",
+            "--legal-basis",
+            "contract",
+            "--touchpoint",
+            "api:checkout",
+            "--subject",
+            "customers",
+        ],
+    )
+    assert created.exit_code == 0, created.output
+    path = repo / "compliance" / "activities" / "ordering.yaml"
+    assert "retention: !todo" in path.read_text()
+    again = runner.invoke(cli, [*act, "create", "ordering", *root])
+    assert again.exit_code == 1
+    add = runner.invoke(
+        cli, [*act, "add", "ordering", "api:task:shop.send_receipt", *root]
+    )
+    assert add.exit_code == 0, add.output
+    assert "api:task:shop.send_receipt" in path.read_text()
+    add_bad = runner.invoke(cli, [*act, "add", "ordering", "api:nope", *root])
+    assert add_bad.exit_code == 2
+
+    listed = runner.invoke(cli, [*act, "list", *root, "--format", "json"])
+    entry = json.loads(listed.output)[0]
+    assert entry["slug"] == "ordering"
+    assert entry["derived"]["categories"] == ["contact", "financial"]
+    explain = runner.invoke(
+        cli, [*act, "explain", "ordering", *root], env={"COLUMNS": "200"}
+    )
+    assert explain.exit_code == 0, explain.output
+    assert "api:shop.Customer.iban" in explain.output
+    assert "max sensitivity: confidential" in explain.output
+
+    why = runner.invoke(
+        cli, ["compliance", "data", "why", "api:shop.Customer.email", *root]
+    )
+    assert why.exit_code == 0, why.output
+    assert "touchpoint api:checkout" in why.output
+    assert "activity ordering" in why.output
+    assert "held by 1 activity" in why.output
+    why_json = runner.invoke(
+        cli,
+        [
+            "compliance",
+            "data",
+            "why",
+            *root,
+            "--model",
+            "api:shop.Customer",
+            "--format",
+            "json",
+        ],
+    )
+    results = {r["id"]: r for r in json.loads(why_json.output)}
+    assert results["api:shop.Customer.phone"]["verdict"] == "unreferenced"
+    assert results["api:shop.Customer.email"]["verdict"] == "held"
+    manifests = runner.invoke(
+        cli,
+        ["compliance", "data", "why", "api:shop.Customer.email", *root, "--manifests"],
+    )
+    assert "purpose: Take orders" in manifests.output
+    no_match = runner.invoke(cli, ["compliance", "data", "why", "api:nope.*", *root])
+    assert no_match.exit_code == 2
+
+
+def test_mcp_read_tools(repo: Path) -> None:
+    tools = Tools(repo)
+    pending = tools.touchpoint_pending("api")
+    assert "api:checkout | route | ninja" in pending
+    shown = tools.touchpoint_show("api:checkout")
+    assert "cart_id: string(uuid)" in shown
+    with pytest.raises(ValueError, match="no touchpoint"):
+        tools.touchpoint_show("api:nope")
+    assert tools.activities_list().startswith("No activity")
+    assert "not referenced by any touchpoint" in tools.data_why(
+        "api:shop.Customer.email"
+    )
+    with pytest.raises(ValueError, match="no data item"):
+        tools.data_why("api:shop.Customer.nope")

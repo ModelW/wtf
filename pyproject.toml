@@ -30,6 +30,8 @@ dev = [
 ]
 test = [
     "django>=6.1.1",
+    "django-ninja>=1.7.0",
+    "procrastinate>=3.9.0",
     "pytest",
 ]
 
@@ -45,7 +47,10 @@ strict = true
 files = ["src"]
 # Runs inside the audited project's interpreter (stdlib only, any Python);
 # Django is intentionally not importable here.
-exclude = ["src/model_wtf/introspect/django_models.py"]
+exclude = [
+    "src/model_wtf/introspect/django_models.py",
+    "src/model_wtf/introspect/django_touchpoints.py",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -104,6 +109,9 @@ ignore = ["D104", "D105"]
 # Stdlib-only script piped into another interpreter: prints are its stderr
 # protocol, untyped helpers keep it runnable on old Pythons.
 "src/model_wtf/introspect/django_models.py" = ["T201", "ANN", "PTH"]
+"src/model_wtf/introspect/django_touchpoints.py" = [
+    "T201", "ANN", "PTH", "C901", "PLR", "S110", "S112", "BLE001",
+]
 
 [tool.ruff.lint.isort]
 known-first-party = ["model_wtf"]
