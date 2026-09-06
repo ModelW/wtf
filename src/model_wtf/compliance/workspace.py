@@ -100,13 +100,13 @@ def load_workspace(
     if not with_touchpoints:
         return ws
     known = data_index({uid: d.rows for uid, d in ws.data.items()})
+    parties = set(load_declarations(ws.shared).parties)
     for unit in selected:
         ws.touchpoints[unit.id] = collect_touchpoints(
-            unit, python=python, known_data=known
+            unit, python=python, known_data=known, known_parties=parties
         )
     link_calls(ws.touchpoints)
     rows = ws.rows
-    parties = set(load_declarations(ws.shared).parties)
     ws.activities = load_activities(
         ws.shared,
         ws.all_touchpoints,

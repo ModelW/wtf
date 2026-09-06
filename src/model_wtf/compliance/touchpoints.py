@@ -15,10 +15,19 @@ to disk. What humans (or the agent) write is the optional **manifest**
 ``<unit>/compliance/touchpoints/<slug>.yaml``::
 
     data:                       # data items the touchpoint reads or writes
-      - api:orders.Order.customer_email
-      - api:orders.Order.payload@json.iban
-    direction: {api:orders.Order.customer_email: write}   # optional
+      - api:orders.Order.customer_email: write   # `ref: read|write`, or
+      - api:orders.Order.payload@json.iban       # a bare ref = read+write
+    exporting:                  # what leaves the unit, and to whom
+      - party: mapbox           # id in compliance/parties/
+        data: [api:geo.Address.position]
+        purpose: geocoding      # optional, one line
     ignore: false               # health checks, static assets
+
+``exporting`` is where the Art. 30 "recipients" column comes from: every
+call to an external API, every email provider, every analytics beacon is a
+transfer of the listed items to that party. The party must exist in
+``compliance/parties/`` (the agent creates it with ``!todo`` details when it
+meets a new one); its ``country`` drives the third-country logic later.
 
 A touchpoint is **pending** until its manifest has a ``data`` key; an
 explicit empty list means "touches nothing personal, checked" and is a
@@ -62,7 +71,8 @@ IGNORED_BY_DEFAULT = (
     # Django admin URL patterns: the per-model ``admin:<app.Model>`` screen
     # touchpoint is the one that means something; the routes behind it
     # (changelist, add, change, history, jsi18n...) are plumbing.
-    re.compile(r"^admin:[a-z_]+$"),  # admin:index, admin:login, admin:jsi18n...
+    re.compile(r"^admin:[a-z_0-9]+$"),  # admin:index, admin:login, admin:jsi18n...
+    re.compile(r"test404|/__debug__/|^djdt:"),
     re.compile(r"^admin:\w+_\w+_(changelist|add|change|delete|history)$"),
     re.compile(r"^ANY /(?:[^ ]*/)?admin/"),
     re.compile(r"^wagtailadmin_(sprite|javascript_catalog|api:|icons)"),
@@ -84,15 +94,36 @@ class Kind(StrEnum):
     ADMIN = "admin"
 
 
+class Export(StrictModel):
+    """One outbound flow: these items go to that party."""
+
+    party: str
+    data: list[str] = Field(default_factory=list)
+    purpose: str | None = None
+
+
+Direction = Literal["read", "write", "read+write"]
+DataEntry = str | dict[str, Direction]
+"""One ``data`` entry: a bare ref (read+write) or ``{ref: direction}``."""
+
+
 class Manifest(StrictModel):
     """``touchpoints/<slug>.yaml``."""
 
-    data: list[str] | None = None
-    direction: dict[str, Literal["read", "write", "read+write"]] = Field(
-        default_factory=dict
-    )
+    data: list[DataEntry] | None = None
+    exporting: list[Export] = Field(default_factory=list)
     ignore: bool = False
     note: str | None = None
+
+    def entries(self) -> list[tuple[str, str]]:
+        """``(ref, direction)`` pairs; a one-key mapping carries the direction."""
+        out: list[tuple[str, str]] = []
+        for entry in self.data or []:
+            if isinstance(entry, str):
+                out.append((entry, "read+write"))
+            else:
+                out.extend((ref, direction) for ref, direction in entry.items())
+        return out
 
 
 class Introspected(BaseModel):
@@ -152,6 +183,8 @@ class Touchpoint:
     data: tuple[str, ...] | None = None
     """``unit:id`` data references; ``None`` = no manifest yet (pending)."""
     direction: dict[str, str] = field(default_factory=dict)
+    exporting: tuple[Export, ...] = ()
+    """Outbound flows, refs already resolved to full ids."""
     ignore: bool = False
     note: str | None = None
     calls: tuple[str, ...] = ()
@@ -243,6 +276,7 @@ class Touchpoint:
             "fetches": self.facts.fetches,
             "data": list(self.data) if self.data is not None else None,
             "direction": dict(self.direction),
+            "exporting": [e.model_dump() for e in self.exporting],
             "ignore": self.ignore,
             "pending": self.pending,
             "note": self.note,
@@ -289,12 +323,13 @@ def collect_touchpoints(
     *,
     python: str | None = None,
     known_data: dict[str, set[str]] | None = None,
+    known_parties: set[str] | None = None,
 ) -> UnitTouchpoints:
     """Introspect ``unit`` and apply its manifests.
 
-    ``known_data`` maps unit id → set of data item ids, used to validate the
-    references manifests make (``store-unknown``-style errors). Pass
-    ``None`` to skip that validation.
+    ``known_data`` maps unit id → set of data item ids and ``known_parties``
+    is the set of party ids, both used to validate what manifests
+    reference. Pass ``None`` to skip a validation.
     """
     result = UnitTouchpoints(unit)
     facts = _introspect(unit, result.diagnostics, python=python)
@@ -307,7 +342,7 @@ def collect_touchpoints(
         if manifest is not None:
             used.add(stem)
         result.items.append(
-            _apply(unit, item, manifest, known_data, result.diagnostics)
+            _apply(unit, item, manifest, known_data, result.diagnostics, known_parties)
         )
     for stem in sorted(set(manifests) - used):
         result.diagnostics.append(
@@ -385,12 +420,53 @@ def _introspect(
     return payload.touchpoints
 
 
+def _resolve_refs(
+    refs: list[str],
+    unit: Unit,
+    path: Path,
+    known_data: dict[str, set[str]] | None,
+    diagnostics: list[Diagnostic],
+) -> list[str]:
+    """``unit:id`` for every ref (unit defaults to this one); unknown ones dropped."""
+    out: list[str] = []
+    for ref in refs:
+        full = ref if ":" in ref else f"{unit.id}:{ref}"
+        ref_unit, _, ref_id = full.partition(":")
+        if known_data is not None:
+            if ref_unit not in known_data:
+                diagnostics.append(
+                    Diagnostic(
+                        Severity.ERROR,
+                        "data-ref-unknown-unit",
+                        f"{path.name}: {ref!r} names unknown unit {ref_unit!r}",
+                        unit.id,
+                        path,
+                    )
+                )
+                continue
+            if ref_id not in known_data[ref_unit]:
+                diagnostics.append(
+                    Diagnostic(
+                        Severity.ERROR,
+                        "data-ref-unknown",
+                        f"{path.name}: no data item {full!r} "
+                        "(`data list` shows the ids)",
+                        unit.id,
+                        path,
+                    )
+                )
+                continue
+        out.append(full)
+    return out
+
+
 def _apply(
     unit: Unit,
     facts: Introspected,
     manifest: Manifest | None,
     known_data: dict[str, set[str]] | None,
     diagnostics: list[Diagnostic],
+    known_parties: set[str] | None = None,
 ) -> Touchpoint:
     ignored_by_default = any(p.search(facts.id) for p in IGNORED_BY_DEFAULT)
     if manifest is None:
@@ -402,46 +478,46 @@ def _apply(
         )
     path = unit.folder / TOUCHPOINTS_DIR / f"{slugify(facts.id)}.yaml"
     data: tuple[str, ...] | None = None
+    direction: dict[str, str] = {}
     if manifest.data is not None:
-        refs = []
-        for ref in manifest.data:
-            full = ref if ":" in ref else f"{unit.id}:{ref}"
-            ref_unit, _, ref_id = full.partition(":")
-            if known_data is not None:
-                if ref_unit not in known_data:
-                    diagnostics.append(
-                        Diagnostic(
-                            Severity.ERROR,
-                            "data-ref-unknown-unit",
-                            f"{path.name}: {ref!r} names unknown unit {ref_unit!r}",
-                            unit.id,
-                            path,
-                        )
-                    )
-                    continue
-                if ref_id not in known_data[ref_unit]:
-                    diagnostics.append(
-                        Diagnostic(
-                            Severity.ERROR,
-                            "data-ref-unknown",
-                            f"{path.name}: no data item {full!r} "
-                            "(`data list` shows the ids)",
-                            unit.id,
-                            path,
-                        )
-                    )
-                    continue
-            refs.append(full)
-        data = tuple(refs)
-    direction: dict[str, str] = {
-        (k if ":" in k else f"{unit.id}:{k}"): str(v)
-        for k, v in manifest.direction.items()
-    }
+        pairs = manifest.entries()
+        resolved = _resolve_refs(
+            [ref for ref, _ in pairs], unit, path, known_data, diagnostics
+        )
+        data = tuple(resolved)
+        wanted = {
+            (ref if ":" in ref else f"{unit.id}:{ref}"): d
+            for ref, d in pairs
+            if d != "read+write"
+        }
+        direction = {full: wanted[full] for full in resolved if full in wanted}
+    exporting = tuple(
+        Export(
+            party=export.party,
+            data=_resolve_refs(export.data, unit, path, known_data, diagnostics),
+            purpose=export.purpose,
+        )
+        for export in manifest.exporting
+    )
+    if known_parties is not None:
+        diagnostics.extend(
+            Diagnostic(
+                Severity.ERROR,
+                "party-unknown",
+                f"{path.name}: exporting to {export.party!r}, which is not in "
+                "compliance/parties/",
+                unit.id,
+                path,
+            )
+            for export in exporting
+            if export.party not in known_parties
+        )
     return Touchpoint(
         unit=unit.id,
         facts=facts,
         data=data,
         direction=direction,
+        exporting=exporting,
         ignore=manifest.ignore,
         note=manifest.note,
         calls=tuple(facts.calls),
@@ -497,6 +573,7 @@ def write_manifest(
     data: list[str],
     *,
     direction: dict[str, str] | None = None,
+    exporting: list[Export] | None = None,
     note: str | None = None,
     ignore: bool = False,
 ) -> Path:
@@ -506,10 +583,17 @@ def write_manifest(
     if ignore:
         lines.append("ignore: true")
     lines.append("data:" if data else "data: []")
-    lines.extend(f"  - {ref}" for ref in data)
-    if direction:
-        lines.append("direction:")
-        lines.extend(f"  {ref}: {value}" for ref, value in direction.items())
+    direction = direction or {}
+    for ref in data:
+        d = direction.get(ref)
+        lines.append(f"  - {ref}: {d}" if d and d != "read+write" else f"  - {ref}")
+    if exporting:
+        lines.append("exporting:")
+        for export in exporting:
+            lines.append(f"  - party: {export.party}")
+            lines.append("    data: [" + ", ".join(export.data) + "]")
+            if export.purpose:
+                lines.append(f"    purpose: {_scalar(export.purpose)}")
     if note:
         lines.append(f"note: {_scalar(note)}")
     path.parent.mkdir(parents=True, exist_ok=True)

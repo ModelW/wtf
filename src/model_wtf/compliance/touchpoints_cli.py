@@ -22,10 +22,11 @@ from model_wtf.compliance.activities import (
 from model_wtf.compliance.auto_review import DEFAULT_MODEL, TOUCHPOINTS_TARGET
 from model_wtf.compliance.data import parse_full_id
 from model_wtf.compliance.data_cli import data, load_context, run_auto_review
+from model_wtf.compliance.declarations import load_declarations
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.options import ROOT_OPTION
 from model_wtf.compliance.report import Severity
-from model_wtf.compliance.touchpoints import Kind, write_manifest
+from model_wtf.compliance.touchpoints import Export, Kind, write_manifest
 from model_wtf.compliance.workspace import Workspace, load_workspace
 from model_wtf.compliance.yaml_io import Todo
 from model_wtf.introspect.runner import IntrospectionFailed
@@ -248,6 +249,12 @@ def render_touchpoint(tp: Touchpoint, ws: Workspace) -> Text:
                 out.append(f"    {name}: {kind}\n")
     out.append("\n")
     _render_declared_data(out, tp, ws)
+    for export in tp.exporting:
+        out.append("  exporting to ", style="dim")
+        out.append(export.party, style="bold red")
+        if export.purpose:
+            out.append(f" ({export.purpose})", style="dim")
+        out.append(": " + (", ".join(export.data) or "nothing personal") + "\n")
     if tp.note:
         line("note", tp.note)
     acts = ws.activities.of_touchpoint(tp.full_id)
@@ -293,6 +300,12 @@ def _unknown_touchpoint(ref: str, ws: Workspace) -> str:
 @click.option("--add", "mode", flag_value="add", help="Append to the current list.")
 @click.option("--remove", "mode", flag_value="remove", help="Remove from the list.")
 @click.option("--ignore", is_flag=True, help="Mark the touchpoint as carrying nothing.")
+@click.option(
+    "--export",
+    "exports",
+    multiple=True,
+    help="party=ref,ref[;purpose] — data sent to an external party; repeatable.",
+)
 @click.option("--note", default=None, help="One line on what was looked at.")
 @PYTHON_OPTION
 @ROOT_OPTION
@@ -304,6 +317,7 @@ def tp_set_data(
     refs: tuple[str, ...],
     mode: str | None,
     ignore: bool,
+    exports: tuple[str, ...],
     note: str | None,
     python: str | None,
     root: Path | None,
@@ -347,8 +361,18 @@ def tp_set_data(
     else:
         final = wanted
     direction = {k: v for k, v in direction.items() if k in final}
+    parties = set(load_declarations(ws.shared).parties)
+    exporting = list(tp.exporting) if mode in ("add", "remove") else []
+    for raw in exports:
+        exporting.append(_parse_export(raw, tp.unit, ws, parties))
     path = write_manifest(
-        unit, tp, final, direction=direction, note=note or tp.note, ignore=ignore
+        unit,
+        tp,
+        final,
+        direction=direction,
+        exporting=exporting,
+        note=note or tp.note,
+        ignore=ignore,
     )
     console.print(Text.assemble(("wrote", "green"), "  ", str(path)))
     ctx.exit(0)
@@ -380,6 +404,13 @@ def tp_set_data(
     is_flag=True,
     help="Skip the per-touchpoint pass; only run the grouping session.",
 )
+@click.option(
+    "--workers",
+    default=4,
+    show_default=True,
+    type=click.IntRange(1, 16),
+    help="Parallel OpenCode sessions per round, each reviewing --batch touchpoints.",
+)
 @click.option("--keep-scratch", is_flag=True, hidden=True)
 @PYTHON_OPTION
 @ROOT_OPTION
@@ -394,6 +425,7 @@ def tp_auto_review(
     max_tokens: int | None,
     group: bool,
     group_only: bool,
+    workers: int,
     keep_scratch: bool,
     python: str | None,
     root: Path | None,
@@ -428,7 +460,32 @@ def tp_auto_review(
         keep_scratch=keep_scratch,
         target=TOUCHPOINTS_TARGET,
         group=group or group_only,
+        workers=workers,
     )
+
+
+def _parse_export(raw: str, unit_id: str, ws: Workspace, parties: set[str]) -> Export:
+    """``mapbox=geo.Address.position,geo.Address.text;geocoding`` → :class:`Export`."""
+    spec, _, purpose = raw.partition(";")
+    party, sep, refs_text = spec.partition("=")
+    if not sep or not party:
+        msg = f"{raw!r}: expected party=ref,ref[;purpose]"
+        raise click.UsageError(msg)
+    if party not in parties:
+        known = ", ".join(sorted(parties)) or "none"
+        msg = (
+            f"unknown party {party!r}; known: {known} "
+            f"(add compliance/parties/{party}.yaml)"
+        )
+        raise click.UsageError(msg)
+    refs = []
+    for ref in filter(None, (r.strip() for r in refs_text.split(","))):
+        full = ref if ":" in ref else f"{unit_id}:{ref}"
+        if full not in ws.rows:
+            msg = f"{raw!r}: no data item {full!r}"
+            raise click.UsageError(msg)
+        refs.append(full)
+    return Export(party=party, data=refs, purpose=purpose.strip() or None)
 
 
 # ---------------------------------------------------------------------------
@@ -526,7 +583,9 @@ def act_explain(
     ctx.exit(0)
 
 
-def render_activity(a: Activity, ws: Workspace) -> Text:
+def render_activity(  # noqa: C901 - one block per section
+    a: Activity, ws: Workspace
+) -> Text:
     """Multi-line description of one activity (also used by the MCP tool)."""
     out = Text.assemble((a.slug, "bold"), "  ", _text(a.spec.name), "\n")
     spec = a.spec
@@ -561,6 +620,10 @@ def render_activity(a: Activity, ws: Workspace) -> Text:
     out.append(f"    categories: {', '.join(d.categories) or '-'}\n")
     out.append(f"    max sensitivity: {d.max_sensitivity or '-'}\n")
     out.append(f"    dpia: {d.dpia.value if d.dpia else '-'}\n")
+    if d.recipients:
+        out.append("    recipients (from exports):\n")
+        for party, refs in d.recipients.items():
+            out.append(f"      {party}: {', '.join(refs)}\n")
     out.append(f"    data ({len(d.pii_data)} personal of {len(d.data)}):\n")
     for ref in d.data:
         row = ws.rows.get(ref)

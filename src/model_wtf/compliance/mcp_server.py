@@ -17,6 +17,7 @@ on :class:`Tools` so they can be tested without a transport.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import subprocess
@@ -41,10 +42,11 @@ from model_wtf.compliance.data import (
     is_container,
     write_contents,
 )
+from model_wtf.compliance.declarations import PARTIES_DIR, load_declarations
 from model_wtf.compliance.discovery import find_repo_root, load_units, select_manifest
 from model_wtf.compliance.knowledge import Knowledge, load_knowledge
 from model_wtf.compliance.review import Lock
-from model_wtf.compliance.touchpoints import write_manifest
+from model_wtf.compliance.touchpoints import Export, write_manifest
 from model_wtf.compliance.workspace import Workspace, load_workspace
 from model_wtf.compliance.yaml_io import todo_text
 from model_wtf.introspect.runner import IntrospectionFailed
@@ -57,6 +59,10 @@ if TYPE_CHECKING:
 SHARED_FOLDER = "compliance"
 DEFAULT_BATCH = 8
 MODEL_ENV = "MODEL_WTF_AGENT_MODEL"
+ACTIVITY_LOG_ENV = "MODEL_WTF_ACTIVITY_LOG"
+"""Path of a file the server appends one JSON line per write to, so the
+driving process can narrate what subagents do (their tool calls are not in
+the parent session's event stream)."""
 """Set by the orchestrator so lock entries record which model reviewed."""
 EXCERPT_MAX_LINES = 160
 GREP_MAX_HITS = 12
@@ -102,6 +108,18 @@ class DataRef(BaseModel):
 
     ref: str = Field(description="`unit:app.Model.field` (or @json/@files row)")
     direction: Literal["read", "write", "read+write"] = "read+write"
+
+
+class ExportDecision(BaseModel):
+    """Data a touchpoint sends to an external party."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    party: str = Field(
+        description="Party id (kebab-case), see parties_list / party_add"
+    )
+    data: list[str] = Field(description="Data refs that leave the unit to this party")
+    purpose: str | None = Field(default=None, description="One line: why it is sent")
 
 
 class ContentDecision(BaseModel):
@@ -459,9 +477,16 @@ class Tools:
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         self.data(unit, refresh=True)
         self.workspace(refresh=True)
+        _log_activity("manual", id=f"{unit_id}:{item_id}", category=category)
         return f"created {unit_id}:{item_id} ({path.relative_to(self.root)})"
 
-    def touchpoint_set_data(self, ref: str, data: list[DataRef], reason: str) -> str:
+    def touchpoint_set_data(  # noqa: C901 - validation of two lists, flat
+        self,
+        ref: str,
+        data: list[DataRef],
+        reason: str,
+        exporting: list[ExportDecision] | None = None,
+    ) -> str:
         """``touchpoint_set_data``: write a touchpoint's manifest."""
         ws = self.workspace()
         tp = ws.all_touchpoints.get(ref)
@@ -474,31 +499,111 @@ class Tools:
         if not reason.strip():
             msg = "a one-line reason citing file:line is required (even for [])"
             raise ValueError(msg)
+        problems: list[str] = []
         refs: list[str] = []
         direction: dict[str, str] = {}
-        problems: list[str] = []
         for item in data:
-            full = item.ref if ":" in item.ref else f"{tp.unit}:{item.ref}"
-            if full not in ws.rows:
-                import difflib
-
-                close = difflib.get_close_matches(
-                    full, sorted(ws.rows), n=3, cutoff=0.6
-                )
-                hint = f" (did you mean {', '.join(close)}?)" if close else ""
-                problems.append(f"{item.ref}: no such data item{hint}")
+            full = self._resolve_ref(item.ref, tp.unit, problems)
+            if full is None:
                 continue
             refs.append(full)
             if item.direction != "read+write":
                 direction[full] = item.direction
+        parties = set(load_declarations(self.root / SHARED_FOLDER).parties)
+        exports: list[Export] = []
+        for export in exporting or []:
+            if export.party not in parties:
+                known = ", ".join(sorted(parties)) or "none"
+                problems.append(
+                    f"party {export.party!r} is not declared; call party_add first "
+                    f"(known: {known})"
+                )
+                continue
+            resolved = [
+                full
+                for r in export.data
+                if (full := self._resolve_ref(r, tp.unit, problems)) is not None
+            ]
+            exports.append(
+                Export(party=export.party, data=resolved, purpose=export.purpose)
+            )
         if problems:
-            return "Error: nothing written; fix these refs:\n  " + "\n  ".join(problems)
+            return "Error: nothing written; fix these:\n  " + "\n  ".join(problems)
         unit = self.unit(tp.unit)
-        path = write_manifest(unit, tp, refs, direction=direction, note=reason.strip())
-        self.workspace(refresh=True)
-        return (
-            f"{ref}: {len(refs)} data item(s) declared ({path.relative_to(self.root)})"
+        path = write_manifest(
+            unit,
+            tp,
+            refs,
+            direction=direction,
+            exporting=exports,
+            note=reason.strip(),
         )
+        self.workspace(refresh=True)
+        _log_activity(
+            "touchpoint",
+            id=ref,
+            items=len(refs),
+            parties=[e.party for e in exports],
+        )
+        sent = ""
+        if exports:
+            plural = "y" if len(exports) == 1 else "ies"
+            sent = f", exporting to {len(exports)} part{plural}"
+        return (
+            f"{ref}: {len(refs)} data item(s) declared{sent} "
+            f"({path.relative_to(self.root)})"
+        )
+
+    def _resolve_ref(self, ref: str, unit_id: str, problems: list[str]) -> str | None:
+        ws = self.workspace()
+        full = ref if ":" in ref else f"{unit_id}:{ref}"
+        if full in ws.rows:
+            return full
+        import difflib
+
+        close = difflib.get_close_matches(full, sorted(ws.rows), n=3, cutoff=0.6)
+        hint = f" (did you mean {', '.join(close)}?)" if close else ""
+        problems.append(f"{ref}: no such data item{hint}")
+        return None
+
+    def parties_list(self) -> str:
+        """``parties_list``: declared parties, one per line."""
+        decl = load_declarations(self.root / SHARED_FOLDER)
+        if not decl.parties:
+            return "no party declared"
+        lines = []
+        for party_id, party in sorted(decl.parties.items()):
+            name = party.name if isinstance(party.name, str) else "!todo"
+            country = party.country if isinstance(party.country, str) else "?"
+            lines.append(f"{party_id} | {name} | {country}")
+        return "\n".join(lines)
+
+    def party_add(
+        self,
+        party_id: str,
+        name: str,
+        website: str | None = None,
+        country: str | None = None,
+    ) -> str:
+        """``party_add``: a new external party with ``!todo`` contact details."""
+        from model_wtf.compliance.init_cmd import PartySpec
+
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", party_id):
+            msg = f"party id {party_id!r} must be kebab-case (e.g. `mapbox`)"
+            raise ValueError(msg)
+        folder = self.root / SHARED_FOLDER / PARTIES_DIR
+        path = folder / f"{party_id}.yaml"
+        if path.exists():
+            return f"party {party_id} already exists"
+        if country is not None and not re.fullmatch(r"[A-Z]{2}", country):
+            msg = "country must be ISO 3166-1 alpha-2 (e.g. US); omit when unsure"
+            raise ValueError(msg)
+        spec = PartySpec(name=name.strip(), country=country, website=website)
+        folder.mkdir(parents=True, exist_ok=True)
+        path.write_text(spec.to_yaml(), encoding="utf-8")
+        _log_activity("party", id=party_id, name=name.strip())
+        shown = path.relative_to(self.root)
+        return f"created party {party_id} ({shown}); address/email are !todo"
 
     def activities_graph(self) -> str:
         """``activities_graph``: every PII-touching touchpoint with its edges."""
@@ -580,6 +685,9 @@ class Tools:
         )
         assert path is not None  # noqa: S101 - existence checked above
         self.workspace(refresh=True)
+        _log_activity(
+            "activity", id=slug, touchpoints=len(touchpoints), basis=legal_basis
+        )
         return f"created activity {slug} with {len(touchpoints)} touchpoint(s)"
 
     def activity_add_touchpoints(self, slug: str, touchpoints: list[str]) -> str:
@@ -597,6 +705,7 @@ class Tools:
             raise ValueError(msg)
         added = add_touchpoints(activity.path, touchpoints)
         self.workspace(refresh=True)
+        _log_activity("activity-add", id=slug, touchpoints=len(added))
         return f"{slug}: {len(added)} touchpoint(s) added"
 
     def data_why(self, ref: str) -> str:
@@ -657,6 +766,14 @@ class Tools:
             self.data(unit, refresh=True)
         decided = {d.field for d in decisions}
         left = sorted(n for n in by_name if n not in decided)
+        _log_activity(
+            "model",
+            id=ref.full,
+            confirmed=len(confirmed),
+            overridden=len(overridden),
+            rejected=len(problems),
+            left=len(left),
+        )
         out = [
             f"{ref.full}: {len(confirmed)} confirmed, {len(overridden)} overridden"
             + (f", {len(problems)} rejected" if problems else "")
@@ -914,11 +1031,44 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
         description=(
             "Declare the data items one touchpoint reads/writes, in a single call: "
             "`data` is a list of {ref, direction?}; an empty list means 'checked, "
-            "touches nothing personal'. `reason` cites file:line."
+            "touches nothing personal'. `exporting` lists what leaves the unit: "
+            "[{party, data[], purpose?}] for every external API/provider the code "
+            "calls (party must exist: parties_list / party_add). `reason` cites "
+            "file:line."
         ),
     )
-    def touchpoint_set_data(touchpoint: str, data: list[DataRef], reason: str) -> str:
-        return _guard(lambda: tools.touchpoint_set_data(touchpoint, data, reason))
+    def touchpoint_set_data(
+        touchpoint: str,
+        data: list[DataRef],
+        reason: str,
+        exporting: list[ExportDecision] | None = None,
+    ) -> str:
+        return _guard(
+            lambda: tools.touchpoint_set_data(touchpoint, data, reason, exporting)
+        )
+
+    @server.tool(
+        name="parties_list",
+        description="Declared organisations (party id | name | country).",
+    )
+    def parties_list() -> str:
+        return _guard(tools.parties_list)
+
+    @server.tool(
+        name="party_add",
+        description=(
+            "Declare an external organisation data is sent to (a SaaS, an API "
+            "provider): {id (kebab), name, website?, country? (ISO-2, only if "
+            "sure)}. Contact details are left !todo for a human."
+        ),
+    )
+    def party_add(
+        id: str,  # noqa: A002 - the tool's public argument name
+        name: str,
+        website: str | None = None,
+        country: str | None = None,
+    ) -> str:
+        return _guard(lambda: tools.party_add(id, name, website, country))
 
     @server.tool(
         name="activities_graph",
@@ -979,6 +1129,18 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
         return _guard(lambda: tools.data_why(item))
 
     return server
+
+
+def _log_activity(kind: str, **fields: object) -> None:
+    """Append one JSON line to the activity log, when one is configured."""
+    path = os.environ.get(ACTIVITY_LOG_ENV)
+    if not path:
+        return
+    import json
+
+    line = json.dumps({"kind": kind, **fields}, ensure_ascii=False)
+    with contextlib.suppress(OSError), Path(path).open("a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
 
 
 def _guard(call: Callable[[], str]) -> str:

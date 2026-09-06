@@ -457,6 +457,13 @@ def reviewed_cmd(
     help="Stop starting new rounds once this many tokens were used.",
 )
 @click.option(
+    "--workers",
+    default=1,
+    show_default=True,
+    type=click.IntRange(1, 16),
+    help="Parallel OpenCode sessions per round, each reviewing --batch items.",
+)
+@click.option(
     "--dry-run", is_flag=True, help="Print the generated OpenCode config and stop."
 )
 @click.option("--keep-scratch", is_flag=True, hidden=True)
@@ -472,6 +479,7 @@ def auto_review_cmd(
     model: str,
     python: str | None,
     max_tokens: int | None,
+    workers: int,
     dry_run: bool,
     keep_scratch: bool,
     root: Path | None,
@@ -513,6 +521,7 @@ def auto_review_cmd(
         python=python,
         max_tokens=max_tokens,
         keep_scratch=keep_scratch,
+        workers=workers,
     )
 
 
@@ -531,6 +540,7 @@ def run_auto_review(
     keep_scratch: bool,
     target: Target = DATA_TARGET,
     group: bool = False,
+    workers: int = 1,
 ) -> None:
     """Run the loop, print the summary, exit with the right code (shared CLI tail)."""
     console = Console()
@@ -549,6 +559,7 @@ def run_auto_review(
             keep_scratch=keep_scratch,
             target=target,
             group=group,
+            workers=workers,
         )
     except OpenCodeUnavailable as exc:
         Console(stderr=True).print(Text.assemble(("Tool error: ", "red"), str(exc)))

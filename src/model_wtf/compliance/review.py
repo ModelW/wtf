@@ -12,6 +12,7 @@ the trouble to override is reviewed by definition, whatever the lock says.
 
 from __future__ import annotations
 
+import fcntl
 import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -118,6 +119,8 @@ class Lock:
         self.path = unit.folder / LOCK_FILE
         self.diagnostics: list[Diagnostic] = []
         self.data = self._load()
+        self._dropped: set[str] = set()
+        """Ids pruned by this instance, so a merge does not resurrect them."""
 
     def _load(self) -> LockFile:
         if not self.path.is_file():
@@ -190,19 +193,39 @@ class Lock:
         gone = [item_id for item_id in self.data.items if item_id not in live]
         for item_id in gone:
             del self.data.items[item_id]
+        self._dropped.update(gone)
         return gone
 
     def save(self) -> None:
-        """Write the lock back, keys sorted for stable diffs."""
-        payload = {
-            "schema": self.data.schema_version,
-            "items": {
-                item_id: _entry_dict(entry)
-                for item_id, entry in sorted(self.data.items.items())
-            },
-        }
+        """Write the lock back, keys sorted for stable diffs.
+
+        Several agent sessions may review different models at the same time
+        (``--workers``), each through its own MCP server process. The write
+        therefore happens under an exclusive file lock and **merges** with
+        what is on disk: entries this instance did not touch are kept as the
+        other writers left them, entries it marked win.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(dump_yaml(payload), encoding="utf-8")
+        guard = self.path.with_suffix(".lock")
+        with guard.open("a+") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                on_disk = self._load().items if self.path.is_file() else {}
+                merged = {**on_disk, **self.data.items}
+                for item_id in self._dropped:
+                    merged.pop(item_id, None)
+                payload = {
+                    "schema": self.data.schema_version,
+                    "items": {
+                        item_id: _entry_dict(entry)
+                        for item_id, entry in sorted(merged.items())
+                    },
+                }
+                self.path.write_text(dump_yaml(payload), encoding="utf-8")
+                self.data.items = merged
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+        guard.unlink(missing_ok=True)
 
 
 def _entry_dict(entry: LockEntry) -> dict[str, object]:

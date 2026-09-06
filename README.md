@@ -237,8 +237,12 @@ to the Django touchpoints by operation id (`calls`). Plumbing (health checks,
 OpenAPI documents, the admin's own URL patterns) is ignored by default.
 
 The optional manifest `<unit>/compliance/touchpoints/<slug>.yaml` declares
-what the touchpoint handles: `data: [unit:app.Model.field, ...]` (`@json` and
-`@files` rows allowed), optional `direction`, `ignore`, `note`. A touchpoint
+what the touchpoint handles: `data:` entries are refs (`@json`/`@files` rows
+allowed), a bare `- unit:app.Model.field` meaning read+write and
+`- unit:app.Model.field: write` (or `read`) when it is one-way; `exporting:`
+lists what leaves the unit — `- {party: mapbox, data: [...], purpose: ...}`,
+the party being a `compliance/parties/` id, which is where the register's
+recipients come from; plus `ignore`, `note`. A touchpoint
 is **pending** until it has a `data` key — an explicit `[]` means "touches
 nothing personal, checked". `check` reports `touchpoint-pending` and
 `touchpoint-orphan` (handles personal data, belongs to no activity), both

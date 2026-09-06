@@ -18,11 +18,17 @@ pending from disk, so a killed run resumes where it stopped.
 
 from __future__ import annotations
 
+import json
+import os
+import re
 import sys
+import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from rich.progress import (
     BarColumn,
@@ -35,7 +41,7 @@ from rich.progress import (
 from rich.text import Text
 
 from model_wtf.compliance.data import collect_unit
-from model_wtf.compliance.mcp_server import MODEL_ENV, model_of
+from model_wtf.compliance.mcp_server import ACTIVITY_LOG_ENV, MODEL_ENV, model_of
 from model_wtf.compliance.review import Lock
 from model_wtf.compliance.workspace import load_workspace
 from model_wtf.opencode import (
@@ -44,8 +50,10 @@ from model_wtf.opencode import (
     Agent,
     Event,
     McpServer,
+    OpenCode,
     OpenCodeUnavailable,
     Sandbox,
+    TaskResult,
     get_opencode,
 )
 
@@ -99,8 +107,13 @@ def sandbox(
     readable: list[Path],
     python: str | None,
     max_tokens: int | None,
+    activity_log: Path | None = None,
 ) -> Sandbox:
-    """The OpenCode sandbox for a review run."""
+    """The OpenCode sandbox for a review run.
+
+    ``activity_log`` is a file the MCP servers append one JSON line per
+    write to, so the driver can narrate what subagents do.
+    """
     mcp_cmd = [
         sys.executable,
         "-m",
@@ -126,7 +139,11 @@ def sandbox(
                 # Our own server: it runs the project's Django introspection,
                 # which needs the developer's real environment. It inherits
                 # the parent's, minus anything that configures OpenCode.
-                environment={**_mcp_environment(), MODEL_ENV: model},
+                environment={
+                    **_mcp_environment(),
+                    MODEL_ENV: model,
+                    ACTIVITY_LOG_ENV: str(activity_log) if activity_log else "",
+                },
             )
         },
         agents={
@@ -210,7 +227,6 @@ def _prompt(name: str, repo: str) -> str:
 
 
 def _mcp_environment() -> dict[str, str]:
-    import os
 
     env = {
         key: value
@@ -292,6 +308,11 @@ class Target:
             return "Review all pending models."
         return "Review all pending touchpoints."
 
+    def shard_message(self, ids: list[str]) -> str:
+        """The message for one worker: an explicit list, no discovery call."""
+        listed = "\n".join(f"- {i}" for i in ids)
+        return f"Review exactly these {self.noun}s, one at a time:\n{listed}"
+
     def pending(
         self, root: Path, units: list[Unit], knowledge: Knowledge, python: str | None
     ) -> tuple[list[str], list[Path]]:
@@ -316,6 +337,226 @@ def round_prompt(base: str | None) -> str:
     return "Review all pending models."
 
 
+def _run_round(
+    oc: OpenCode,
+    target: Target,
+    prompt: str,
+    remaining: list[str],
+    batch: int,
+    workers: int,
+    reporter: Reporter,
+    *,
+    base: str | None,
+) -> TaskResult:
+    """One round: a single dispatcher session, or ``workers`` sharded ones.
+
+    With a ``--base`` the dispatcher must discover changed models itself, so
+    the first round stays a single session; afterwards, and always for
+    touchpoints, the pending list is split into explicit shards.
+    """
+    if workers <= 1 or (base and prompt == round_prompt(base)):
+        return oc.run_task(
+            prompt,
+            agent=target.dispatcher,
+            timeout=ROUND_TIMEOUT,
+            on_event=reporter.on_event,
+        )
+    shards = [
+        remaining[i : i + batch]
+        for i in range(0, min(len(remaining), batch * workers), batch)
+    ]
+    with ThreadPoolExecutor(max_workers=len(shards)) as pool:
+        results = list(
+            pool.map(
+                lambda ids: oc.run_task(
+                    target.shard_message(ids),
+                    agent=target.dispatcher,
+                    timeout=ROUND_TIMEOUT,
+                    on_event=reporter.on_event,
+                ),
+                shards,
+            )
+        )
+    merged = TaskResult(
+        returncode=max(r.returncode for r in results),
+        final_text="\n".join(r.final_text for r in results if r.final_text),
+        tokens=sum(r.tokens for r in results),
+        cost=sum(r.cost for r in results),
+        tool_calls=sum(r.tool_calls for r in results),
+        models=set().union(*(r.models for r in results)),
+        stderr_tail="\n".join(r.stderr_tail for r in results if r.stderr_tail),
+        provider_errors=[e for r in results for e in r.provider_errors],
+    )
+    return merged
+
+
+_ID_IN_PROMPT = re.compile(r"`([^`]+)`")
+
+
+def narrate(  # noqa: C901 - one branch per tool, flat on purpose
+    event: Event, *, closing_tool: str
+) -> tuple[Text | None, bool] | None:
+    """One human line for a tool call, and whether it closed an item.
+
+    Returns ``None`` for calls not worth a line (globs, greps, the
+    dispatcher's own bookkeeping). Errors are always shown.
+    """
+    name = event.tool.removeprefix("model-wtf_") if event.tool else ""
+    first = event.output.splitlines()[0] if event.output else ""
+    failed = first.startswith("Error")
+    if failed:
+        return Text.assemble(("  ✗ ", "red"), (f"{name}: ", "dim"), first), False
+    if name == "task":
+        # Subagent sessions do not stream their own tool calls to us: the
+        # `task` event is emitted when the subagent is DONE, its output being
+        # the subagent's final reply. So this is the "checked" line.
+        prompt = str(event.args.get("prompt") or "")
+        match = _ID_IN_PROMPT.search(prompt)
+        what = match.group(1) if match else str(event.args.get("subagent_type", ""))
+        # OpenCode wraps the subagent's reply in a <task ...> envelope.
+        body = re.sub(r"<task[^>]*>|</task>", "", event.output or "").strip()
+        ok = not body or body.upper().startswith(("OK", "ROUND", "GROUPED"))
+        if ok:
+            return None, True  # the write itself was narrated from the activity log
+        first = body.splitlines()[0]
+        return Text.assemble(
+            ("  ~ ", "yellow"), (what, "bold"), f": {first[:120]}"
+        ), True
+    if name == "read":
+        path = str(event.args.get("filePath") or "")
+        short = "/".join(path.rsplit("/", 3)[-3:])
+        return Text.assemble(("    reading ", "dim"), (short, "dim")), False
+    if name in ("data_model", "touchpoint_show"):
+        what = event.args.get("model") or event.args.get("touchpoint") or ""
+        return Text.assemble(("    inspecting ", "dim"), (str(what), "dim")), False
+    if name == "data_search":
+        return (
+            Text.assemble(
+                ("    searching data for ", "dim"),
+                (str(event.args.get("query")), "dim"),
+            ),
+            False,
+        )
+    if name == "data_add_manual":
+        return Text.assemble(
+            ("  + ", "yellow"), "new transient item ", (first, "bold")
+        ), False
+    if name == "data_review_model":
+        model = str(event.args.get("model") or "")
+        summary = first.split(": ", 1)[1] if ": " in first else first
+        done = "still pending" not in first
+        mark = ("  ✓ ", "green") if done else ("  ~ ", "yellow")
+        return (
+            Text.assemble(mark, "model ", (model, "bold"), f" reviewed: {summary}"),
+            done and closing_tool == "data_review_model",
+        )
+    if name == "party_add":
+        return (
+            Text.assemble(
+                ("  + ", "yellow"), "new party ", (str(event.args.get("id")), "bold")
+            ),
+            False,
+        )
+    if name == "touchpoint_set_data":
+        tp = str(event.args.get("touchpoint") or "")
+        n = len(event.args.get("data") or [])
+        what = "touches nothing personal" if n == 0 else f"{n} data item(s) declared"
+        exports = event.args.get("exporting") or []
+        if exports:
+            parties = ", ".join(str(e.get("party", "?")) for e in exports)
+            what += f", sends data to {parties}"
+        return (
+            Text.assemble(
+                ("  ✓ ", "green"), "touchpoint ", (tp, "bold"), f" checked: {what}"
+            ),
+            closing_tool == "touchpoint_set_data",
+        )
+    if name == "activity_create":
+        slug = str(event.args.get("slug") or "")
+        n = len(event.args.get("touchpoints") or [])
+        basis = event.args.get("legal_basis") or "basis !todo"
+        return (
+            Text.assemble(
+                ("  ★ ", "magenta"),
+                "activity ",
+                (slug, "bold"),
+                f" created with {n} touchpoint(s) ({basis})",
+            ),
+            False,
+        )
+    if name == "activity_add_touchpoints":
+        slug = str(event.args.get("slug") or "")
+        n = len(event.args.get("touchpoints") or [])
+        return (
+            Text.assemble(
+                ("  ★ ", "magenta"), f"{n} touchpoint(s) added to ", (slug, "bold")
+            ),
+            False,
+        )
+    if name in ("activities_graph", "activities_list"):
+        return Text.assemble(("  → ", "cyan"), "reading the touchpoint graph"), False
+    if name in ("data_pending", "touchpoint_pending", "data_changed"):
+        return Text.assemble(("  → ", "cyan"), first.split(":")[0] or name), False
+    return None
+
+
+def narrate_write(  # noqa: C901 - one branch per kind
+    entry: dict[str, Any],
+) -> Text:
+    """One line for a write the MCP server recorded (from any subagent)."""
+    kind = entry.get("kind")
+    ident = str(entry.get("id", ""))
+    if kind == "touchpoint":
+        n = int(entry.get("items", 0))
+        what = "touches nothing personal" if n == 0 else f"{n} data item(s)"
+        parties = entry.get("parties") or []
+        if parties:
+            what += f", sends data to {', '.join(map(str, parties))}"
+        return Text.assemble(
+            ("  ✓ ", "green"), "touchpoint ", (ident, "bold"), f": {what}"
+        )
+    if kind == "model":
+        bits = [f"{entry.get('confirmed', 0)} confirmed"]
+        if entry.get("overridden"):
+            bits.append(f"{entry['overridden']} corrected")
+        if entry.get("rejected"):
+            bits.append(f"{entry['rejected']} rejected")
+        if entry.get("left"):
+            bits.append(f"{entry['left']} left")
+        return Text.assemble(
+            ("  ✓ ", "green"), "model ", (ident, "bold"), f": {', '.join(bits)}"
+        )
+    if kind == "party":
+        return Text.assemble(
+            ("  + ", "yellow"),
+            "new party ",
+            (ident, "bold"),
+            f" ({entry.get('name', '')})",
+        )
+    if kind == "manual":
+        return Text.assemble(
+            ("  + ", "yellow"),
+            "new transient item ",
+            (ident, "bold"),
+            f" ({entry.get('category', '')})",
+        )
+    if kind == "activity":
+        basis = entry.get("basis") or "basis !todo"
+        return Text.assemble(
+            ("  ★ ", "magenta"),
+            "activity ",
+            (ident, "bold"),
+            f" created with {entry.get('touchpoints', 0)} touchpoint(s) ({basis})",
+        )
+    if kind == "activity-add":
+        return Text.assemble(
+            ("  ★ ", "magenta"),
+            f"{entry.get('touchpoints', 0)} touchpoint(s) added to ",
+            (ident, "bold"),
+        )
+    return Text(f"  {kind}: {ident}", style="dim")
+
+
 class Reporter:
     """Console feedback for a run: a progress bar over models plus a live log.
 
@@ -332,6 +573,7 @@ class Reporter:
         *,
         closing_tool: str = "data_review_model",
         noun: str = "model",
+        activity_log: Path | None = None,
     ) -> None:
         self.console = console
         self.closing_tool = closing_tool
@@ -349,47 +591,69 @@ class Reporter:
             "reviewing", total=total, extra="", noun=noun
         )
         self.tokens = 0
+        self._lock = threading.Lock()
+        """Workers report from several threads (see ``_run_round``)."""
+        self.activity_log = activity_log
+        self._offset = 0
 
     def __enter__(self) -> Reporter:
         self.progress.start()
+        if self.activity_log is not None:
+            self._stop = threading.Event()
+            self._tail = threading.Thread(target=self._follow, daemon=True)
+            self._tail.start()
         return self
 
     def __exit__(self, *exc: object) -> None:
+        if self.activity_log is not None:
+            self._stop.set()
+            self._tail.join(timeout=2)
+            self._drain()
         self.progress.stop()
+
+    def _follow(self) -> None:
+        """Poll the activity log the MCP servers append to."""
+        while not self._stop.wait(0.3):
+            self._drain()
+
+    def _drain(self) -> None:
+        assert self.activity_log is not None  # noqa: S101 - guarded by callers
+        try:
+            with self.activity_log.open(encoding="utf-8") as fh:
+                fh.seek(self._offset)
+                chunk = fh.read()
+                self._offset = fh.tell()
+        except OSError:
+            return
+        for raw in chunk.splitlines():
+            try:
+                entry = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            with self._lock:
+                self.log(narrate_write(entry))
 
     def log(self, text: Text | str) -> None:
         """A line above the bar."""
         self.progress.console.print(text)
 
     def on_event(self, event: Event) -> None:
-        """Echo tool calls and keep the token counter current."""
-        if event.kind == "tool" and event.tool:
-            name = event.tool.removeprefix("model-wtf_")
-            target = (
-                event.args.get("model")
-                or event.args.get("touchpoint")
-                or event.args.get("slug")
-                or event.args.get("query")
-                or event.args.get("unit")
-                or event.args.get("filePath")
-                or event.args.get("pattern")
-                or event.args.get("subagent_type")
-                or ""
-            )
-            style = "cyan" if event.tool.startswith("model-wtf_") else "dim"
-            line = Text.assemble(("  ", ""), (name, style), ("  ", ""), str(target))
-            if name == self.closing_tool or name.startswith("activity_"):
-                first = event.output.splitlines()[0] if event.output else ""
-                ok = not first.startswith("Error")
-                line.append(f"  -> {first}", style="green" if ok else "red")
-                if name == self.closing_tool and ok and "still pending" not in first:
-                    self.progress.advance(self.task)
-            elif event.output.startswith("Error"):
-                line.append(f"  -> {event.output.splitlines()[0]}", style="red")
-            self.log(line)
-        elif event.kind == "step":
-            self.tokens += event.tokens
-            self.progress.update(self.task, extra=f"{self.tokens:,} tokens")
+        """Narrate what the agent is doing, one line per meaningful step."""
+        with self._lock:
+            if event.kind == "step":
+                self.tokens += event.tokens
+                self.progress.update(self.task, extra=f"{self.tokens:,} tokens")
+                return
+            if event.kind != "tool" or not event.tool:
+                return
+            line = narrate(event, closing_tool=self.closing_tool)
+            if line is None:
+                return
+            text, advance = line
+            if advance:
+                self.progress.advance(self.task)
+            if text is not None:
+                self.log(text)
 
     def sync(self, done: int) -> None:
         """Re-align the bar with what the lock files actually say."""
@@ -411,8 +675,14 @@ def auto_review(
     keep_scratch: bool = False,
     target: Target = DATA_TARGET,
     group: bool = False,
+    workers: int = 1,
 ) -> LoopResult:
     """Run rounds until nothing is pending, progress stalls or rounds run out.
+
+    ``workers`` > 1 runs that many OpenCode sessions per round in parallel,
+    each dispatching its own shard of the pending list (``batch`` items per
+    worker). Writes are one file per touchpoint and a merge-on-save lock
+    file for data, so shards do not collide.
 
     With ``group`` (touchpoints only), a final single session groups the
     PII-touching touchpoints into activities once nothing is pending — or
@@ -432,6 +702,9 @@ def auto_review(
     if not remaining and not base and not needs_grouping:
         return LoopResult(0, 0, 0, [], "nothing pending")
 
+    activity_log = Path(
+        tempfile.mkstemp(prefix="model-wtf-activity-", suffix=".jsonl")[1]
+    )
     box = sandbox(
         repo_root,
         model=model,
@@ -439,6 +712,7 @@ def auto_review(
         readable=readable,
         python=python,
         max_tokens=max_tokens,
+        activity_log=activity_log,
     )
     rounds = 0
     stalled = 0
@@ -451,6 +725,7 @@ def auto_review(
             total=len(before),
             closing_tool=target.closing_tool,
             noun=target.noun,
+            activity_log=activity_log,
         ) as reporter,
     ):
         while remaining and rounds < max_rounds and oc.budget_left() != 0:
@@ -462,11 +737,8 @@ def auto_review(
                     style="bold",
                 )
             )
-            result = oc.run_task(
-                prompt,
-                agent=target.dispatcher,
-                timeout=ROUND_TIMEOUT,
-                on_event=reporter.on_event,
+            result = _run_round(
+                oc, target, prompt, remaining, batch, workers, reporter, base=base
             )
             last_message = result.final_text or result.stderr_tail
             fatal = result.fatal_error
