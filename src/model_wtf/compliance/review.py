@@ -143,7 +143,10 @@ class Lock:
     def status_of(self, row: Row) -> Reviewed:
         """Compute the review status of ``row`` against the lock."""
         entry = self.data.items.get(row.id)
-        if row.source in (Source.OVERRIDE, Source.DERIVED):
+        # An override file is a human (or agent) verdict; a manual item is
+        # declared in full by whoever added it. Both are reviewed by
+        # construction: there is no ORM model to send a reviewer to.
+        if row.source in (Source.OVERRIDE, Source.DERIVED, Source.MANUAL):
             return Reviewed(row, ReviewStatus.OVERRIDE, entry)
         if row.source is Source.KNOWN:
             return Reviewed(row, ReviewStatus.KNOWN, entry)

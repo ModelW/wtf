@@ -22,9 +22,9 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from model_wtf.compliance.declarations import format_errors
-from model_wtf.compliance.report import Diagnostic, Severity
+from model_wtf.compliance.report import Diagnostic, Severity, marker_diagnostics
 from model_wtf.compliance.schemas import NonEmpty, StrictModel, is_valid_id
-from model_wtf.compliance.yaml_io import Todo, iter_todo_paths, load_yaml
+from model_wtf.compliance.yaml_io import Marker, load_yaml
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -61,9 +61,9 @@ class SensitivityLevel(StrictModel):
     """One ``sensitivity/<level>.yaml``."""
 
     rank: int = Field(ge=0)
-    description: NonEmpty | Todo
-    criteria: NonEmpty | Todo
-    handling: NonEmpty | Todo
+    description: NonEmpty | Marker
+    criteria: NonEmpty | Marker
+    handling: NonEmpty | Marker
     dpia: Dpia = Dpia.NEVER
     replaces: list[str] = Field(default_factory=list)
 
@@ -71,9 +71,9 @@ class SensitivityLevel(StrictModel):
 class Category(StrictModel):
     """One ``categories/<id>.yaml``."""
 
-    description: NonEmpty | Todo
+    description: NonEmpty | Marker
     examples: list[str] = Field(default_factory=list)
-    register_label: NonEmpty | Todo
+    register_label: NonEmpty | Marker
     legal: Legal = Legal.NONE
     dpia: bool = False
     replaces: list[str] = Field(default_factory=list)
@@ -459,16 +459,7 @@ def _load_dir[M: BaseModel](
                 for loc, msg in format_errors(exc)
             )
             continue
-        diagnostics.extend(
-            Diagnostic(
-                Severity.WARNING,
-                "todo",
-                f"{path.name}: {dotted} is still !todo",
-                scope,
-                path,
-            )
-            for dotted in iter_todo_paths(instance)
-        )
+        diagnostics.extend(marker_diagnostics(instance, path, scope))
         out[path.stem] = instance
     return out
 

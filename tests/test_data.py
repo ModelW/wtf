@@ -376,6 +376,13 @@ def test_override_and_manual_item(django_repo: Path) -> None:
         Dpia.NEVER,
     )
     assert [d.code for d in data.diagnostics] == ["todo"]
+    # A manual item is declared in full by whoever added it: nothing to
+    # review, and no ORM model a reviewer could be sent to.
+    statuses = {
+        r.row.id: r.status for r in Lock(_unit(django_repo)).annotate(data.rows)
+    }
+    assert statuses["spaces-avatars"] is ReviewStatus.OVERRIDE
+    assert statuses["shop.Customer.preferences"] is ReviewStatus.OVERRIDE
 
 
 @pytest.mark.parametrize(
@@ -422,10 +429,12 @@ def test_check_reports_pending_reviews(django_repo: Path) -> None:
     report = run_check(django_repo, strict=False)
 
     codes = {d.code for d in report.diagnostics}
-    assert codes == {"pending-review", "assumption", "touchpoint-pending"}
-    # sessions.Session.session_data rests on a library assumption.
-    assumed = [d for d in report.diagnostics if d.code == "assumption"]
-    assert any(d.message.startswith("sessions.Session:") for d in assumed)
+    # Library assumptions are agent context, not a to-do line: the pending
+    # line carries the breakdown instead.
+    assert codes == {"pending-review", "touchpoint-pending"}
+    pending = next(d for d in report.diagnostics if d.code == "pending-review")
+    assert "assumed" in pending.message
+    assert pending.hint == "data auto-review --unit api"
     assert report.exit_code is ExitCode.FINDINGS
 
 
@@ -560,6 +569,14 @@ def test_cli_list_rules_override(django_repo: Path) -> None:
     listed = runner.invoke(cli, [*base, "list", *root, "--format", "json"])
     assert listed.exit_code == 0, listed.output
     assert '"id": "shop.Customer.email"' in listed.output
+
+    assumed = runner.invoke(
+        cli, [*base, "list", *root, "--assumed", "--format", "json"]
+    )
+    assert assumed.exit_code == 0, assumed.output
+    rows = json.loads(assumed.stdout)
+    assert {r["review"] for r in rows} == {"pending:assumed"}
+    assert "sessions.Session.session_data" in {r["id"] for r in rows}
 
     table = runner.invoke(
         cli, [*base, "list", *root, "--unit", "api"], env={"COLUMNS": "250"}

@@ -9,9 +9,10 @@ Repository: `{repo}`. Paths in tool output are relative to it.
 1. `data_model` with the model id you were given. It contains the field
    table, the class source, and the keys written into JSON fields. In most
    cases this is all you need.
-2. Only if a field is still unclear after reading that (a JSON field with
-   no hints, a plain text field whose purpose is not obvious): at most 2
-   `grep`/`read` calls under `{repo}`.
+2. If a field is still unclear after reading that (a JSON field with no
+   hints, a plain text field whose purpose is not obvious): `grep`/`read`
+   under `{repo}` until you know. Being right matters more than being quick;
+   never leave a field undecided because you stopped reading early.
 3. Decide every field with the rubric.
 4. Call `data_review_model` once with one decision per field:
    - `{"field": "<name>", "ok": true}` when the current classification is
@@ -32,9 +33,9 @@ Repository: `{repo}`. Paths in tool output are relative to it.
 
 ## JSON-like fields: declare the contents
 
-The tool output lists the write sites found by grep. Follow them (a few
-`read`/`grep` calls at most) to learn WHAT kind of information ends up in
-the blob, then decide:
+The tool output lists the write sites found by grep. Follow them (every
+one of them, and what they call) to learn WHAT kind of information ends up
+in the blob, then decide:
 
 ```
 {"field": "payload",

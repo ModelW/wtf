@@ -33,9 +33,9 @@ import yaml
 from pydantic import Field, ValidationError
 
 from model_wtf.compliance.declarations import format_errors
-from model_wtf.compliance.report import Diagnostic, Severity
+from model_wtf.compliance.report import Diagnostic, Severity, marker_diagnostics
 from model_wtf.compliance.schemas import NonEmpty, Slug, StrictModel
-from model_wtf.compliance.yaml_io import Todo, iter_todo_paths, load_yaml
+from model_wtf.compliance.yaml_io import Marker, load_yaml
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -61,15 +61,30 @@ class LegalBasis(StrEnum):
 class ActivityFile(StrictModel):
     """``activities/<slug>.yaml``."""
 
-    name: NonEmpty | Todo
-    purpose: NonEmpty | Todo
-    legal_basis: LegalBasis | Todo
+    name: NonEmpty | Marker = Field(description="Short name of the activity")
+    purpose: NonEmpty | Marker = Field(
+        description="Why the data is processed, as the register states it"
+    )
+    legal_basis: LegalBasis | Marker = Field(
+        description="Art. 6 basis: contract, consent, legal_obligation, "
+        "legitimate_interests, vital_interests or public_task"
+    )
     touchpoints: list[str] = Field(default_factory=list)
-    data_subjects: list[NonEmpty] | Todo = Field(default_factory=list)
+    data_subjects: list[NonEmpty] | Marker = Field(
+        default_factory=list,
+        description="Whose data: customers, staff, prospects, ...",
+    )
     recipients: list[Slug] = Field(default_factory=list)
-    retention: NonEmpty | Todo | None = None
-    controller: Slug | Todo | None = None
-    processor: Slug | Todo | None = None
+    retention: NonEmpty | Marker | None = Field(
+        default=None,
+        description="How long the data is kept and what starts the clock",
+    )
+    controller: Slug | Marker | None = Field(
+        default=None, description="Party id, when not the app's controller"
+    )
+    processor: Slug | Marker | None = Field(
+        default=None, description="Party id, when not the app's processor"
+    )
     description: NonEmpty | None = None
 
 
@@ -105,7 +120,7 @@ class Activity:
     def to_dict(self) -> dict[str, Any]:
         """JSON form (``!todo`` values become ``null``)."""
         spec = {
-            key: None if isinstance(value, Todo) else value
+            key: None if isinstance(value, Marker) else value
             for key, value in self.spec.model_dump(mode="python").items()
         }
         spec["legal_basis"] = (
@@ -282,16 +297,7 @@ def _load(path: Path, diagnostics: list[Diagnostic]) -> ActivityFile | None:
             for loc, msg in format_errors(exc)
         )
         return None
-    diagnostics.extend(
-        Diagnostic(
-            Severity.WARNING,
-            "todo",
-            f"{path.name}: {dotted} is still !todo",
-            "shared",
-            path,
-        )
-        for dotted in iter_todo_paths(spec)
-    )
+    diagnostics.extend(marker_diagnostics(spec, path, "shared"))
     return spec
 
 

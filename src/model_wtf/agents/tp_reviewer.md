@@ -53,9 +53,10 @@ Repository: `{repo}`. Paths in tool output are relative to it.
   view can reach; a generic framework view (Wagtail page editing, revisions,
   choosers) touches the page tree's own columns (`wagtailcore.Page.*`,
   `wagtailcore.Revision.*`), not every page model's fields.
-- Budget: at most ~6 reads/greps. If the code is a framework view you
-  cannot fully trace, declare what the shapes and the model prove and say
-  `partial` in the reason rather than running out of steps.
+- Read as much as it takes to be right: follow the view into its
+  serializers, forms, services and templates. Only when the code is a
+  framework view you genuinely cannot trace, declare what the shapes and the
+  model prove and say `partial` in the reason.
 - `exporting` is for the project's data sent to another organisation
   (personal or not). Map tiles, fonts, CDN assets loaded by a browser are
   not exports of the project's data; do not declare them.

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections import Counter
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from model_wtf.compliance.data import DATA_DIR, Source
+from model_wtf.compliance.data import DATA_DIR
 from model_wtf.compliance.declarations import load_declarations
 from model_wtf.compliance.discovery import load_units, select_manifest
 from model_wtf.compliance.exit_codes import ExitCode
@@ -15,10 +17,11 @@ from model_wtf.compliance.report import (
     Report,
     Scope,
     ScopeKind,
+    Section,
     Severity,
     Unit,
 )
-from model_wtf.compliance.review import LOCK_FILE, Lock
+from model_wtf.compliance.review import LOCK_FILE, Lock, ReviewStatus
 from model_wtf.compliance.touchpoints import TOUCHPOINTS_DIR
 from model_wtf.compliance.workspace import load_workspace
 
@@ -33,7 +36,9 @@ SHARED_FOLDER = "compliance"
 SHARED_SCOPE_ID = "shared"
 
 
-def run_check(root: Path, *, strict: bool, python: str | None = None) -> Report:
+def run_check(
+    root: Path, *, strict: bool, python: str | None = None, allow_todo: bool = False
+) -> Report:
     """Discover units and inspect their folders, returning a :class:`Report`.
 
     Declaration problems never raise: they are folded into the report with
@@ -50,6 +55,9 @@ def run_check(root: Path, *, strict: bool, python: str | None = None) -> Report:
         error.
     python
         Interpreter override for the Django introspection.
+    allow_todo
+        Open ``!todo`` questions no longer fail the check (they are still
+        listed). ``!missing`` findings always do.
     """
     root = root.resolve()
     try:
@@ -89,7 +97,7 @@ def run_check(root: Path, *, strict: bool, python: str | None = None) -> Report:
         manifest=manifest,
         scopes=tuple(scopes),
         diagnostics=tuple(diagnostics),
-        exit_code=exit_code_for(diagnostics),
+        exit_code=exit_code_for(diagnostics, allow_todo=allow_todo),
     )
 
 
@@ -108,9 +116,10 @@ def _scope(
         path=folder,
         exists=folder.is_dir(),
         items=items,
-        errors=sum(d.severity is Severity.ERROR for d in mine),
-        todos=sum(d.code == "todo" for d in mine),
-        pending=sum(d.code == "pending-review" for d in mine),
+        errors=sum(d.section is Section.ERRORS for d in mine),
+        missing=sum(d.section is Section.MISSING for d in mine),
+        todos=sum(d.section is Section.TODO for d in mine),
+        pending=sum(d.section is Section.REVIEW for d in mine),
     )
 
 
@@ -150,33 +159,31 @@ def _check_reviews(unit: Unit, rows: list[Row], diagnostics: list[Diagnostic]) -
     lock = Lock(unit)
     diagnostics.extend(lock.diagnostics)
     pending = [r for r in lock.annotate(rows) if r.status.pending]
-    if pending:
-        diagnostics.append(
-            Diagnostic(
-                Severity.WARNING,
-                "pending-review",
-                f"{len(pending)} data item(s) still to review "
-                "(`model-wtf compliance data list --pending`)",
-                unit.id,
-                unit.folder / LOCK_FILE,
-            )
-        )
-    # Every unconfirmed library assumption is spelled out once per model:
-    # this is the "here is what we took for granted" list a reader needs.
-    assumed: dict[str, str] = {}
-    for item in pending:
-        if item.row.source is Source.LIBRARY and item.row.assumption:
-            label = item.row.id.rsplit(".", 1)[0].split("@", 1)[0]
-            assumed.setdefault(label, item.row.assumption.strip())
-    diagnostics.extend(
+    if not pending:
+        return
+    # One line with the breakdown: the library assumptions themselves are
+    # agent context and reviewer aid (``data list --pending --assumed``),
+    # not something to read in a to-do list.
+    kinds = Counter(r.status for r in pending)
+    labels = {
+        ReviewStatus.PENDING_NEW: "new",
+        ReviewStatus.PENDING_CHANGED: "changed",
+        ReviewStatus.PENDING_ASSUMED: "assumed",
+        ReviewStatus.PENDING_CONTENTS: "contents",
+    }
+    breakdown = ", ".join(
+        f"{kinds[status]} {label}" for status, label in labels.items() if kinds[status]
+    )
+    diagnostics.append(
         Diagnostic(
             Severity.WARNING,
-            "assumption",
-            f"{label}: {text} (confirm with `data reviewed` after checking)",
+            "pending-review",
+            f"{len(pending)} data item(s) pending ({breakdown})",
             unit.id,
             unit.folder / LOCK_FILE,
+            subject=f"{unit.id}:data",
+            hint=f"data auto-review --unit {unit.id}",
         )
-        for label, text in sorted(assumed.items())
     )
 
 
@@ -194,10 +201,11 @@ def _check_touchpoints(
             Diagnostic(
                 Severity.WARNING,
                 "touchpoint-pending",
-                f"{len(pending)} touchpoint(s) without a data declaration "
-                "(`model-wtf compliance touchpoints list --pending`)",
+                f"{len(pending)} touchpoint(s) pending",
                 unit.id,
                 folder,
+                subject=f"{unit.id}:touchpoints",
+                hint=f"touchpoints auto-review --unit {unit.id}",
             )
         )
     orphans = [
@@ -207,17 +215,22 @@ def _check_touchpoints(
         and any(ws.rows[r].pii for r in t.data if r in ws.rows)
         and not ws.activities.of_touchpoint(t.full_id)
     ]
-    diagnostics.extend(
-        Diagnostic(
-            Severity.WARNING,
-            "touchpoint-orphan",
-            f"{t.full_id} handles personal data but belongs to no activity "
-            "(`activities add <slug> ...` or `activities create`)",
-            unit.id,
-            folder / f"{t.slug}.yaml",
+    if orphans:
+        names = ", ".join(t.full_id for t in orphans[:3])
+        if len(orphans) > 3:
+            names += f", … (+{len(orphans) - 3})"
+        diagnostics.append(
+            Diagnostic(
+                Severity.WARNING,
+                "touchpoint-orphan",
+                f"{len(orphans)} touchpoint(s) handling personal data in no "
+                f"activity: {names}",
+                unit.id,
+                folder,
+                subject=f"{unit.id}:orphans",
+                hint=f"touchpoints auto-review --unit {unit.id} --group-only",
+            )
         )
-        for t in orphans
-    )
     # Personal items nobody declares handling: informational, it usually
     # means a manifest is missing rather than data nobody uses.
     referenced = {r for t in ws.all_touchpoints.values() for r in (t.data or ())}
@@ -229,10 +242,11 @@ def _check_touchpoints(
             Diagnostic(
                 Severity.INFO,
                 "data-unreferenced",
-                f"{len(unreferenced)} personal data item(s) handled by no "
-                "touchpoint (`data why <unit:id>` to investigate)",
+                f"{len(unreferenced)} personal data item(s) handled by no touchpoint",
                 unit.id,
                 unit.folder / DATA_DIR,
+                subject=f"{unit.id}:unreferenced",
+                hint="data why <unit:id>",
             )
         )
 
@@ -241,19 +255,24 @@ def _with_scope(diag: Diagnostic, scope_id: str) -> Diagnostic:
     """Attribute an un-scoped diagnostic (from data file validation) to a unit."""
     if diag.scope_id is not None:
         return diag
-    return Diagnostic(diag.severity, diag.code, diag.message, scope_id, diag.path)
+    return replace(diag, scope_id=scope_id)
 
 
-def exit_code_for(diagnostics: list[Diagnostic]) -> ExitCode:
-    """Worst outcome wins: errors → 3, todos / pending reviews → 1, else clean.
+def exit_code_for(
+    diagnostics: list[Diagnostic], *, allow_todo: bool = False
+) -> ExitCode:
+    """Worst section wins: errors → 3, missing / todo / review → 1, else clean.
 
-    A todo is emitted as a warning (it does not mean the declarations are
-    wrong) but still fails the check, because an unfinished registry is not
-    a compliant one.
+    ``!missing`` is an established non-compliance and can never be waved
+    through; ``!todo`` can (``allow_todo``), because an unanswered question
+    is not yet a finding. Anything in the Review section fails: an
+    unreviewed registry is not a compliant one.
     """
-    if any(d.severity is Severity.ERROR for d in diagnostics):
+    sections = {d.section for d in diagnostics}
+    if Section.ERRORS in sections:
         return ExitCode.DECLARATION_ERROR
-    findings = ("todo", "pending-review", "touchpoint-pending", "touchpoint-orphan")
-    if any(d.code in findings for d in diagnostics):
+    if Section.MISSING in sections or Section.REVIEW in sections:
+        return ExitCode.FINDINGS
+    if Section.TODO in sections and not allow_todo:
         return ExitCode.FINDINGS
     return ExitCode.CLEAN

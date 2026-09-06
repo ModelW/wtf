@@ -503,3 +503,22 @@ def test_provider_errors_are_parsed_and_explained() -> None:
     assert soft is not None
     assert soft.fatal is False
     assert parse_events(line).tokens == 0
+
+
+def test_shard_spreads_the_pending_list_over_every_worker() -> None:
+    from model_wtf.compliance.auto_review import shard
+
+    ids = [f"m{i}" for i in range(29)]
+
+    # Fewer items than batch * workers: everybody gets 1 or 2, nobody idles.
+    spread = shard(ids, batch=8, workers=16)
+    assert len(spread) == 16
+    assert sorted(len(s) for s in spread) == [1] * 3 + [2] * 13
+    assert [i for s in spread for i in s] == ids
+
+    # More items than a round can take: capped at batch per worker.
+    capped = shard(ids, batch=2, workers=4)
+    assert capped == [["m0", "m1"], ["m2", "m3"], ["m4", "m5"], ["m6", "m7"]]
+
+    assert shard([], batch=8, workers=16) == []
+    assert shard(["only"], batch=8, workers=16) == [["only"]]

@@ -107,9 +107,9 @@ def test_scaffold_is_complete_and_checkable(make_repo: MakeRepo) -> None:
     report = run_check(root, strict=True)
     assert report.exit_code is ExitCode.FINDINGS
     assert sorted(d.message.split(": ", 1)[1] for d in report.diagnostics) == [
-        "address is still !todo",
-        "description is still !todo",
-        "email is still !todo",
+        "address is !todo",
+        "description is !todo",
+        "email is !todo",
     ]
 
 

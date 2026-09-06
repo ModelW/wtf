@@ -13,9 +13,12 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from model_wtf.compliance.exit_codes import ExitCode
+from model_wtf.compliance.yaml_io import Missing, field_description, iter_markers
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from pydantic import BaseModel
 
 
 class Severity(StrEnum):
@@ -27,7 +30,8 @@ class Severity(StrEnum):
     """
 
     INFO = "info"
-    """Worth knowing, never a finding."""
+    """Worth knowing, never a finding. Warnings here print by default;
+    ``Severity.INFO`` entries only with ``--verbose``."""
 
     WARNING = "warning"
     ERROR = "error"
@@ -50,7 +54,7 @@ class ScopeStatus(StrEnum):
     """Folder present, nothing owed."""
 
     PENDING = "pending"
-    """Folder present; ``!todo`` values or unreviewed data items remain."""
+    """Folder present; ``!todo``/``!missing`` values or unreviewed items remain."""
 
     ERROR = "error"
     """Invalid declarations, or the folder is missing (``init`` not run)."""
@@ -74,6 +78,18 @@ class Diagnostic:
     path
         File or folder the diagnostic points at, if any. Used by the
         GitHub renderer to attach the annotation to a file.
+    subject
+        Stable identifier of *what* the diagnostic is about: a data id, a
+        touchpoint id, an activity slug, or ``file#field`` for a marker.
+        This is what a gate diffs between two runs; the message is free to
+        change wording, the subject is not.
+    hint
+        The command or action that resolves it (``data auto-review``); the
+        text renderer prints it after an arrow.
+    note
+        Free text attached by whoever wrote the finding (the marker's note,
+        an agent's justification); kept apart from the message so renderers
+        can fold lines without losing it.
     """
 
     severity: Severity
@@ -81,6 +97,58 @@ class Diagnostic:
     message: str
     scope_id: str | None = None
     path: Path | None = None
+    subject: str | None = None
+    hint: str | None = None
+    note: str | None = None
+
+    @property
+    def section(self) -> Section:
+        """Which to-do list this belongs to; see :class:`Section`."""
+        if self.severity is Severity.ERROR:
+            return Section.ERRORS
+        if self.severity is Severity.INFO:
+            return Section.INFO
+        if self.code == "missing" or self.code.endswith("-missing"):
+            return Section.MISSING
+        if self.code == "todo":
+            return Section.TODO
+        if self.code in REVIEW_CODES:
+            return Section.REVIEW
+        # Any other warning is an advisory (unit not introspectable, image
+        # without a compliance block outside --strict): worth printing,
+        # nothing to do about it from a compliance standpoint.
+        return Section.INFO
+
+
+REVIEW_CODES = frozenset(
+    {"pending-review", "touchpoint-pending", "touchpoint-orphan", "manual-exemption"}
+)
+"""Warning codes that ask for a review round and fail the check."""
+
+
+class Section(StrEnum):
+    """The kind of work a diagnostic asks for.
+
+    ``check`` is a to-do list: it groups findings by what has to happen
+    next rather than by severity, and the exit code follows the sections.
+    """
+
+    ERRORS = "errors"
+    """The files are wrong; fix them (exit 3)."""
+
+    MISSING = "missing"
+    """A non-compliance is established: code or process to build (exit 1,
+    never ignorable)."""
+
+    TODO = "todo"
+    """A question only a human can answer (exit 1; ``--allow-todo`` → 0)."""
+
+    REVIEW = "review"
+    """Run the agents, or decide (exit 1)."""
+
+    INFO = "info"
+    """Worth knowing, never a finding. Warnings here print by default;
+    ``Severity.INFO`` entries only with ``--verbose``."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,8 +194,9 @@ class Scope:
     items
         Data items inventoried for a unit scope (``None`` for the shared
         scope, which has no inventory).
-    errors, todos, pending
-        Counts of the diagnostics attributed to this scope, by kind.
+    errors, missing, todos, pending
+        Counts of the diagnostics attributed to this scope, by section
+        (``pending`` is the Review section).
     """
 
     id: str
@@ -136,6 +205,7 @@ class Scope:
     exists: bool
     items: int | None = None
     errors: int = 0
+    missing: int = 0
     todos: int = 0
     pending: int = 0
 
@@ -144,9 +214,42 @@ class Scope:
         """Worst thing wrong with this scope."""
         if not self.exists or self.errors:
             return ScopeStatus.ERROR
-        if self.todos or self.pending:
+        if self.missing or self.todos or self.pending:
             return ScopeStatus.PENDING
         return ScopeStatus.OK
+
+
+def marker_diagnostics(
+    model: BaseModel, path: Path, scope_id: str | None
+) -> list[Diagnostic]:
+    """One diagnostic per ``!todo`` / ``!missing`` value inside ``model``.
+
+    Todos land in the Todo section (code ``todo``), missings in the Missing
+    section (code ``missing``). The subject is ``<file>#<dotted field>`` so a
+    gate can tell "the same open question" across runs; a note is appended
+    to the message when present.
+    """
+    out: list[Diagnostic] = []
+    for dotted, marker in iter_markers(model):
+        missing = isinstance(marker, Missing)
+        message = f"{path.name}: {dotted} is {marker.tag}"
+        if marker.note:
+            message += f' "{marker.note}"'
+        out.append(
+            Diagnostic(
+                Severity.WARNING,
+                "missing" if missing else "todo",
+                message,
+                scope_id,
+                path,
+                subject=f"{path.name}#{dotted}",
+                # For a todo the hint is the question the field asks; the
+                # ``--todo`` questionnaire is built from it.
+                hint=None if missing else field_description(model, dotted),
+                note=marker.note,
+            )
+        )
+    return out
 
 
 class DeclarationError(Exception):
@@ -219,21 +322,39 @@ class Report:
                     "exists": scope.exists,
                     "items": scope.items,
                     "errors": scope.errors,
+                    "missing": scope.missing,
                     "todos": scope.todos,
                     "pending": scope.pending,
                     "status": scope.status.value,
                 }
                 for scope in self.scopes
             ],
-            "diagnostics": [
-                {
-                    "severity": diag.severity.value,
-                    "code": diag.code,
-                    "message": diag.message,
-                    "scope": diag.scope_id,
-                    "path": self.display_path(diag.path) if diag.path else None,
-                }
-                for diag in self.diagnostics
-            ],
+            "diagnostics": [self._diag_dict(d) for d in self.diagnostics],
+            "sections": {
+                section.value: [
+                    self._diag_dict(d) for d in self.diagnostics if d.section is section
+                ]
+                for section in Section
+            },
             "exit_code": int(self.exit_code),
         }
+
+    def _diag_dict(self, diag: Diagnostic) -> dict[str, Any]:
+        return {
+            "severity": diag.severity.value,
+            "section": diag.section.value,
+            "code": diag.code,
+            "message": diag.message,
+            "scope": diag.scope_id,
+            "path": self.display_path(diag.path) if diag.path else None,
+            "subject": diag.subject,
+            "hint": diag.hint,
+            "note": diag.note,
+        }
+
+    def by_section(self) -> dict[Section, list[Diagnostic]]:
+        """Diagnostics grouped by :class:`Section`, empty sections included."""
+        out: dict[Section, list[Diagnostic]] = {s: [] for s in Section}
+        for diag in self.diagnostics:
+            out[diag.section].append(diag)
+        return out

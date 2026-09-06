@@ -17,7 +17,7 @@ from model_wtf.compliance.check import run_check
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.knowledge import load_knowledge
 from model_wtf.compliance.mcp_server import Tools
-from model_wtf.compliance.report import Unit
+from model_wtf.compliance.report import Section, Unit
 from model_wtf.compliance.touchpoints import slugify
 from model_wtf.compliance.workspace import load_workspace
 from model_wtf.introspect.runner import run_node_script
@@ -221,7 +221,11 @@ def test_activities_derivation_and_check(repo: Path) -> None:
         "name: Ordering\npurpose: Take and deliver orders\nlegal_basis: contract\n"
         "data_subjects: [customers]\n"
         "touchpoints: [api:checkout, api:task:shop.send_receipt, api:ghost]\n"
-        "recipients: [stripe]\nretention: !todo\n"
+        'recipients: [stripe]\nretention: !missing "orders are never purged"\n'
+    )
+    (acts / "support.yaml").write_text(
+        "name: Support\npurpose: !todo\nlegal_basis: contract\n"
+        "data_subjects: [customers]\ntouchpoints: [api:admin:shop.Customer]\n"
     )
 
     ws = _ws(repo)
@@ -244,16 +248,47 @@ def test_activities_derivation_and_check(repo: Path) -> None:
     assert d.max_sensitivity == "confidential"
     assert d.dpia is not None
     codes = sorted(d.code for d in ws.activities.diagnostics)
-    assert codes == ["activity-unknown-touchpoint", "party-unknown", "todo"]
+    assert codes == ["activity-unknown-touchpoint", "missing", "party-unknown", "todo"]
 
+    # ``check`` is a to-do list: one of each kind of work lands in its section.
     report = run_check(repo, strict=False)
-    report_codes = {d.code for d in report.diagnostics}
-    assert "touchpoint-orphan" in report_codes  # admin:shop.Customer handles PII
-    assert "touchpoint-pending" in report_codes
-    assert "activity-unknown-touchpoint" in report_codes
+    sections = {s: [d.code for d in ds] for s, ds in report.by_section().items()}
+    assert sorted(sections[Section.ERRORS]) == [
+        "activity-unknown-touchpoint",
+        "party-unknown",
+    ]
+    assert sections[Section.MISSING] == ["missing"]
+    assert sections[Section.TODO] == ["todo"]
+    # admin:shop.Customer now belongs to ``support``; the front unit's
+    # touchpoints and the api data are still pending.
+    assert sorted(sections[Section.REVIEW]) == [
+        "pending-review",
+        "touchpoint-pending",
+        "touchpoint-pending",
+    ]
     assert report.exit_code is ExitCode.DECLARATION_ERROR
-    orphan = next(d for d in report.diagnostics if d.code == "touchpoint-orphan")
-    assert "api:admin:shop.Customer" in orphan.message
+    missing = next(d for d in report.diagnostics if d.code == "missing")
+    assert missing.subject == "ordering.yaml#retention"
+    assert missing.note == "orders are never purged"
+    todo = next(d for d in report.diagnostics if d.code == "todo")
+    assert todo.subject == "support.yaml#purpose"
+
+    # Without the errors: exit 1 because of the !missing, whatever the flags.
+    (acts / "ordering.yaml").write_text(
+        (acts / "ordering.yaml")
+        .read_text()
+        .replace(", api:ghost", "")
+        .replace("recipients: [stripe]\n", "")
+    )
+    (acts / "support.yaml").write_text(
+        (acts / "support.yaml").read_text().replace("purpose: !todo", "purpose: Help")
+    )
+    for unit_folder in (folder, repo / "front" / "compliance" / "touchpoints"):
+        unit_folder.mkdir(exist_ok=True)
+    report = run_check(repo, strict=False)
+    assert not report.by_section()[Section.ERRORS]
+    assert report.exit_code is ExitCode.FINDINGS
+    assert run_check(repo, strict=False, allow_todo=True).exit_code is ExitCode.FINDINGS
 
 
 def test_cli_touchpoints_activities_why(repo: Path) -> None:

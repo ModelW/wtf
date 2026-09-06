@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+import yaml
 from pydantic import BaseModel
 
 from conftest import APP_OK, FILES_ALL_OK, PARTY_ACME, PARTY_WITH, SNOW_TWO_UNITS
@@ -15,8 +16,11 @@ from model_wtf.compliance.report import Severity
 from model_wtf.compliance.schemas import App
 from model_wtf.compliance.yaml_io import (
     TODO,
+    Marker,
+    Missing,
     Todo,
     dump_yaml,
+    iter_markers,
     iter_todo_paths,
     load_yaml,
 )
@@ -32,33 +36,57 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-def test_open_tag_loads_as_singleton(tmp_path: Path) -> None:
+def test_markers_load_with_optional_notes(tmp_path: Path) -> None:
     path = tmp_path / "f.yaml"
-    path.write_text("a: !todo\nb:\n  - !todo\n  - 1\n", encoding="utf-8")
+    path.write_text(
+        'a: !todo\nb:\n  - !todo "ask legal"\n  - 1\nc: !missing "no purge task"\n',
+        encoding="utf-8",
+    )
 
     data = load_yaml(path)
 
-    assert data["a"] is TODO
-    assert data["b"][0] is TODO
-    assert Todo() is TODO
+    assert data["a"] == TODO
+    assert data["a"].note is None
+    assert data["b"][0] == Todo("ask legal")
+    assert data["b"][0] != TODO
+    assert data["c"] == Missing("no purge task")
+    assert not isinstance(data["c"], Todo)
+    assert isinstance(data["c"], Marker)
+    assert repr(data["c"]) == '!missing "no purge task"'
+
+
+def test_marker_collections_are_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "f.yaml"
+    path.write_text("a: !todo [1, 2]\n", encoding="utf-8")
+
+    with pytest.raises(yaml.YAMLError, match="at most a note"):
+        load_yaml(path)
 
 
 def test_open_round_trips_through_dump() -> None:
     assert dump_yaml({"a": TODO, "b": "x"}) == "a: !todo ''\nb: x\n"
+    assert dump_yaml({"a": Missing("why")}) == "a: !missing 'why'\n"
 
 
 def test_iter_todo_paths_walks_nested_models() -> None:
     class Inner(BaseModel):
-        x: str | Todo
+        x: str | Marker
 
     class Outer(BaseModel):
-        a: str | Todo
+        a: str | Marker
         inner: Inner
         many: list[Inner]
 
-    model = Outer(a=TODO, inner=Inner(x="ok"), many=[Inner(x="ok"), Inner(x=TODO)])
+    model = Outer(
+        a=TODO, inner=Inner(x=Missing("gone")), many=[Inner(x="ok"), Inner(x=TODO)]
+    )
 
     assert list(iter_todo_paths(model)) == ["a", "many[1].x"]
+    assert list(iter_markers(model)) == [
+        ("a", TODO),
+        ("inner.x", Missing("gone")),
+        ("many[1].x", TODO),
+    ]
 
 
 def test_open_is_rejected_where_not_allowed() -> None:
