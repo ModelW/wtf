@@ -1,8 +1,7 @@
-description: Names — of a person unless the model is clearly not about people
+description: Names — assumed to be of a person; override when the model is not about people
 priority: 110
 match:
   - name: '^(first|last|middle|full|given|family|sur|display|maiden|legal)_?name$|^(username|nickname|initials)$|^name$'
 pii: true
 sensitivity: personal
 category: identity
-assumed: true

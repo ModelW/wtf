@@ -1,8 +1,7 @@
-description: Anything no other rule understood — assumed personal, review required
+description: Anything no other rule recognised (plain text, custom fields) — not personal data until a review says otherwise
 priority: 1000
 match:
   - {}
-pii: true
-sensitivity: personal
-category: content
-assumed: true
+pii: false
+sensitivity: internal
+category: technical

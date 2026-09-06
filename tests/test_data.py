@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import shutil
 import sys
 from pathlib import Path
@@ -213,6 +214,13 @@ def test_introspect_fixture_project(django_repo: Path) -> None:
         ),
         (
             _field(name="avatar", type="ImageField", internal_type="FileField"),
+            "file_path",
+            False,
+            "internal",
+            "technical",
+        ),
+        (
+            _field(name="content", type="FileStore", internal_type="FileStore"),
             "file",
             True,
             "personal",
@@ -227,10 +235,10 @@ def test_introspect_fixture_project(django_repo: Path) -> None:
         ),
         (
             _field(name="notes", type="TextField", internal_type="TextField"),
-            "free_text",
-            True,
-            "personal",
-            "content",
+            "fallback",
+            False,
+            "internal",
+            "technical",
         ),
         (
             _field(name="status", choices=True),
@@ -251,9 +259,9 @@ def test_introspect_fixture_project(django_repo: Path) -> None:
                 name="body", type="SearchVectorField", internal_type="SearchVectorField"
             ),
             "fallback",
-            True,
-            "personal",
-            "content",
+            False,
+            "internal",
+            "technical",
         ),
     ],
     ids=lambda v: v if isinstance(v, str) else None,
@@ -273,10 +281,8 @@ def test_builtin_rules(
     )
 
 
-def test_assumed_rules_and_dpia() -> None:
+def test_dpia_derivation() -> None:
     knowledge = load_knowledge(None)
-    assumed = {rid for rid, r in knowledge.rules if r.assumed}
-    assert {"json", "file", "free_text", "fallback", "name"} <= assumed
     assert knowledge.dpia_for("special", "health") is Dpia.ALWAYS
     assert knowledge.dpia_for("confidential", "content") is Dpia.LARGE_SCALE
     assert knowledge.dpia_for("personal", "location") is Dpia.LARGE_SCALE
@@ -302,13 +308,30 @@ def test_collect_unit_classifies_every_field(django_repo: Path) -> None:
     assert data.diagnostics == []
     rows = {r.id: r for r in data.rows}
     assert rows["shop.Customer.email"].rule == "email"
-    assert rows["shop.Customer.preferences"].assumed is True
     assert rows["shop.Customer.preferences"].dpia is Dpia.LARGE_SCALE
     assert rows["shop.Order.total"].category == "financial"
     assert rows["shop.Order.customer"].pii is False
-    assert all(r.source is Source.RULE for r in data.rows)
+    assert all(r.source is Source.RULE for r in data.rows if r.id.startswith("shop."))
+    # Django's own models are library rows (not queued) unless curated.
+    assert rows["auth.User.password"].source is Source.KNOWN
+    assert rows["auth.Group.permissions"].source is Source.LIBRARY
+    # The bytes behind an upload column are their own item, with their store.
+    avatar_store = rows["shop.Customer.avatar@files.content"]
+    assert (avatar_store.pii, avatar_store.category, avatar_store.rule) == (
+        True,
+        "content",
+        "file",
+    )
+    assert avatar_store.store is not None
+    assert rows["shop.Customer.avatar"].rule == "file_path"
+    assert rows["shop.Customer.email"].store is not None
+    assert rows["shop.Customer.email"].store.startswith("default (sqlite3")
     assert rows["shop.Customer.email"].full_id == "api:shop.Customer.email"
     assert len(rows["shop.Customer.email"].fingerprint) == 8
+    # Same field facts, different verdict -> different fingerprint.
+    email = rows["shop.Customer.email"]
+    moved = dataclasses.replace(email, sensitivity="confidential")
+    assert moved.fingerprint != email.fingerprint
 
 
 def test_override_and_manual_item(django_repo: Path) -> None:
@@ -329,12 +352,11 @@ def test_override_and_manual_item(django_repo: Path) -> None:
 
     rows = {r.id: r for r in data.rows}
     pref = rows["shop.Customer.preferences"]
-    assert (pref.source, pref.pii, pref.sensitivity, pref.category, pref.assumed) == (
+    assert (pref.source, pref.pii, pref.sensitivity, pref.category) == (
         Source.OVERRIDE,
         False,
         "confidential",
         "technical",
-        False,
     )
     utm = rows["shop.Order.utm_campaign"]
     assert (utm.sensitivity, utm.category, utm.pii) == ("internal", "behavioural", True)
@@ -388,12 +410,12 @@ def test_data_file_errors(
     assert run_check(django_repo, strict=False).exit_code is ExitCode.DECLARATION_ERROR
 
 
-def test_check_reports_assumed_fields_as_warnings_only(django_repo: Path) -> None:
+def test_check_reports_pending_reviews(django_repo: Path) -> None:
     report = run_check(django_repo, strict=False)
 
     codes = {d.code for d in report.diagnostics}
-    assert codes == {"assumed-pii"}
-    assert report.exit_code is ExitCode.CLEAN
+    assert codes == {"pending-review"}
+    assert report.exit_code is ExitCode.FINDINGS
 
 
 def test_non_django_unit_is_skipped(
@@ -531,7 +553,7 @@ def test_cli_list_rules_override(django_repo: Path) -> None:
     table = runner.invoke(
         cli, [*base, "list", *root, "--unit", "api"], env={"COLUMNS": "250"}
     )
-    assert "rule:json (assumed)" in table.output
+    assert "rule:json" in table.output
 
     rules = runner.invoke(cli, [*base, "rules", *root])
     assert rules.exit_code == 0

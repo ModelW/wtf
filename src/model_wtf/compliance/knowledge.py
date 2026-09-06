@@ -77,6 +77,15 @@ class Category(StrictModel):
     replaces: list[str] = Field(default_factory=list)
 
 
+class KnownField(StrictModel):
+    """One entry of ``knowledge/known_fields.yaml``: a curated verdict."""
+
+    pii: bool | None = None
+    sensitivity: str | None = None
+    category: str | None = None
+    note: str = ""
+
+
 class Match(BaseModel):
     """One alternative of a rule's ``match`` list; keys are AND-ed."""
 
@@ -123,7 +132,6 @@ class DataRule(StrictModel):
     pii: bool
     sensitivity: str
     category: str
-    assumed: bool = False
 
     def matches(self, field: FieldInfo) -> bool:
         """OR over the alternatives."""
@@ -160,11 +168,14 @@ class Knowledge:
         rules: list[tuple[str, DataRule]],
         aliases: dict[str, str],
         todos: list[Diagnostic] | None = None,
+        known: dict[str, KnownField] | None = None,
     ) -> None:
         self.sensitivity = sensitivity
         self.categories = categories
         self.rules = sorted(rules, key=lambda pair: (pair[1].priority, pair[0]))
         self.aliases = aliases
+        self.known = known or {}
+        """Curated verdicts for well-known third-party fields (``app.Model.field``)."""
         self.todos = todos or []
         """``!todo`` values found in the custom scale/categories."""
 
@@ -220,6 +231,7 @@ def load_knowledge(shared: Path | None) -> Knowledge:
         _builtin_dir(CATEGORIES_DIR), Category, diagnostics, "shared"
     )
     rules_raw = _load_dir(_builtin_dir("data_rules"), DataRule, diagnostics, "shared")
+    known = _load_known(diagnostics)
     if diagnostics:
         raise KnowledgeError(diagnostics)
 
@@ -248,7 +260,22 @@ def load_knowledge(shared: Path | None) -> Knowledge:
         list(rules_raw.items()),
         aliases,
         todos=[d for d in diagnostics if d.code == "todo"],
+        known=known,
     )
+
+
+def _load_known(diagnostics: list[Diagnostic]) -> dict[str, KnownField]:
+    path = _builtin_dir("known_fields.yaml")
+    try:
+        raw = load_yaml(path) or {}
+        return {key: KnownField.model_validate(value) for key, value in raw.items()}
+    except (OSError, yaml.YAMLError, ValidationError) as exc:
+        diagnostics.append(
+            Diagnostic(
+                Severity.ERROR, "knowledge", f"known_fields.yaml: {exc}", "shared", path
+            )
+        )
+        return {}
 
 
 def _aliases(custom: dict[str, Any]) -> dict[str, str]:

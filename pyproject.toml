@@ -16,6 +16,7 @@ dependencies = [
     "pyyaml",
     "pydantic>=2.13.5",
     "ruamel-yaml>=0.19.1",
+    "mcp>=1.2",
 ]
 
 [project.scripts]
@@ -102,7 +103,7 @@ ignore = ["D104", "D105"]
 "tests/*" = ["ARG001", "S101", "D", "INP001"]
 # Stdlib-only script piped into another interpreter: prints are its stderr
 # protocol, untyped helpers keep it runnable on old Pythons.
-"src/model_wtf/introspect/django_models.py" = ["T201", "ANN"]
+"src/model_wtf/introspect/django_models.py" = ["T201", "ANN", "PTH"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["model_wtf"]

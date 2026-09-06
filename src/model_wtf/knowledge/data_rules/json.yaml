@@ -1,4 +1,4 @@
-description: JSON fields — assumed to contain personal data until proven otherwise
+description: JSON fields — presumed to contain personal data until proven otherwise
 priority: 30
 match:
   - type: [JSONField]
@@ -6,4 +6,3 @@ match:
 pii: true
 sensitivity: confidential
 category: content
-assumed: true

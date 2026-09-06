@@ -107,7 +107,6 @@ def test_github_output_emits_annotation(
         pytest.param(
             SNOW_FRONT_UNDECLARED, FILES_ALL_OK, "declares no", id="unit-no-compliance"
         ),
-        pytest.param(SNOW_TWO_UNITS, {}, "Nothing declared", id="nothing-declared"),
     ],
 )
 def test_strict_turns_exit_zero_into_three(

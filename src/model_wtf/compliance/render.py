@@ -22,8 +22,8 @@ if TYPE_CHECKING:
 
 _STATUS_STYLE = {
     ScopeStatus.OK: "green",
-    ScopeStatus.EMPTY: "yellow",
-    ScopeStatus.MISSING: "red",
+    ScopeStatus.PENDING: "yellow",
+    ScopeStatus.ERROR: "red",
 }
 _SEVERITY_STYLE = {Severity.WARNING: "yellow", Severity.ERROR: "red"}
 
@@ -75,20 +75,32 @@ def _summary_table(report: Report) -> Table:
     """One row per scope: shared first, then units in manifest order."""
     table = Table(title="Compliance scopes", title_justify="left")
     table.add_column("Scope")
-    table.add_column("Kind")
     table.add_column("Folder")
-    table.add_column("Files", justify="right")
+    table.add_column("Items", justify="right")
+    table.add_column("Pending", justify="right")
+    table.add_column("Todos", justify="right")
+    table.add_column("Errors", justify="right")
     table.add_column("Status")
     for scope in report.scopes:
         status = scope.status
+        folder = report.display_path(scope.path)
+        if not scope.exists:
+            folder += " (missing)"
         table.add_row(
             scope.id,
-            scope.kind.value,
-            report.display_path(scope.path),
-            str(scope.file_count),
+            folder,
+            "-" if scope.items is None else str(scope.items),
+            _count(scope.pending, "yellow"),
+            _count(scope.todos, "yellow"),
+            _count(scope.errors, "red"),
             Text(status.value, style=_STATUS_STYLE[status]),
         )
     return table
+
+
+def _count(value: int, style: str) -> Text:
+    """A count, coloured only when non-zero so the eye lands on problems."""
+    return Text(str(value), style=style if value else "dim")
 
 
 def _escape(value: str) -> str:

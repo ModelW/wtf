@@ -1,8 +1,0 @@
-description: Rich text / stream fields (CMS content, may embed personal data)
-priority: 34
-match:
-  - type: [RichTextField, StreamField, MarkdownField, HTMLField]
-pii: true
-sensitivity: personal
-category: content
-assumed: true
