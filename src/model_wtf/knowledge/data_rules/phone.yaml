@@ -1,0 +1,8 @@
+description: Phone numbers
+priority: 100
+match:
+  - type: [PhoneNumberField]
+  - name: '(^|_)(phone|mobile|tel|telephone|cellphone|fax|whatsapp)(_|$)'
+pii: true
+sensitivity: personal
+category: contact

@@ -1,0 +1,5 @@
+description: Details used to reach the person
+examples: [email, phone, postal address]
+register_label: Contact data
+legal: none
+dpia: false

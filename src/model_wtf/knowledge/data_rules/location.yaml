@@ -1,0 +1,8 @@
+description: Geographic position
+priority: 35
+match:
+  - type: [PointField, GeometryField, PolygonField, MultiPolygonField, LineStringField, MultiPointField, GeometryCollectionField]
+  - name: '(^|_)(lat|latitude|lng|lon|longitude|geo|geom|geolocation|coordinates|position|gps)(_|$)'
+pii: true
+sensitivity: confidential
+category: location

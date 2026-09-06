@@ -1,0 +1,8 @@
+description: Booleans, timestamps, numbers, choices — no personal data by themselves
+priority: 900
+match:
+  - internal_type: [BooleanField, NullBooleanField, DateField, DateTimeField, TimeField, DurationField, IntegerField, BigIntegerField, SmallIntegerField, PositiveIntegerField, PositiveSmallIntegerField, PositiveBigIntegerField, FloatField, DecimalField, BinaryField, ArrayField]
+  - choices: true
+pii: false
+sensitivity: internal
+category: technical

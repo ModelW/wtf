@@ -71,6 +71,44 @@ Repos not deployed through Snow can use `.model-wtf.yml` instead
 The repo-root `compliance/` folder is always loaded as the _shared_ scope
 (controller, actors, assumptions, recipients).
 
+### Data inventory
+
+```
+uv run model-wtf compliance data list  [--unit ID] [--format table|json]
+uv run model-wtf compliance data rules
+uv run model-wtf compliance data override <unit>:<app.Model.field> [--pii|--no-pii] [--sensitivity L] [--category C] [--reason TEXT]
+```
+
+Every Django model field of every `discover: django` unit is inventoried
+live — model-wtf detects the unit's interpreter (uv, Poetry, `.venv`,
+`MODEL_WTF_PYTHON`) and its `DJANGO_SETTINGS_MODULE` (env, `manage.py`,
+`[tool.model-wtf] django_settings`), then pipes its own stdlib-only
+introspection script into it. Nothing generated is written to disk.
+
+Each field gets three classifications from the built-in rules
+(`model_wtf/knowledge/data_rules/`, first match by ascending priority):
+
+- `pii` — personal data or not;
+- `sensitivity` — ordinal: `public < internal < personal < confidential < special`,
+  each level carrying a DPIA hint (`never`, `large_scale`, `always`);
+- `category` — nominal, what the Art. 30 register will print (`identity`,
+  `contact`, `financial`, `connection`, `location`, `behavioural`, `content`,
+  `credentials`, `health`, `biometric`, `special_other`, `criminal`,
+  `professional`, `technical`).
+
+`JSONField`, file and free-text fields are **assumed** to hold personal data
+until a human says otherwise; `check` lists them as `assumed-pii` warnings.
+
+Humans correct the rules with `<unit>/compliance/data/<app.Model.field>.yaml`
+(any subset of `pii` / `sensitivity` / `category`, plus a `reason`), and add
+stores the ORM does not know with a complete manual item (`description`,
+`pii`, `sensitivity`, `category`) under any other id.
+
+`init --custom-sensitivity` / `--custom-categories` copy the built-in scale
+or category list into `compliance/sensitivity/` / `compliance/categories/`
+for editing; a renamed entry declares `replaces: [<built-in id>]` so the
+rules still resolve, and `check` verifies every built-in id is covered once.
+
 ### Exit codes
 
 | Code | Meaning                                                         |

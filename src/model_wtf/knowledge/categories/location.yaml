@@ -1,0 +1,5 @@
+description: Where the person is or was
+examples: [GPS coordinates, geohash, movements, home/work location]
+register_label: Location data
+legal: none
+dpia: true

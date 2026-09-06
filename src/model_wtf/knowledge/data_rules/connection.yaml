@@ -1,0 +1,8 @@
+description: IP addresses, user agents, session and device identifiers
+priority: 80
+match:
+  - type: [GenericIPAddressField]
+  - name: '(^|_)(ip|ip_address|remote_addr|user_agent|useragent|session_key|session_id|device_id|fingerprint_id|mac_address)(_|$)'
+pii: true
+sensitivity: personal
+category: connection

@@ -1,0 +1,8 @@
+description: Relations to other models (carry no data of their own)
+priority: 15
+match:
+  - type: [ForeignKey, OneToOneField, ManyToManyField, TreeForeignKey, ParentalKey, ParentalManyToManyField]
+  - internal_type: [ForeignKey, OneToOneField, ManyToManyField]
+pii: false
+sensitivity: internal
+category: technical

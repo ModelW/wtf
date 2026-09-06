@@ -7,9 +7,10 @@ from pathlib import Path
 
 import rich_click as click
 from rich.console import Console
-from rich.markup import escape
+from rich.text import Text
 
 from model_wtf.compliance.check import run_check
+from model_wtf.compliance.data_cli import data
 from model_wtf.compliance.discovery import find_repo_root
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.init_cmd import (
@@ -24,6 +25,9 @@ from model_wtf.compliance.render import render_github, render_json, render_text
 @click.group()
 def compliance() -> None:
     """Check and maintain the repository's compliance declarations."""
+
+
+compliance.add_command(data)
 
 
 @compliance.command()
@@ -46,9 +50,15 @@ def compliance() -> None:
     default=None,
     help="Repository root. Defaults to the enclosing Git checkout, else the cwd.",
 )
+@click.option("--python", default=None, help="Interpreter to use for introspection.")
 @click.pass_context
 def check(
-    ctx: click.Context, *, strict: bool, output_format: str, root: Path | None
+    ctx: click.Context,
+    *,
+    strict: bool,
+    output_format: str,
+    root: Path | None,
+    python: str | None,
 ) -> None:
     """Discover compliance units and verify something is declared.
 
@@ -58,7 +68,7 @@ def check(
     console = Console()
     try:
         resolved_root = root.resolve() if root else find_repo_root(Path.cwd())
-        report = run_check(resolved_root, strict=strict)
+        report = run_check(resolved_root, strict=strict, python=python)
         if output_format == "json":
             # Plain write: rich would wrap long lines and break the JSON.
             click.echo(render_json(report))
@@ -68,7 +78,7 @@ def check(
         else:
             render_text(report, console)
     except Exception as exc:
-        Console(stderr=True).print(f"[red]Tool error:[/red] {exc}")
+        Console(stderr=True).print(Text.assemble(("Tool error: ", "red"), str(exc)))
         ctx.exit(int(ExitCode.TOOL_ERROR))
 
     ctx.exit(int(report.exit_code))
@@ -86,6 +96,16 @@ def check(
     help="The controller operates the product itself; declare no processor.",
 )
 @click.option(
+    "--custom-sensitivity",
+    is_flag=True,
+    help="Copy the built-in sensitivity scale to compliance/sensitivity/ for editing.",
+)
+@click.option(
+    "--custom-categories",
+    is_flag=True,
+    help="Copy the built-in categories to compliance/categories/ for editing.",
+)
+@click.option(
     "--root",
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     default=None,
@@ -101,6 +121,8 @@ def init(
     processor_name: str | None,
     processor_country: str | None,
     no_processor: bool,
+    custom_sensitivity: bool,
+    custom_categories: bool,
     root: Path | None,
 ) -> None:
     """Scaffold compliance/ (app manifest, parties) and wire the units.
@@ -141,17 +163,27 @@ def init(
         controller=controller,
         processor=processor,
         manifest_units=proposed,
+        custom_sensitivity=custom_sensitivity,
+        custom_categories=custom_categories,
     )
     for path in result.created:
-        console.print(f"[green]created[/green]  {_rel(path, resolved_root)}")
+        console.print(
+            Text.assemble(("created", "green"), "  ", _rel(path, resolved_root))
+        )
     for what in result.patched:
-        console.print(f"[green]patched[/green]  {escape(what)}")
+        console.print(Text.assemble(("patched", "green"), "  ", what))
     for path in result.skipped:
-        console.print(f"[dim]exists[/dim]   {_rel(path, resolved_root)}")
+        console.print(
+            Text.assemble(("exists", "dim"), "   ", _rel(path, resolved_root))
+        )
     if result.changed:
         console.print(
-            "\nnext: fill the [bold]!todo[/bold] values, then run "
-            "[bold]model-wtf compliance check[/bold]"
+            Text.assemble(
+                "\nnext: fill the ",
+                ("!todo", "bold"),
+                " values, then run ",
+                ("model-wtf compliance check", "bold"),
+            )
         )
     else:
         console.print("nothing to do")

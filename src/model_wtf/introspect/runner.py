@@ -1,0 +1,248 @@
+"""Run the Django introspection script inside a unit's own interpreter.
+
+Detection is deliberately simple and explicit, in order:
+
+1. ``uv.lock`` or ``[tool.uv]`` in the unit's ``pyproject.toml`` → ``uv run``
+2. ``poetry.lock`` or ``[tool.poetry]`` → ``poetry run``
+3. ``<context>/.venv/bin/python`` → that interpreter directly
+4. ``MODEL_WTF_PYTHON`` environment variable → that interpreter
+
+The settings module comes from the environment, then ``manage.py``, then
+``[tool.model-wtf] django_settings`` in ``pyproject.toml``.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import tomllib
+from dataclasses import dataclass
+from importlib import resources
+from typing import TYPE_CHECKING, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+SCHEMA = 1
+TIMEOUT_SECONDS = 180
+STDERR_TAIL = 30
+
+
+class Relation(BaseModel):
+    """Target of a relational field."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    to: str
+    kind: Literal["fk", "o2o", "m2m"]
+
+
+class FieldInfo(BaseModel):
+    """One concrete model field as reported by the script."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    type: str
+    internal_type: str
+    null: bool = False
+    blank: bool = False
+    primary_key: bool = False
+    unique: bool = False
+    max_length: int | None = None
+    choices: bool = False
+    auto_now: bool = False
+    relation: Relation | None = None
+
+    def fingerprint_source(self) -> str:
+        """The facts whose change should invalidate a review of this field."""
+        rel = f"{self.relation.kind}:{self.relation.to}" if self.relation else "-"
+        return f"{self.type}|{self.internal_type}|{int(self.null)}|{rel}"
+
+
+class ModelInfo(BaseModel):
+    """One Django model."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    app_label: str
+    name: str
+    table: str
+    abstract: bool = False
+    proxy: bool = False
+    module: str = ""
+    fields: list[FieldInfo] = Field(default_factory=list)
+
+    @property
+    def label(self) -> str:
+        """``app_label.ModelName``."""
+        return f"{self.app_label}.{self.name}"
+
+
+class Inventory(BaseModel):
+    """The whole introspection payload."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    schema_version: int = Field(alias="schema")
+    django: str
+    settings: str | None = None
+    models: list[ModelInfo] = Field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Runner:
+    """How to start a Python inside the unit's environment."""
+
+    kind: Literal["uv", "poetry", "venv", "env", "explicit"]
+    argv: tuple[str, ...]
+    """Command prefix; ``-`` is appended so the script is read from stdin."""
+
+
+class IntrospectionUnavailable(Exception):
+    """The unit cannot be introspected (no runner, no Django settings).
+
+    This is not an error of the unit's declarations: the caller reports it
+    as a warning and treats the inventory as empty.
+    """
+
+
+class IntrospectionFailed(Exception):
+    """The script ran but did not produce a valid payload (tool error)."""
+
+
+def detect_runner(context: Path, explicit: str | None = None) -> Runner:
+    """Pick the interpreter for ``context``; see module docstring for order."""
+    if explicit:
+        return Runner("explicit", (explicit,))
+    pyproject = context / "pyproject.toml"
+    tools = _tool_tables(pyproject)
+    if (context / "uv.lock").is_file() or "uv" in tools:
+        return Runner(
+            "uv", ("uv", "run", "--no-sync", "--project", str(context), "python")
+        )
+    if (context / "poetry.lock").is_file() or "poetry" in tools:
+        return Runner("poetry", ("poetry", "-C", str(context), "run", "python"))
+    venv_python = context / ".venv" / "bin" / "python"
+    if venv_python.is_file():
+        return Runner("venv", (str(venv_python),))
+    env_python = os.environ.get("MODEL_WTF_PYTHON")
+    if env_python:
+        return Runner("env", (env_python,))
+    msg = (
+        f"no Python environment found for {context}: expected uv.lock, poetry.lock, "
+        ".venv/, or MODEL_WTF_PYTHON"
+    )
+    raise IntrospectionUnavailable(msg)
+
+
+def detect_settings(context: Path) -> str:
+    """Find the ``DJANGO_SETTINGS_MODULE`` for ``context``."""
+    from_env = os.environ.get("DJANGO_SETTINGS_MODULE")
+    if from_env:
+        return from_env
+    manage = context / "manage.py"
+    if manage.is_file():
+        match = re.search(
+            r"""DJANGO_SETTINGS_MODULE["']\s*,\s*["']([\w.]+)["']""",
+            manage.read_text(encoding="utf-8", errors="replace"),
+        )
+        if match:
+            return match.group(1)
+    tools = _tool_tables(context / "pyproject.toml")
+    configured = tools.get("model-wtf", {}).get("django_settings")
+    if isinstance(configured, str) and configured:
+        return configured
+    msg = (
+        f"cannot determine DJANGO_SETTINGS_MODULE for {context}: set it in the "
+        "environment, manage.py, or [tool.model-wtf] django_settings"
+    )
+    raise IntrospectionUnavailable(msg)
+
+
+def is_django_unit(context: Path) -> bool:
+    """Cheap test used to skip front-end units without spawning anything."""
+    if (context / "manage.py").is_file():
+        return True
+    pyproject = context / "pyproject.toml"
+    if not pyproject.is_file():
+        return False
+    text = pyproject.read_text(encoding="utf-8", errors="replace").lower()
+    return "django" in text
+
+
+def introspect(context: Path, *, python: str | None = None) -> Inventory:
+    """Run the script in ``context``'s interpreter and parse its output.
+
+    Raises
+    ------
+    IntrospectionUnavailable
+        No runner or settings could be found.
+    IntrospectionFailed
+        The subprocess failed or its stdout is not a valid payload.
+    """
+    runner = detect_runner(context, python)
+    settings = detect_settings(context)
+    script = (
+        resources.files("model_wtf.introspect").joinpath("django_models.py").read_text()
+    )
+    env = {**os.environ, "DJANGO_SETTINGS_MODULE": settings, "PYTHONUNBUFFERED": "1"}
+    try:
+        proc = subprocess.run(  # noqa: S603 - argv built from our own detection
+            [*runner.argv, "-"],
+            input=script,
+            capture_output=True,
+            text=True,
+            cwd=context,
+            env=env,
+            timeout=TIMEOUT_SECONDS,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        msg = f"{runner.kind} runner not available: {exc}"
+        raise IntrospectionFailed(msg) from exc
+    except subprocess.TimeoutExpired as exc:
+        msg = f"introspection of {context} timed out after {TIMEOUT_SECONDS}s"
+        raise IntrospectionFailed(msg) from exc
+    if proc.returncode != 0:
+        msg = (
+            f"introspection of {context} exited {proc.returncode}:\n"
+            f"{_tail(proc.stderr)}"
+        )
+        raise IntrospectionFailed(msg)
+    try:
+        payload = json.loads(proc.stdout)
+        inventory = Inventory.model_validate(payload)
+    except (json.JSONDecodeError, ValidationError) as exc:
+        msg = (
+            f"introspection of {context} produced an invalid payload: {exc}\n"
+            f"{_tail(proc.stderr)}"
+        )
+        raise IntrospectionFailed(msg) from exc
+    if inventory.schema_version != SCHEMA:
+        msg = (
+            f"unsupported introspection schema {inventory.schema_version} "
+            f"(expected {SCHEMA})"
+        )
+        raise IntrospectionFailed(msg)
+    return inventory
+
+
+def _tool_tables(pyproject: Path) -> dict[str, dict[str, object]]:
+    if not pyproject.is_file():
+        return {}
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    tool = data.get("tool", {})
+    return tool if isinstance(tool, dict) else {}
+
+
+def _tail(text: str) -> str:
+    lines = text.strip().splitlines()
+    return "\n".join(lines[-STDERR_TAIL:])

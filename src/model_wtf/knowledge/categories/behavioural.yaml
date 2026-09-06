@@ -1,0 +1,5 @@
+description: How the person behaves, what they prefer, scores computed about them
+examples: [analytics events, preferences, segments, scores, profiling]
+register_label: Behavioural data
+legal: none
+dpia: true

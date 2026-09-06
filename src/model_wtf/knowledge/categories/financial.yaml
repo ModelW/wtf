@@ -1,0 +1,5 @@
+description: Economic and financial situation
+examples: [IBAN, card number, amounts, invoices, income, tax id]
+register_label: Financial data
+legal: none
+dpia: false

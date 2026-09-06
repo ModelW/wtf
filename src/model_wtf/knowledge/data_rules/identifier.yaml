@@ -1,0 +1,7 @@
+description: Government or official identifiers
+priority: 90
+match:
+  - name: '(^|_)(ssn|nif|nie|dni|nin|nino|passport|national_id|id_card|id_number|tax_id|vat|vat_number|siret|siren|licen[cs]e_number|social_security)(_|$)'
+pii: true
+sensitivity: confidential
+category: identity

@@ -1,0 +1,7 @@
+description: Health-related data (Art. 9)
+priority: 50
+match:
+  - name: '(^|_)(health|medical|diagnos[ie]s|disease|disability|allerg(y|ies)|blood|treatment|prescription|sick|pregnan|mental|therapy|handicap)(_|$)'
+pii: true
+sensitivity: special
+category: health

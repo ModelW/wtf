@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from model_wtf.compliance.data import DATA_DIR, collect_unit
 from model_wtf.compliance.declarations import load_declarations
 from model_wtf.compliance.discovery import load_units, select_manifest
 from model_wtf.compliance.exit_codes import ExitCode
+from model_wtf.compliance.knowledge import KnowledgeError, load_knowledge
 from model_wtf.compliance.report import (
     DeclarationError,
     Diagnostic,
@@ -14,6 +16,7 @@ from model_wtf.compliance.report import (
     Scope,
     ScopeKind,
     Severity,
+    Unit,
 )
 
 if TYPE_CHECKING:
@@ -23,7 +26,7 @@ SHARED_FOLDER = "compliance"
 SHARED_SCOPE_ID = "shared"
 
 
-def run_check(root: Path, *, strict: bool) -> Report:
+def run_check(root: Path, *, strict: bool, python: str | None = None) -> Report:
     """Discover units and inspect their folders, returning a :class:`Report`.
 
     Declaration problems never raise: they are folded into the report with
@@ -38,6 +41,8 @@ def run_check(root: Path, *, strict: bool) -> Report:
     strict
         Promote "image without compliance" and "nothing declared" from
         warnings to errors.
+    python
+        Interpreter override for the Django introspection.
     """
     root = root.resolve()
     try:
@@ -66,6 +71,7 @@ def run_check(root: Path, *, strict: bool) -> Report:
         )
     else:
         diagnostics.extend(load_declarations(shared).diagnostics)
+        diagnostics.extend(_check_data(shared, units, python=python))
 
     return Report(
         root=root,
@@ -74,6 +80,37 @@ def run_check(root: Path, *, strict: bool) -> Report:
         diagnostics=tuple(diagnostics),
         exit_code=exit_code_for(diagnostics),
     )
+
+
+def _check_data(
+    shared: Path, units: list[Unit], *, python: str | None
+) -> list[Diagnostic]:
+    """Validate the knowledge folders and every unit's ``data/`` files.
+
+    Introspection *failures* are tool errors and propagate; a unit that
+    simply cannot be introspected yields a warning and no rows.
+    """
+    try:
+        knowledge = load_knowledge(shared)
+    except KnowledgeError as exc:
+        return exc.diagnostics
+    out: list[Diagnostic] = list(knowledge.todos)
+    for unit in units:
+        unit_data = collect_unit(unit, knowledge, python=python)
+        out.extend(unit_data.diagnostics)
+        for row in unit_data.rows:
+            if row.assumed:
+                out.append(
+                    Diagnostic(
+                        Severity.WARNING,
+                        "assumed-pii",
+                        f"{row.id}: classified by rule {row.rule!r} without evidence; "
+                        "review and override if wrong",
+                        unit.id,
+                        unit.folder / DATA_DIR,
+                    )
+                )
+    return out
 
 
 def exit_code_for(diagnostics: list[Diagnostic]) -> ExitCode:

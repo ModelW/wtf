@@ -1,0 +1,5 @@
+description: Not personal data - internal plumbing of the application
+examples: [primary keys, foreign keys, flags, timestamps, counters]
+register_label: Technical data
+legal: none
+dpia: false

@@ -21,7 +21,7 @@ images:
   - id: api
     context: api
     compliance:
-      discover: django
+      discover: none
   - id: front
     context: front
     compliance:
@@ -34,7 +34,7 @@ images:
   - id: api
     context: api
     compliance:
-      discover: django
+      discover: none
   - id: front
     context: front
 """

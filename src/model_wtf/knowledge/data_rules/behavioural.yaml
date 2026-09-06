@@ -1,0 +1,7 @@
+description: Analytics, preferences, scores, segments
+priority: 120
+match:
+  - name: '(^|_)(score|rating|segment|preference|preferences|consent|opt_in|opted|newsletter|marketing|tracking|utm|referrer|last_login|last_seen|visits|clicks|views)(_|$)'
+pii: true
+sensitivity: personal
+category: behavioural

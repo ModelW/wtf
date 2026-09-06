@@ -1,0 +1,5 @@
+description: Physical or mental health, care received
+examples: [diagnosis, disability, sick leave, prescriptions]
+register_label: Health data
+legal: art9
+dpia: true

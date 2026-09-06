@@ -1,0 +1,7 @@
+description: Banking and payment data
+priority: 95
+match:
+  - name: '(^|_)(iban|bic|swift|account_number|card|card_number|pan|cvv|cvc|expiry|amount|price|total|balance|salary|income|invoice|payment|bank|stripe|paypal)(_|$)'
+pii: true
+sensitivity: confidential
+category: financial
