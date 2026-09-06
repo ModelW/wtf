@@ -19,8 +19,9 @@ from model_wtf.compliance.activities import (
     add_touchpoints,
     write_activity,
 )
+from model_wtf.compliance.auto_review import DEFAULT_MODEL, TOUCHPOINTS_TARGET
 from model_wtf.compliance.data import parse_full_id
-from model_wtf.compliance.data_cli import data, load_context
+from model_wtf.compliance.data_cli import data, load_context, run_auto_review
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.options import ROOT_OPTION
 from model_wtf.compliance.report import Severity
@@ -351,6 +352,83 @@ def tp_set_data(
     )
     console.print(Text.assemble(("wrote", "green"), "  ", str(path)))
     ctx.exit(0)
+
+
+@touchpoints.command("auto-review")
+@click.option("--unit", "only", default=None, help="Restrict to one unit.")
+@click.option("--max-rounds", default=20, show_default=True, type=int)
+@click.option(
+    "--batch", default=8, show_default=True, type=int, help="Touchpoints per round."
+)
+@click.option(
+    "--model", default=DEFAULT_MODEL, show_default=True, help="provider/model."
+)
+@click.option(
+    "--max-tokens",
+    default=None,
+    type=int,
+    help="Stop starting new rounds once this many tokens were used.",
+)
+@click.option(
+    "--group/--no-group",
+    default=True,
+    show_default=True,
+    help="Group PII-touching touchpoints into activities once nothing is pending.",
+)
+@click.option(
+    "--group-only",
+    is_flag=True,
+    help="Skip the per-touchpoint pass; only run the grouping session.",
+)
+@click.option("--keep-scratch", is_flag=True, hidden=True)
+@PYTHON_OPTION
+@ROOT_OPTION
+@click.pass_context
+def tp_auto_review(
+    ctx: click.Context,
+    *,
+    only: str | None,
+    max_rounds: int,
+    batch: int,
+    model: str,
+    max_tokens: int | None,
+    group: bool,
+    group_only: bool,
+    keep_scratch: bool,
+    python: str | None,
+    root: Path | None,
+) -> None:
+    """Have an OpenCode agent declare what each touchpoint handles, then group.
+
+    Pass 1 reviews pending touchpoints one at a time (reading the view or
+    task code, referencing inventory items, adding transient manual items
+    when the code handles personal data that is never persisted). Pass 2,
+    once nothing is pending, groups every PII-touching touchpoint into
+    processing activities following the front -> api -> task edges; fields
+    the agent cannot know stay `!todo`. Same sandbox and exit codes as
+    `data auto-review`.
+    """
+    resolved, units, knowledge = load_context(root)
+    if only is not None:
+        units = [u for u in units if u.id == only]
+        if not units:
+            msg = f"unknown unit {only!r}"
+            raise click.ClickException(msg)
+    run_auto_review(
+        ctx,
+        resolved,
+        units,
+        knowledge,
+        base=None,
+        max_rounds=0 if group_only else max_rounds,
+        batch=batch,
+        model=model,
+        python=python,
+        max_tokens=max_tokens,
+        keep_scratch=keep_scratch,
+        target=TOUCHPOINTS_TARGET,
+        group=group or group_only,
+    )
 
 
 # ---------------------------------------------------------------------------

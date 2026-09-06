@@ -244,6 +244,26 @@ nothing personal, checked". `check` reports `touchpoint-pending` and
 `touchpoint-orphan` (handles personal data, belongs to no activity), both
 exit 1, and `data-unreferenced` as information.
 
+```
+uv run model-wtf compliance touchpoints auto-review [--unit ID] [--batch 8] [--max-rounds 20] [--group/--no-group] [--group-only] [--model ...] [--max-tokens N]
+```
+
+Same sandboxed OpenCode loop as `data auto-review`, two passes. **Pass 1**,
+one touchpoint per subagent session: `touchpoint_show` gives the code
+location, the schemas and what the API operations it calls already declare;
+the reviewer reads the view/task/route, resolves items with `data_search`
+(never typing an id it did not see), creates a **manual item** with
+`data_add_manual` when the code handles personal data that is never
+persisted (a card number forwarded to a PSP, a search query), and closes
+with one `touchpoint_set_data` call citing file:line (`[]` = touches nothing
+personal). **Pass 2**, once nothing is pending (or right away with
+`--group-only`): a single session reads `activities_graph` — every
+PII-touching touchpoint with its categories, `calls`/`defers` edges and
+current activity — and follows the chains front → api → task to
+`activity_create` / `activity_add_touchpoints`; `legal_basis` only when
+evident, `retention` and the rest stay `!todo` for a human, existing
+activities are never emptied.
+
 ### Activities
 
 ```
