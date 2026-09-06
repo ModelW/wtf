@@ -1,0 +1,8 @@
+description: Path/key of an uploaded file (the bytes are inventoried separately as `<field>@files`)
+priority: 33
+match:
+  - internal_type: [FileField]
+  - type: [FileField, ImageField]
+pii: false
+sensitivity: internal
+category: technical

@@ -41,6 +41,48 @@ class Relation(BaseModel):
     kind: Literal["fk", "o2o", "m2m"]
 
 
+class StorageInfo(BaseModel):
+    """Where a file field's bytes go."""
+
+    model_config = ConfigDict(extra="allow")
+
+    class_: str = Field(alias="class")
+    bucket_name: str | None = None
+    location: str | None = None
+    endpoint_url: str | None = None
+    custom_domain: str | None = None
+
+    def label(self) -> str:
+        """Short human form: ``S3Storage(bucket=media, location=uploads)``."""
+        name = self.class_.rsplit(".", 1)[-1]
+        parts = [
+            f"{key}={value}"
+            for key, value in (
+                ("bucket", self.bucket_name),
+                ("location", self.location),
+            )
+            if value
+        ]
+        return f"{name}({', '.join(parts)})" if parts else name
+
+
+class DatabaseInfo(BaseModel):
+    """Which configured database a model is written to."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    alias: str
+    engine: str = ""
+    host: str | None = None
+    name: str | None = None
+
+    def label(self) -> str:
+        """Short human form: ``default (postgresql @ db.internal/fah)``."""
+        engine = self.engine.rsplit(".", 1)[-1] or "?"
+        where = "/".join(p for p in (self.host, self.name) if p)
+        return f"{self.alias} ({engine}{' @ ' + where if where else ''})"
+
+
 class FieldInfo(BaseModel):
     """One concrete model field as reported by the script."""
 
@@ -57,6 +99,7 @@ class FieldInfo(BaseModel):
     choices: bool = False
     auto_now: bool = False
     relation: Relation | None = None
+    storage: StorageInfo | None = None
 
     def fingerprint_source(self) -> str:
         """The facts whose change should invalidate a review of this field."""
@@ -75,6 +118,8 @@ class ModelInfo(BaseModel):
     abstract: bool = False
     proxy: bool = False
     module: str = ""
+    file: str | None = None
+    database: DatabaseInfo | None = None
     fields: list[FieldInfo] = Field(default_factory=list)
 
     @property
@@ -91,6 +136,7 @@ class Inventory(BaseModel):
     schema_version: int = Field(alias="schema")
     django: str
     settings: str | None = None
+    sys_path: list[str] = Field(default_factory=list)
     models: list[ModelInfo] = Field(default_factory=list)
 
 

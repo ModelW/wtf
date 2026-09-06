@@ -1,9 +1,7 @@
-description: Uploaded files and images (contents unknown, authored by users)
+description: The bytes behind an upload field (a store of user-provided files, contents unknown)
 priority: 32
 match:
-  - type: [FileField, ImageField]
-  - internal_type: [FileField]
+  - type: [FileStore]
 pii: true
 sensitivity: personal
 category: content
-assumed: true

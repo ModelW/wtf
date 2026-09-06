@@ -47,76 +47,62 @@ def test_full_repo_is_clean(make_repo: MakeRepo) -> None:
         ("front", ScopeKind.UNIT),
     ]
     assert all(s.status is ScopeStatus.OK for s in report.scopes)
-    assert [s.file_count for s in report.scopes] == [3, 1, 1]
+    # The shared scope has no inventory; the units have none either (no
+    # Django) but still report an item count.
+    assert [s.items for s in report.scopes] == [None, 0, 0]
     assert report.scopes[2].path == (root / "front" / "compliance").resolve()
 
 
-def test_file_count_is_recursive(make_repo: MakeRepo) -> None:
+def test_empty_unit_folder_is_ok(make_repo: MakeRepo) -> None:
+    """A unit folder with nothing in it is a valid state, not a problem."""
+    root = make_repo(snow=SNOW_TWO_UNITS, files=FILES_ALL_OK, dirs=("api/compliance",))
+    for name in ("api/compliance/dpa.md", "front/compliance/cookies.md"):
+        (root / name).unlink()
+
+    report = run_check(root, strict=True)
+
+    assert report.exit_code is ExitCode.CLEAN
+    assert report.scopes[1].status is ScopeStatus.OK
+
+
+# ---------------------------------------------------------------------------
+# Missing folders
+# ---------------------------------------------------------------------------
+
+
+def test_missing_folders_are_errors(make_repo: MakeRepo) -> None:
+    # shared: only hidden content (exists); api: empty dir; front: missing.
     root = make_repo(
-        snow="images: []\n",
-        files={
-            "compliance/a.md": "",
-            "compliance/sub/b.md": "",
-            "compliance/sub/deep/c.md": "",
-        },
+        snow=SNOW_TWO_UNITS,
+        files={"compliance/.gitkeep": ""},
+        dirs=("api/compliance",),
     )
 
     report = run_check(root, strict=False)
 
-    assert report.scopes[0].file_count == 3
-
-
-# ---------------------------------------------------------------------------
-# Nothing declared
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("strict", "severity", "exit_code"),
-    [
-        (False, Severity.WARNING, ExitCode.CLEAN),
-        (True, Severity.ERROR, ExitCode.DECLARATION_ERROR),
-    ],
-    ids=["lenient", "strict"],
-)
-def test_nothing_declared_when_all_folders_empty_or_missing(
-    make_repo: MakeRepo, *, strict: bool, severity: Severity, exit_code: ExitCode
-) -> None:
-    # shared: only hidden content; api: empty dir; front: missing entirely.
-    root = make_repo(
-        snow=SNOW_TWO_UNITS,
-        files={"compliance/.gitkeep": "", "compliance/.hidden/secret.md": "x"},
-        dirs=("api/compliance",),
-    )
-
-    report = run_check(root, strict=strict)
-
-    assert report.exit_code is exit_code
-    assert _codes(report) == ["nothing-declared"]
-    diag = report.diagnostics[0]
-    assert diag.severity is severity
-    assert diag.path == root.resolve()
+    assert report.exit_code is ExitCode.DECLARATION_ERROR
+    assert _codes(report) == ["app-missing", "folder-missing"]
+    assert report.diagnostics[1].scope_id == "front"
     assert [s.status for s in report.scopes] == [
-        ScopeStatus.EMPTY,
-        ScopeStatus.EMPTY,
-        ScopeStatus.MISSING,
+        ScopeStatus.ERROR,  # app.yaml missing
+        ScopeStatus.OK,  # empty folder is fine
+        ScopeStatus.ERROR,  # folder missing
     ]
-    assert [s.file_count for s in report.scopes] == [0, 0, 0]
+    assert [s.exists for s in report.scopes] == [True, True, False]
 
 
-def test_hidden_files_do_not_rescue_an_otherwise_declared_repo(
-    make_repo: MakeRepo,
-) -> None:
-    root = make_repo(
-        snow="images: []\n",
-        files={"compliance/.gitkeep": "", "compliance/real.md": "x"},
+def test_scope_status_reflects_todos_and_pending(make_repo: MakeRepo) -> None:
+    files = dict(FILES_ALL_OK)
+    files["compliance/app.yaml"] = files["compliance/app.yaml"].replace(
+        "description: Back-office for the Kerfufoo client portal.", "description: !todo"
     )
+    root = make_repo(snow=SNOW_TWO_UNITS, files=files)
 
-    report = run_check(root, strict=True)
+    report = run_check(root, strict=False)
 
-    # Declared (so no ``nothing-declared``), but not initialised.
-    assert _codes(report) == ["app-missing"]
-    assert report.scopes[0].file_count == 1
+    assert report.exit_code is ExitCode.FINDINGS
+    shared = report.scopes[0]
+    assert (shared.status, shared.todos, shared.errors) == (ScopeStatus.PENDING, 1, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +200,10 @@ def test_to_dict_uses_root_relative_paths(make_repo: MakeRepo) -> None:
         "kind": "shared",
         "path": "compliance",
         "exists": True,
-        "file_count": 3,
+        "items": None,
+        "errors": 0,
+        "todos": 0,
+        "pending": 0,
         "status": "ok",
     }
 
@@ -225,7 +214,7 @@ def test_display_path_falls_back_to_absolute_outside_root(tmp_path: Path) -> Non
     report = Report(
         root=root,
         manifest=None,
-        scopes=(Scope("x", ScopeKind.UNIT, outside, exists=False, file_count=0),),
+        scopes=(Scope("x", ScopeKind.UNIT, outside, exists=False),),
         diagnostics=(Diagnostic(Severity.WARNING, "c", "m", path=root),),
     )
 

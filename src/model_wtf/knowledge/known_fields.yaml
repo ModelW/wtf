@@ -1,0 +1,33 @@
+# Verdicts for framework fields whose meaning is fixed by the framework itself
+# (a password hash is a password hash). Fields whose content depends on what
+# the project puts in them (task payloads, audit data, form submissions,
+# session state) are deliberately NOT here: they get a real review. A field listed here
+# is classified by this table (source `known`) and counts as reviewed, so the
+# agent never spends a session on Django's own tables. Keys are
+# `app_label.Model.field`; values override pii / sensitivity / category (any
+# subset) with a note. Unlisted third-party fields still go through the
+# rules and the review.
+auth.User.password: {pii: false, sensitivity: confidential, category: credentials, note: "hashed password"}
+auth.User.username: {pii: true, sensitivity: personal, category: identity, note: "login handle"}
+auth.User.first_name: {pii: true, sensitivity: personal, category: identity, note: "given name"}
+auth.User.last_name: {pii: true, sensitivity: personal, category: identity, note: "family name"}
+auth.User.email: {pii: true, sensitivity: personal, category: contact, note: "account email"}
+auth.User.last_login: {pii: true, sensitivity: personal, category: behavioural, note: "last login timestamp"}
+auth.User.date_joined: {pii: true, sensitivity: personal, category: behavioural, note: "signup timestamp"}
+auth.User.is_active: {pii: false, sensitivity: internal, category: technical, note: "flag"}
+auth.User.is_staff: {pii: false, sensitivity: internal, category: technical, note: "flag"}
+auth.User.is_superuser: {pii: false, sensitivity: internal, category: technical, note: "flag"}
+auth.Group.name: {pii: false, sensitivity: internal, category: technical, note: "role name"}
+auth.Permission.name: {pii: false, sensitivity: internal, category: technical, note: "permission label"}
+auth.Permission.codename: {pii: false, sensitivity: internal, category: technical, note: "permission code"}
+contenttypes.ContentType.app_label: {pii: false, sensitivity: internal, category: technical, note: "framework metadata"}
+contenttypes.ContentType.model: {pii: false, sensitivity: internal, category: technical, note: "framework metadata"}
+sessions.Session.session_key: {pii: true, sensitivity: confidential, category: credentials, note: "bearer of the session"}
+admin.LogEntry.object_id: {pii: false, sensitivity: internal, category: technical, note: "edited object pk"}
+admin.LogEntry.action_flag: {pii: false, sensitivity: internal, category: technical, note: "enum"}
+wagtailcore.Comment.text: {pii: true, sensitivity: personal, category: content, note: "editor comments"}
+wagtailsearch.IndexEntry.body: {pii: true, sensitivity: personal, category: content, note: "search index of page content"}
+wagtailsearch.IndexEntry.title: {pii: false, sensitivity: internal, category: technical, note: "indexed titles"}
+wagtailsearch.IndexEntry.autocomplete: {pii: true, sensitivity: personal, category: content, note: "search index of page content"}
+wagtailsearch.Query.query_string: {pii: true, sensitivity: personal, category: behavioural, note: "what visitors searched for"}
+procrastinate.ProcrastinateEvent.type: {pii: false, sensitivity: internal, category: technical, note: "enum"}

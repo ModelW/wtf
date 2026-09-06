@@ -41,11 +41,16 @@ class ScopeKind(StrEnum):
 
 
 class ScopeStatus(StrEnum):
-    """Filesystem state of a scope's folder."""
+    """Outcome of a scope, worst diagnostic wins."""
 
     OK = "ok"
-    EMPTY = "empty"
-    MISSING = "missing"
+    """Folder present, nothing owed."""
+
+    PENDING = "pending"
+    """Folder present; ``!todo`` values or unreviewed data items remain."""
+
+    ERROR = "error"
+    """Invalid declarations, or the folder is missing (``init`` not run)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,25 +117,32 @@ class Scope:
     path
         Absolute path to the folder.
     exists
-        Whether the folder is present on disk.
-    file_count
-        Number of non-hidden regular files found recursively. Zero when
-        the folder is missing.
+        Whether the folder is present on disk. A folder with no files is a
+        legitimate state (everything rule-classified and reviewed); a
+        missing one means ``init`` was never run for this scope.
+    items
+        Data items inventoried for a unit scope (``None`` for the shared
+        scope, which has no inventory).
+    errors, todos, pending
+        Counts of the diagnostics attributed to this scope, by kind.
     """
 
     id: str
     kind: ScopeKind
     path: Path
     exists: bool
-    file_count: int
+    items: int | None = None
+    errors: int = 0
+    todos: int = 0
+    pending: int = 0
 
     @property
     def status(self) -> ScopeStatus:
-        """Collapse ``exists`` and ``file_count`` into one displayable state."""
-        if not self.exists:
-            return ScopeStatus.MISSING
-        if self.file_count == 0:
-            return ScopeStatus.EMPTY
+        """Worst thing wrong with this scope."""
+        if not self.exists or self.errors:
+            return ScopeStatus.ERROR
+        if self.todos or self.pending:
+            return ScopeStatus.PENDING
         return ScopeStatus.OK
 
 
@@ -202,7 +214,10 @@ class Report:
                     "kind": scope.kind.value,
                     "path": self.display_path(scope.path),
                     "exists": scope.exists,
-                    "file_count": scope.file_count,
+                    "items": scope.items,
+                    "errors": scope.errors,
+                    "todos": scope.todos,
+                    "pending": scope.pending,
                     "status": scope.status.value,
                 }
                 for scope in self.scopes

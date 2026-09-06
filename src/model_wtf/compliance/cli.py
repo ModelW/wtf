@@ -34,7 +34,7 @@ compliance.add_command(data)
 @click.option(
     "--strict",
     is_flag=True,
-    help="Treat missing compliance declarations as errors instead of warnings.",
+    help="Treat images without a compliance block as errors instead of warnings.",
 )
 @click.option(
     "--format",

@@ -96,8 +96,9 @@ Each field gets three classifications from the built-in rules
   `credentials`, `health`, `biometric`, `special_other`, `criminal`,
   `professional`, `technical`).
 
-`JSONField`, file and free-text fields are **assumed** to hold personal data
-until a human says otherwise; `check` lists them as `assumed-pii` warnings.
+`JSONField`s are presumed to hold personal data (`confidential`, `content`)
+until a review says otherwise; unrecognised plain fields default to
+`technical` and rely on the review to be promoted.
 
 Humans correct the rules with `<unit>/compliance/data/<app.Model.field>.yaml`
 (any subset of `pii` / `sensitivity` / `category`, plus a `reason`), and add
@@ -108,6 +109,43 @@ stores the ORM does not know with a complete manual item (`description`,
 or category list into `compliance/sensitivity/` / `compliance/categories/`
 for editing; a renamed entry declares `replaces: [<built-in id>]` so the
 rules still resolve, and `check` verifies every built-in id is covered once.
+
+### Review
+
+The inventory is virtual, so what has been looked at is tracked in
+`<unit>/compliance/data.lock.yaml` (fingerprint of the field facts *and* of
+the verdict, who, when, note). `data list` shows a `Review` column
+(`pending:new`, `pending:changed`, `reviewed`, `override`, `known`) and
+`--pending` filters on it; `check` fails with exit 1 while
+anything is pending.
+
+- `data reviewed <unit>:<id>... [--note TEXT]` — a human confirms the current
+  classification.
+- `data override …` also marks the item reviewed.
+- Third-party models are reviewed like the project's own: what a task queue
+  or a user table holds is this project's data. Curated verdicts for framework
+  fields whose meaning is fixed (`auth.User.password`, …) live in
+  `knowledge/known_fields.yaml` (`known`).
+- Every file field also yields `<field>@files.content`: the bytes in the
+  storage behind the column, classified on their own, with the storage backend
+  (bucket/location) in the `Store` column. Ordinary columns show the database
+  they are written to.
+
+```
+uv run model-wtf compliance data auto-review [--unit ID] [--base REF] [--batch 8] [--max-rounds 20] [--max-tokens N] [--model provider/model] [--dry-run]
+```
+
+Runs an OpenCode agent on OpenRouter (`openrouter/openrouter/auto` by default;
+`OPENROUTER_API_KEY` required) until nothing is pending. The instance is
+sandboxed (`model_wtf/opencode.py`): throwaway `HOME`/XDG tree, generated
+config via `OPENCODE_CONFIG`, `--pure`, whitelisted environment, deny-all
+permissions except read/glob/grep inside the repository and its interpreters'
+import roots, our MCP server as the only write path; repository-level
+`opencode.json` / `.opencode/` / `AGENTS.md` have no effect. Work is
+dispatched one **model** at a time: `data_pending` → `data_model` (field
+table + class source + JSON write sites) → `data_review_model` (all decisions
+in one call), which keeps each subagent session small enough for flash-class
+models. `--base REF` also re-dispatches models whose file changed since `REF`.
 
 ### Exit codes
 
