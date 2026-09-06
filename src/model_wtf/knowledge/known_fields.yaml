@@ -1,4 +1,7 @@
-# Verdicts for fields of well-known third-party models. A field listed here
+# Verdicts for framework fields whose meaning is fixed by the framework itself
+# (a password hash is a password hash). Fields whose content depends on what
+# the project puts in them (task payloads, audit data, form submissions,
+# session state) are deliberately NOT here: they get a real review. A field listed here
 # is classified by this table (source `known`) and counts as reviewed, so the
 # agent never spends a session on Django's own tables. Keys are
 # `app_label.Model.field`; values override pii / sensitivity / category (any
@@ -20,19 +23,11 @@ auth.Permission.codename: {pii: false, sensitivity: internal, category: technica
 contenttypes.ContentType.app_label: {pii: false, sensitivity: internal, category: technical, note: "framework metadata"}
 contenttypes.ContentType.model: {pii: false, sensitivity: internal, category: technical, note: "framework metadata"}
 sessions.Session.session_key: {pii: true, sensitivity: confidential, category: credentials, note: "bearer of the session"}
-sessions.Session.session_data: {pii: true, sensitivity: confidential, category: connection, note: "serialised session state, may hold user id and flow data"}
 admin.LogEntry.object_id: {pii: false, sensitivity: internal, category: technical, note: "edited object pk"}
-admin.LogEntry.object_repr: {pii: true, sensitivity: personal, category: content, note: "str() of the edited object, may include names"}
-admin.LogEntry.change_message: {pii: true, sensitivity: personal, category: content, note: "free text describing the change, may quote field values"}
 admin.LogEntry.action_flag: {pii: false, sensitivity: internal, category: technical, note: "enum"}
-wagtailcore.ModelLogEntry.data: {pii: true, sensitivity: personal, category: content, note: "audit metadata, may quote field values"}
-wagtailcore.PageLogEntry.data: {pii: true, sensitivity: personal, category: content, note: "audit metadata, may quote field values"}
-wagtailcore.Revision.content: {pii: true, sensitivity: personal, category: content, note: "full serialised page/snippet at that revision"}
 wagtailcore.Comment.text: {pii: true, sensitivity: personal, category: content, note: "editor comments"}
-wagtailforms.FormSubmission.form_data: {pii: true, sensitivity: confidential, category: content, note: "whatever visitors typed into CMS forms"}
 wagtailsearch.IndexEntry.body: {pii: true, sensitivity: personal, category: content, note: "search index of page content"}
 wagtailsearch.IndexEntry.title: {pii: false, sensitivity: internal, category: technical, note: "indexed titles"}
 wagtailsearch.IndexEntry.autocomplete: {pii: true, sensitivity: personal, category: content, note: "search index of page content"}
 wagtailsearch.Query.query_string: {pii: true, sensitivity: personal, category: behavioural, note: "what visitors searched for"}
-procrastinate.ProcrastinateJob.args: {pii: true, sensitivity: confidential, category: content, note: "task payloads, project-specific; verify what tasks receive"}
 procrastinate.ProcrastinateEvent.type: {pii: false, sensitivity: internal, category: technical, note: "enum"}
