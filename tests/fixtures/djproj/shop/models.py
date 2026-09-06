@@ -1,6 +1,11 @@
 """Models exercising every built-in data rule."""
 
+from django.core.files.storage import FileSystemStorage
 from django.db import models
+
+# A field-level storage that is not one of ``STORAGES``: it must become its
+# own store, slugged after the field.
+contracts_storage = FileSystemStorage(location="/srv/contracts")
 
 
 class Customer(models.Model):
@@ -30,3 +35,8 @@ class Order(models.Model):
 
 class Tag(models.Model):
     name = models.CharField(max_length=30)
+
+
+class AuditEntry(models.Model):
+    message = models.TextField()
+    contract = models.FileField(storage=contracts_storage, blank=True)

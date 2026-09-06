@@ -190,6 +190,7 @@ class Tools:
     def model(self, ref_text: str) -> str:
         """``data_model``: the field table, the class source, and hints."""
         unit, ref, rows = self.model_rows(ref_text)
+        data = self.data(unit)
         lock = Lock(unit)
         status = {r.row.id: r.status for r in lock.annotate(rows)}
         lines = [f"model: {ref.full}"]
@@ -209,7 +210,12 @@ class Tools:
             is_store = FILE_STORE_SUFFIX in field_name
             column = field_name.split(FILE_STORE_SUFFIX)[0]
             if is_store:
-                where = f" (bytes behind `{column}`, stored in {row.store})"
+                store = data.stores.get(row.store)
+                label = "unknown store"
+                if store:
+                    place = store.short_where() or store.backend
+                    label = f"{store.slug} ({store.type.value}, {place})"
+                where = f" (bytes behind `{column}`, stored in {label})"
             else:
                 where = "" if field_name in declared else " (inherited)"
             st = status[row.id]
@@ -231,6 +237,18 @@ class Tools:
             lines.append(f"class source ({shown_path}):")
             lines.append(excerpt)
         return "\n".join(lines)
+
+    def stores(self, unit_id: str | None = None) -> str:
+        """One line per visible store of the selected unit(s)."""
+        lines: list[str] = []
+        for unit in self.units:
+            if unit_id is not None and unit.id != unit_id:
+                continue
+            data = self.data(unit)
+            for store in data.stores.visible():
+                where = store.short_where() or store.backend or "-"
+                lines.append(f"{unit.id}:{store.slug} | {store.type.value} | {where}")
+        return "\n".join(lines) or "no store found"
 
     def review_model(self, ref_text: str, decisions: list[Decision], note: str) -> str:
         """``data_review_model``: record every decision for one model."""
@@ -403,6 +421,16 @@ def build_server(root: Path, *, batch: int = DEFAULT_BATCH) -> MCPServer:
     )
     def data_changed(base: str) -> str:
         return _guard(lambda: tools.changed(base))
+
+    @server.tool(
+        name="stores_list",
+        description=(
+            "The stores (databases, caches, buckets, queues) of a unit with their "
+            "slug, type and location, so notes can name where data lives."
+        ),
+    )
+    def stores_list(unit: str | None = None) -> str:
+        return _guard(lambda: tools.stores(unit))
 
     return server
 

@@ -101,9 +101,10 @@ until a review says otherwise; unrecognised plain fields default to
 `technical` and rely on the review to be promoted.
 
 Humans correct the rules with `<unit>/compliance/data/<app.Model.field>.yaml`
-(any subset of `pii` / `sensitivity` / `category`, plus a `reason`), and add
-stores the ORM does not know with a complete manual item (`description`,
-`pii`, `sensitivity`, `category`) under any other id.
+(any subset of `pii` / `sensitivity` / `category` / `store`, plus a `reason`),
+and add data the ORM does not know with a complete manual item
+(`description`, `pii`, `sensitivity`, `category`, optional `store`) under any
+other id.
 
 `init --custom-sensitivity` / `--custom-categories` copy the built-in scale
 or category list into `compliance/sensitivity/` / `compliance/categories/`
@@ -127,9 +128,32 @@ anything is pending.
   fields whose meaning is fixed (`auth.User.password`, …) live in
   `knowledge/known_fields.yaml` (`known`).
 - Every file field also yields `<field>@files.content`: the bytes in the
-  storage behind the column, classified on their own, with the storage backend
-  (bucket/location) in the `Store` column. Ordinary columns show the database
-  they are written to.
+  storage behind the column, classified on their own.
+
+### Stores
+
+```
+uv run model-wtf compliance stores list [--unit ID] [--all] [--format table|json]
+uv run model-wtf compliance stores explain <unit>:<slug>
+```
+
+Where the data lives is an item with a slug, and every data row references one
+in its `Store` column. Stores are read from the Django settings — nothing to
+write for the common case: `DATABASES[alias]` → `db-<alias>` (rows follow the
+router), `CACHES` → `cache-<alias>`, `STORAGES` → `files-<alias>` (`bucket`
+when the backend is S3/GCS/Azure, else `filesystem`; `staticfiles` skipped), a
+field's own `storage=` → `files-<app.Model.field>`, `CELERY_BROKER_URL` →
+`queue-celery`, `WAGTAILSEARCH_BACKENDS` → `search-<alias>`. Credentials never
+appear: passwords are dropped and URL userinfo stripped.
+
+Optional `<unit>/compliance/stores/<slug>.yaml` files can override facts of an
+introspected store (`name`, `provider`, `location`, `retention`,
+`description`), declare a store the settings do not show (`type: external`,
+`browser`, ... — `type` is then mandatory), or hide one with `ignore: true`.
+`check` reports `store-unknown` / `store-ignored-referenced` for data rows
+naming a slug that does not exist or is hidden, and `store-orphan` for a
+manual store file without `type`. `data override … --store <slug>` moves a
+row to another store.
 
 ```
 uv run model-wtf compliance data auto-review [--unit ID] [--base REF] [--batch 8] [--max-rounds 20] [--max-tokens N] [--model provider/model] [--dry-run]

@@ -51,6 +51,8 @@ class StorageInfo(BaseModel):
     location: str | None = None
     endpoint_url: str | None = None
     custom_domain: str | None = None
+    store: str | None = None
+    """Slug of the store in :attr:`Inventory.stores`."""
 
     def label(self) -> str:
         """Short human form: ``S3Storage(bucket=media, location=uploads)``."""
@@ -75,6 +77,8 @@ class DatabaseInfo(BaseModel):
     engine: str = ""
     host: str | None = None
     name: str | None = None
+    store: str | None = None
+    """Slug of the store in :attr:`Inventory.stores`."""
 
     def label(self) -> str:
         """Short human form: ``default (postgresql @ db.internal/fah)``."""
@@ -128,6 +132,28 @@ class ModelInfo(BaseModel):
         return f"{self.app_label}.{self.name}"
 
 
+class StoreInfo(BaseModel):
+    """One store the settings declare (database, cache, file storage...)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    slug: str
+    type: str
+    backend: str = ""
+    where: dict[str, str] = Field(default_factory=dict)
+    config: str = ""
+    """The settings key it was read from, for ``stores explain``."""
+
+
+class SessionsInfo(BaseModel):
+    """Which store the session backend writes to (``None`` = signed cookies)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    engine: str = ""
+    store: str | None = None
+
+
 class Inventory(BaseModel):
     """The whole introspection payload."""
 
@@ -137,6 +163,8 @@ class Inventory(BaseModel):
     django: str
     settings: str | None = None
     sys_path: list[str] = Field(default_factory=list)
+    stores: list[StoreInfo] = Field(default_factory=list)
+    sessions: SessionsInfo | None = None
     models: list[ModelInfo] = Field(default_factory=list)
 
 

@@ -20,6 +20,7 @@ from model_wtf.compliance.init_cmd import (
     run_init,
 )
 from model_wtf.compliance.render import render_github, render_json, render_text
+from model_wtf.compliance.stores_cli import stores
 
 
 @click.group()
@@ -28,6 +29,7 @@ def compliance() -> None:
 
 
 compliance.add_command(data)
+compliance.add_command(stores)
 
 
 @compliance.command()

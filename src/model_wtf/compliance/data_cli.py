@@ -236,6 +236,7 @@ def rules_cmd(*, root: Path | None) -> None:
 @click.option("--pii/--no-pii", "pii", default=None, help="Personal data or not.")
 @click.option("--sensitivity", default=None, help="Sensitivity level id.")
 @click.option("--category", default=None, help="Category id.")
+@click.option("--store", default=None, help="Slug of the store holding the value.")
 @click.option("--reason", default=None, help="Why the rule was wrong (else !todo).")
 @ROOT_OPTION
 @click.pass_context
@@ -246,6 +247,7 @@ def override_cmd(
     pii: bool | None,
     sensitivity: str | None,
     category: str | None,
+    store: str | None,
     reason: str | None,
     root: Path | None,
 ) -> None:
@@ -259,10 +261,10 @@ def override_cmd(
         unit_id, local_id = parse_full_id(item_id, units)
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
-    if pii is None and sensitivity is None and category is None:
+    if pii is None and sensitivity is None and category is None and store is None:
         msg = (
             "nothing to override: pass at least one of --pii/--no-pii, "
-            "--sensitivity, --category"
+            "--sensitivity, --category, --store"
         )
         raise click.UsageError(msg)
     if sensitivity is not None and sensitivity not in knowledge.sensitivity:
@@ -275,13 +277,18 @@ def override_cmd(
         raise click.UsageError(msg)
 
     unit = next(u for u in units if u.id == unit_id)
-    known = {row.id for row in collect_unit(unit, knowledge).rows if row.field}
+    unit_data = collect_unit(unit, knowledge)
+    known = {row.id for row in unit_data.rows if row.field}
+    if store is not None and unit_data.stores.get(store) is None:
+        slugs = ", ".join(s.slug for s in unit_data.stores.visible()) or "none"
+        msg = f"unknown store {store!r} in unit {unit_id!r}; known: {slugs}"
+        raise click.UsageError(msg)
     if local_id not in known:
         close = difflib.get_close_matches(local_id, sorted(known), n=3, cutoff=0.6)
         hint = f"; did you mean {', '.join(close)}?" if close else ""
         msg = (
             f"{local_id!r} is not a field of unit {unit_id!r}{hint}. "
-            "To declare a store outside the ORM, write a manual item file by hand."
+            "To declare data outside the ORM, write a manual item file by hand."
         )
         raise click.UsageError(msg)
     path = write_override(
@@ -290,6 +297,7 @@ def override_cmd(
         pii=pii,
         sensitivity=sensitivity,
         category=category,
+        store=store,
         reason=reason,
     )
     if path is None:
@@ -470,6 +478,7 @@ def write_override(
     sensitivity: str | None,
     category: str | None,
     reason: str | None,
+    store: str | None = None,
 ) -> Path | None:
     """Write the override file; ``None`` when it already exists."""
     path = unit.folder / DATA_DIR / f"{local_id}.yaml"
@@ -482,6 +491,8 @@ def write_override(
         lines.append(f"sensitivity: {sensitivity}")
     if category is not None:
         lines.append(f"category: {category}")
+    if store is not None:
+        lines.append(f"store: {store}")
     lines.append(f"reason: {_quote(reason) if reason else todo_text()}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

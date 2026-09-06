@@ -16,9 +16,15 @@ lets the same model shipped in two images be classified independently.
 
 A file field is two things: a column holding a path (technical) and the
 store behind it holding the actual bytes (whatever the users uploaded). The
-store is inventoried as its own synthetic model, ``<app.Model.field>@files``
-with a single field ``content``, so it is classified, reviewed and
-overridden on its own, and later mapped to a storage backend.
+bytes are inventoried as their own synthetic model, ``<app.Model.field>@files``
+with a single field ``content``, so they are classified, reviewed and
+overridden on their own.
+
+Every row references the **store** holding it by slug (``db-default``,
+``files-default``; see :mod:`model_wtf.compliance.stores`): ORM columns point
+at the database the router writes the model to, ``@files`` rows at the file
+storage behind the column. Manual items and overrides may set ``store``
+explicitly; the slug must exist in the unit's stores and not be ignored.
 """
 
 from __future__ import annotations
@@ -35,6 +41,7 @@ from model_wtf.compliance.declarations import format_errors
 from model_wtf.compliance.knowledge import Dpia, Knowledge  # noqa: TC001 - runtime use
 from model_wtf.compliance.report import Diagnostic, Severity
 from model_wtf.compliance.schemas import NonEmpty, StrictModel
+from model_wtf.compliance.stores import UnitStores, collect_stores
 from model_wtf.compliance.yaml_io import Todo, iter_todo_paths, load_yaml
 from model_wtf.introspect.runner import (
     FieldInfo,
@@ -73,6 +80,8 @@ class Override(StrictModel):
     pii: bool | None = None
     sensitivity: str | None = None
     category: str | None = None
+    store: str | None = None
+    """Slug of the store holding the value, when the settings get it wrong."""
     reason: NonEmpty | Todo
 
 
@@ -83,6 +92,8 @@ class ManualItem(StrictModel):
     pii: bool | Todo
     sensitivity: str | Todo
     category: str | Todo
+    store: str | Todo | None = None
+    """Slug of the store holding the item (``stores/`` declares external ones)."""
     reason: NonEmpty | None = Field(default=None, description="Optional rationale")
 
 
@@ -107,8 +118,8 @@ class Row:
     model_file: str | None = None
     """Absolute path of the module defining the model, from introspection."""
     store: str | None = None
-    """Where the value physically lives: the model's database, or for a file
-    store the storage backend (bucket/location). ``None`` for manual items."""
+    """Slug of the store holding the value (``db-default``, ``files-default``);
+    ``None`` when unknown (manual item without ``store``)."""
 
     @property
     def full_id(self) -> str:
@@ -153,6 +164,7 @@ class UnitData:
     unit: Unit
     rows: list[Row] = field(default_factory=list)
     diagnostics: list[Diagnostic] = field(default_factory=list)
+    stores: UnitStores = field(default_factory=UnitStores)
     introspected: bool = False
     django_version: str | None = None
     sys_path: list[str] = field(default_factory=list)
@@ -200,6 +212,8 @@ def collect_unit(
                 )
             )
 
+    data.stores = collect_stores(unit, inventory)
+    data.diagnostics.extend(data.stores.diagnostics)
     overrides = _load_data_files(unit, data.diagnostics)
 
     known: set[str] = set()
@@ -231,7 +245,38 @@ def collect_unit(
             data.rows.append(row)
 
     data.rows.sort(key=lambda r: r.id)
+    _check_store_references(data)
     return data
+
+
+def _check_store_references(data: UnitData) -> None:
+    """Every ``store`` a row names must exist and not be hidden."""
+    for row in data.rows:
+        if row.store is None or row.source not in (Source.OVERRIDE, Source.MANUAL):
+            continue
+        store = data.stores.get(row.store)
+        path = data.unit.folder / DATA_DIR / f"{row.id}.yaml"
+        if store is None:
+            slugs = ", ".join(s.slug for s in data.stores.visible()) or "none"
+            data.diagnostics.append(
+                Diagnostic(
+                    Severity.ERROR,
+                    "store-unknown",
+                    f"{path.name}: store {row.store!r} is not declared; known: {slugs}",
+                    data.unit.id,
+                    path,
+                )
+            )
+        elif store.ignore:
+            data.diagnostics.append(
+                Diagnostic(
+                    Severity.ERROR,
+                    "store-ignored-referenced",
+                    f"{path.name}: store {row.store!r} is ignored but referenced",
+                    data.unit.id,
+                    path,
+                )
+            )
 
 
 def _model_items(model: ModelInfo) -> list[tuple[str, FieldInfo]]:
@@ -280,26 +325,22 @@ def _classify(
         knowledge.resolve(rule.category),
     )
     source = Source.RULE
+    store = _store_slug(finfo, model)
     if known is not None:
         # Curated verdict for a framework/library field: applied after the
         # rule, before any repo override, and it needs no review.
-        if known.pii is not None:
-            pii = known.pii
-        if known.sensitivity is not None:
-            level = knowledge.resolve(known.sensitivity)
-        if known.category is not None:
-            category = knowledge.resolve(known.category)
+        pii = known.pii if known.pii is not None else pii
+        level = knowledge.resolve(known.sensitivity) if known.sensitivity else level
+        category = knowledge.resolve(known.category) if known.category else category
         source = Source.KNOWN
     if override_raw is not None:
         path = unit.folder / DATA_DIR / f"{item_id}.yaml"
         override = _validate(Override, override_raw, path, diagnostics)
         if override is not None:
-            if override.pii is not None:
-                pii = override.pii
-            if override.sensitivity is not None:
-                level = override.sensitivity
-            if override.category is not None:
-                category = override.category
+            pii = override.pii if override.pii is not None else pii
+            level = override.sensitivity or level
+            category = override.category or category
+            store = override.store or store
             _check_vocabulary(level, category, knowledge, path, diagnostics)
             source = Source.OVERRIDE
     dpia = (
@@ -320,15 +361,15 @@ def _classify(
         field=finfo,
         model_module=model.module,
         model_file=model.file,
-        store=_store_label(finfo, model),
+        store=store,
     )
 
 
-def _store_label(finfo: FieldInfo, model: ModelInfo) -> str | None:
-    """Storage backend for a file store row, else the model's database."""
+def _store_slug(finfo: FieldInfo, model: ModelInfo) -> str | None:
+    """File storage slug for a ``@files`` row, else the model's database slug."""
     if finfo.type == "FileStore":
-        return finfo.storage.label() if finfo.storage else "unknown storage"
-    return model.database.label() if model.database else None
+        return finfo.storage.store if finfo.storage else None
+    return model.database.store if model.database else None
 
 
 def _manual_row(
@@ -372,6 +413,7 @@ def _manual_row(
         category=category,
         dpia=dpia,
         source=Source.MANUAL,
+        store=None if isinstance(item.store, Todo) else item.store,
     )
 
 
