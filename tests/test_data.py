@@ -312,9 +312,10 @@ def test_collect_unit_classifies_every_field(django_repo: Path) -> None:
     assert rows["shop.Order.total"].category == "financial"
     assert rows["shop.Order.customer"].pii is False
     assert all(r.source is Source.RULE for r in data.rows if r.id.startswith("shop."))
-    # Django's own models are library rows (not queued) unless curated.
+    # Curated framework fields are known; other third-party fields are
+    # rule-classified and reviewed like the project's own.
     assert rows["auth.User.password"].source is Source.KNOWN
-    assert rows["auth.Group.permissions"].source is Source.LIBRARY
+    assert rows["auth.Group.permissions"].source is Source.RULE
     # The bytes behind an upload column are their own item, with their store.
     avatar_store = rows["shop.Customer.avatar@files.content"]
     assert (avatar_store.pii, avatar_store.category, avatar_store.rule) == (

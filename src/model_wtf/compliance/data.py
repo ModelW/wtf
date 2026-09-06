@@ -63,10 +63,6 @@ class Source(StrEnum):
     RULE = "rule"
     KNOWN = "known"
     """Curated verdict for a well-known third-party field; counts as reviewed."""
-    LIBRARY = "library"
-    """Rule verdict on a third-party model (site-packages): not this project's
-    data model, so it is not queued for review unless a curated entry or an
-    override says otherwise."""
     OVERRIDE = "override"
     MANUAL = "manual"
 
@@ -283,7 +279,7 @@ def _classify(
         knowledge.resolve(rule.sensitivity),
         knowledge.resolve(rule.category),
     )
-    source = Source.LIBRARY if _is_library(model) else Source.RULE
+    source = Source.RULE
     if known is not None:
         # Curated verdict for a framework/library field: applied after the
         # rule, before any repo override, and it needs no review.
@@ -326,11 +322,6 @@ def _classify(
         model_file=model.file,
         store=_store_label(finfo, model),
     )
-
-
-def _is_library(model: ModelInfo) -> bool:
-    """Whether the model ships with a package rather than the repository."""
-    return bool(model.file) and "site-packages" in (model.file or "")
 
 
 def _store_label(finfo: FieldInfo, model: ModelInfo) -> str | None:

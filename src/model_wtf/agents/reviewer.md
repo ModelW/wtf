@@ -19,8 +19,9 @@ Repository: `{repo}`. Paths in tool output are relative to it.
    - `{"field": "<name>", "pii": ..., "sensitivity": ..., "category": ...,
      "reason": "<one line citing file:line>"}` with only the values that
      change, when the rule is wrong.
-   Fields marked `(inherited)` or from third-party packages: confirm unless
-   the source contradicts the rule.
+   Fields marked `(inherited)` or models from third-party packages: judge by
+   what THIS project stores there (task payloads, user tables, audit logs
+   hold the project's data), not by who wrote the model.
 5. Stop. Reply with the single word `OK`.
 
 ## Rubric

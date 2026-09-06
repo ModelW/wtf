@@ -176,11 +176,7 @@ def render_rows(rows: list[Reviewed]) -> Table:
             row.unit, _UNIT_STYLES[len(unit_style) % len(_UNIT_STYLES)]
         )
         full_id = Text.assemble((row.unit, f"bold {style}"), (":", "dim"), row.id)
-        source = (
-            f"rule:{row.rule}"
-            if row.source in (Source.RULE, Source.LIBRARY)
-            else row.source.value
-        )
+        source = f"rule:{row.rule}" if row.source is Source.RULE else row.source.value
         review_style = "yellow" if item.status.pending else "green"
         table.add_row(
             full_id,

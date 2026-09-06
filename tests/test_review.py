@@ -69,7 +69,10 @@ def test_lock_lifecycle(repo: Path) -> None:
     email = rows["shop.Customer.email"]
     assert lock.status_of(email).status is ReviewStatus.PENDING_NEW
     assert lock.status_of(rows["auth.User.password"]).status is ReviewStatus.KNOWN
-    assert lock.status_of(rows["auth.Group.permissions"]).status is ReviewStatus.LIBRARY
+    assert (
+        lock.status_of(rows["auth.Group.permissions"]).status
+        is ReviewStatus.PENDING_NEW
+    )
 
     lock.mark([email], by="human", note="plain email")
     lock.save()
@@ -150,7 +153,7 @@ def test_override_and_reviewed_commands_write_the_lock(repo: Path) -> None:
     assert "shop.Customer.email" not in ids
     assert "shop.Customer.iban" in ids
     assert "auth.User.password" not in ids  # known
-    assert "auth.Group.permissions" not in ids  # library
+    assert "auth.Group.permissions" in ids  # third-party, still reviewed
 
     bad = runner.invoke(
         cli, ["compliance", "data", "reviewed", "api:shop.Nope.x", *root]
@@ -182,7 +185,6 @@ def test_tools_pending_model_review(repo: Path) -> None:
     assert "showing 2" in pending
     assert "api:shop.Customer |" in pending
     assert "project" in pending
-    assert "auth.User" not in pending  # library rows are never queued
 
     model = tools.model("api:shop.Customer")
     assert "class Customer(models.Model):" in model

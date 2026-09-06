@@ -115,15 +115,16 @@ rules still resolve, and `check` verifies every built-in id is covered once.
 The inventory is virtual, so what has been looked at is tracked in
 `<unit>/compliance/data.lock.yaml` (fingerprint of the field facts *and* of
 the verdict, who, when, note). `data list` shows a `Review` column
-(`pending:new`, `pending:changed`, `reviewed`, `override`, `known`,
-`library`) and `--pending` filters on it; `check` fails with exit 1 while
+(`pending:new`, `pending:changed`, `reviewed`, `override`, `known`) and
+`--pending` filters on it; `check` fails with exit 1 while
 anything is pending.
 
 - `data reviewed <unit>:<id>... [--note TEXT]` — a human confirms the current
   classification.
 - `data override …` also marks the item reviewed.
-- Third-party models (site-packages) are `library`: classified by rule but not
-  queued. Curated verdicts for well-known framework fields live in
+- Third-party models are reviewed like the project's own: what a task queue
+  or a user table holds is this project's data. Curated verdicts for framework
+  fields whose meaning is fixed (`auth.User.password`, …) live in
   `knowledge/known_fields.yaml` (`known`).
 - Every file field also yields `<field>@files.content`: the bytes in the
   storage behind the column, classified on their own, with the storage backend

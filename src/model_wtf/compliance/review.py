@@ -43,9 +43,6 @@ class ReviewStatus(StrEnum):
     KNOWN = "known"
     """Curated verdict from model-wtf's knowledge: nothing to review."""
 
-    LIBRARY = "library"
-    """Third-party model classified by rule: not queued for review."""
-
     REVIEWED = "reviewed"
     """Lock entry present with a matching fingerprint."""
 
@@ -135,8 +132,6 @@ class Lock:
             return Reviewed(row, ReviewStatus.OVERRIDE, entry)
         if row.source is Source.KNOWN:
             return Reviewed(row, ReviewStatus.KNOWN, entry)
-        if row.source is Source.LIBRARY:
-            return Reviewed(row, ReviewStatus.LIBRARY, entry)
         if entry is None:
             return Reviewed(row, ReviewStatus.PENDING_NEW, None)
         if entry.fingerprint != row.fingerprint:

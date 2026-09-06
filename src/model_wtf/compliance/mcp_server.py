@@ -164,7 +164,10 @@ class Tools:
             for label, rows in per_model.items():
                 json_count = sum(r.rule == "json" for r in rows)
                 third_party = _is_third_party(rows[0])
-                # Project models first, then those with JSON blobs, then by size.
+                # Project models first (the project's own choices), then
+                # third-party ones — which still hold whatever the project
+                # puts in them (task payloads, user tables) and are reviewed
+                # too. JSON-heavy models first within each group.
                 key = (int(third_party), -json_count, label)
                 where = "third-party" if third_party else "project"
                 extra = f", {json_count} JSON" if json_count else ""
@@ -357,8 +360,9 @@ def build_server(root: Path, *, batch: int = DEFAULT_BATCH) -> MCPServer:
     @server.tool(
         name="data_pending",
         description=(
-            "Models that still have fields to review, most valuable first "
-            "(project models before third-party ones, JSON-heavy first). One line "
+            "Models that still have fields to review, project models first, then "
+            "third-party ones (their content is still this project's), JSON-heavy "
+            "first. One line "
             "each: `unit:app.Model | N pending of M fields | project|third-party`."
         ),
     )
