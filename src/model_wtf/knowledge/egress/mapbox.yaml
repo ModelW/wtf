@@ -1,0 +1,7 @@
+name: Mapbox
+kind: processor
+default_third_country: US
+detection: {hosts: [api.mapbox.com], env: [MAPBOX_TOKEN, MAPBOX_API_KEY, PUBLIC_MAPBOX_TOKEN]}
+typical_items: [address, location]
+sink: false
+notes: Geocoding, tiles, travel times.

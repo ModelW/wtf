@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 MW_SEC = [f"MW-SEC-{n:03d}" for n in range(1, 11)]
 GDPR_GATES = [
     "GDPR-ACTIVITY-COVERAGE",
+    "GDPR-CLASSIFY",
     "GDPR-LAWFUL-BASIS",
     "GDPR-PURPOSE",
     "GDPR-RETENTION-DECLARED",
@@ -50,7 +51,7 @@ ITEMS = {
     "credential",
     "none",
 }
-EGRESS = {
+EGRESS_CORE = {
     "sentry",
     "digitalocean-spaces",
     "mandrill",
@@ -67,7 +68,7 @@ def test_packaged_knowledge_loads() -> None:
 
     assert set(knowledge.rules) == set(MW_SEC + GDPR_GATES + GDPR_VERIFY)
     assert set(knowledge.data_items) == ITEMS
-    assert set(knowledge.egress) == EGRESS
+    assert EGRESS_CORE <= set(knowledge.egress)
     assert set(knowledge.frameworks) == {"gdpr", "stride"}
 
 
@@ -111,6 +112,7 @@ def test_applicability_by_kind_and_stack() -> None:
         "GDPR-DPIA",
     }
     assert {r.id for r in knowledge.rules_for("data_object")} == {
+        "GDPR-CLASSIFY",
         "GDPR-RETENTION-DECLARED",
         "GDPR-RETENTION-GROUND",
         "GDPR-SPECIAL-CATEGORY",

@@ -242,7 +242,7 @@ def run_extractor_discovery(
     surface = (
         load_surface_file(surface_file)
         if surface_file is not None
-        else run_extractor(ctx.context_dir)
+        else run_extractor(ctx.context_dir, unit_id=ctx.unit_id)
     )
     report = write_surface(ctx.folder, surface, by="extractor", source_sha=current)
     clusters = write_clusters(ctx.folder, surface, by="extractor")
@@ -381,6 +381,52 @@ def _classify_item(
     )
 
 
+class DraftRejected(Exception):
+    """The agent's draft would not pass the declaration schema."""
+
+
+def _validate_draft(ctx: UnitContext, state: Path, data: dict[str, Any]) -> None:
+    """Reject a draft that would not load: unknown items, missing fields.
+
+    A schema-invalid state file breaks the whole unit (exit 3), so it is
+    far better to fail this one item -- the run loop reports it and the
+    next run asks again -- than to write it.
+    """
+    from model_wtf.compliance.declarations.loader import (
+        COLLECTIONS,
+        Kind,
+    )
+
+    kind = Kind(state.parent.name)
+    model = COLLECTIONS[kind]
+    try:
+        model.model_validate(data)
+    except ValidationError as exc:
+        details = "; ".join(
+            f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()
+        )
+        msg = f"draft does not validate: {details}"
+        raise DraftRejected(msg) from exc
+    if kind is Kind.DATA_OBJECT:
+        vocabulary = ctx.knowledge.data_items
+        unknown = sorted(
+            item
+            for spec in (data.get("fields") or {}).values()
+            for item in (
+                [spec.get("item")]
+                if "item" in spec
+                else [c.get("item") for c in spec.get("contents") or []]
+            )
+            if item and item not in vocabulary
+        )
+        if unknown:
+            msg = (
+                f"draft uses items outside the vocabulary: {', '.join(unknown)} "
+                f"(allowed: {', '.join(sorted(vocabulary))})"
+            )
+            raise DraftRejected(msg)
+
+
 def _write_draft(ctx: UnitContext, state: Path, answer: AgentOutput) -> list[Path]:
     """Write a first draft; refuse to modify existing human state."""
     rel = _rel(state, ctx.root)
@@ -391,7 +437,9 @@ def _write_draft(ctx: UnitContext, state: Path, answer: AgentOutput) -> list[Pat
         return [_write_gen(note, {"by": "agent", **_draft_dict(answer)})]
     if not verdict.allowed:
         return []
-    text = yaml.safe_dump(_draft_dict(answer), sort_keys=False, allow_unicode=True)
+    draft = _draft_dict(answer)
+    _validate_draft(ctx, state, draft)
+    text = yaml.safe_dump(draft, sort_keys=False, allow_unicode=True)
     state.write_text(
         "# Drafted by the model-wtf agent. Review every line; you own this file.\n"
         + text,
@@ -402,6 +450,12 @@ def _write_draft(ctx: UnitContext, state: Path, answer: AgentOutput) -> list[Pat
 
 def _draft_dict(answer: AgentOutput) -> dict[str, Any]:
     if isinstance(answer, ClassifyDataObjectOutput):
+        if not answer.personal_data:
+            return {
+                "drafted_by": "agent",
+                "personal_data": False,
+                "description": answer.description,
+            }
         fields: dict[str, Any] = {}
         for f in answer.fields:
             if f.contents is not None:
@@ -422,8 +476,10 @@ def _draft_dict(answer: AgentOutput) -> dict[str, Any]:
             "name": answer.name,
             "description": answer.description,
             "fields": fields,
-            "subject_categories": answer.subject_categories,
-            "identification": answer.identification.value,
+            "subject_categories": answer.subject_categories or [OPEN],
+            "identification": (
+                answer.identification.value if answer.identification else "identified"
+            ),
             # An enum cannot hold the `open` marker; `dpo` is the conservative
             # default (rights via the DPO always work) until a human decides.
             "rectification": "dpo",

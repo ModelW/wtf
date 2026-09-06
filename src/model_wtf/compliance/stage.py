@@ -404,7 +404,7 @@ def _agent_pass(
     index = _index(store, elements)
     if not index:
         return
-    facts = _changed_facts(store, diff, elements)
+    facts = _changed_facts(diff, elements)
     by_key = {entry.checkpoint: entry for entry in index}
     for chunk in _chunks(diff, code_changed):
         request = StageRequest(
@@ -443,12 +443,13 @@ def _index(
 
 
 def _changed_facts(
-    store: LedgerStore, diff: Diff, elements: dict[str, Element]
+    diff: Diff, elements: dict[str, Element]
 ) -> dict[str, dict[str, Any]]:
     """Element ``.gen`` facts that differ between base and working tree."""
     out: dict[str, dict[str, Any]] = {}
-    for file_id, element in elements.items():
-        path = store.elements_dir / f"{file_id}.gen.yaml"
+    for element in elements.values():
+        source = element.source.path
+        path = source.with_name(f"{element.id}.gen.yaml")
         try:
             rel = path.relative_to(diff.root).as_posix()
         except ValueError:

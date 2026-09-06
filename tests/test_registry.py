@@ -190,7 +190,7 @@ def _obj(identification: str, rectification: str = "dpo") -> DataObject:
             "name": "x",
             "description": "d",
             "fields": {"a": {"item": "email"}},
-            "subject_categories": [],
+            "subject_categories": ["customers"],
             "identification": identification,
             "rectification": rectification,
         }

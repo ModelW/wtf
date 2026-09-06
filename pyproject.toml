@@ -42,6 +42,10 @@ build-backend = "uv_build"
 [tool.mypy]
 strict = true
 files = ["src"]
+# The Django introspection script runs inside the *target* project's
+# interpreter (Django, Ninja... are not deps of model-wtf); it is
+# type-checked loosely and its Django imports are untyped by design.
+exclude = ["src/model_wtf/extractors/django/_introspect\\.py$"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -100,6 +104,9 @@ ignore = ["D104", "D105"]
 [tool.ruff.lint.per-file-ignores]
 # Tests: fixtures shadow args, asserts are the point, docstrings are noise.
 "tests/*" = ["ARG001", "S101", "D", "INP001"]
+# Standalone script piped into a foreign interpreter: best-effort probes
+# (try/except/pass), long heuristic tables, no strict complexity budget.
+"src/model_wtf/extractors/django/_introspect.py" = ["C901", "S110", "S112", "BLE001", "D1", "PLR"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["model_wtf"]

@@ -149,7 +149,7 @@ def build_unit_view(unit_id: str, ds: DeclarationSet, knowledge: Knowledge) -> U
     data_objects = {
         d.id: d.model
         for d in ds.unit.get(Kind.DATA_OBJECT).values()
-        if isinstance(d.model, DataObject)
+        if isinstance(d.model, DataObject) and d.model.personal_data
     }
     recipients = {
         r.id: r.model
@@ -191,12 +191,14 @@ def build_unit_view(unit_id: str, ds: DeclarationSet, knowledge: Knowledge) -> U
         data_objects=[
             DataObjectView(
                 id=oid,
-                name=model.name,
+                name=model.name or oid,
                 description=model.description,
                 subjects=_actor_names(model.subject_categories, ds),
                 items=item_labels(_object_items(model), knowledge),
-                identification=model.identification.value,
-                rectification=model.rectification.value,
+                identification=model.identification.value
+                if model.identification
+                else "",
+                rectification=model.rectification.value if model.rectification else "",
                 multi_subject=model.multi_subject,
             )
             for oid, model in sorted(data_objects.items())

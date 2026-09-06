@@ -1,0 +1,19 @@
+id: GDPR-CLASSIFY
+title: Data object classified as personal data or not
+frameworks: [gdpr]
+applies_to: {kind: data_object}
+kind: gate
+severity: medium
+version: 1
+description: >-
+  Every extracted model needs one answer first: does it hold personal data?
+  Until a `data/<id>.yaml` exists (drafted by the agent, confirmed by a
+  human) this is the object's only checkpoint, `unknown`; once the file
+  says `personal_data: false` no other GDPR rule applies to it, once it
+  says `true` the whole GDPR set does.
+mitigation: >-
+  Run `compliance auto` (the agent drafts the declaration) or write
+  `data/<id>.yaml` yourself -- `personal_data: false` plus a one-line
+  `description` is a complete declaration for non-personal data.
+condition: "True"
+references: ["Art. 4(1)", "Art. 30(1)(c)"]

@@ -115,6 +115,13 @@ def _explain_element(
     if not ledger:
         return False
     console.rule(f"{unit_id}: {file_id}")
+    kind = file_id.split(".", 1)[0]
+    applicable = [r.id for r in knowledge.rules_for(kind)]
+    if applicable:
+        console.print(
+            f"[dim]applicable rules ({kind}): {', '.join(applicable)}[/dim]",
+            soft_wrap=True,
+        )
     table = Table(show_header=True)
     table.add_column("Rule", no_wrap=True)
     table.add_column("Status")

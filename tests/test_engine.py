@@ -36,11 +36,6 @@ def _ledger(root: Path, name: str) -> dict[str, dict[str, object]]:
     return yaml.safe_load(path.read_text()) or {}
 
 
-def _gen(root: Path, name: str) -> dict[str, object]:
-    path = root / "api/compliance/elements" / f"{name}.gen.yaml"
-    return yaml.safe_load(path.read_text())
-
-
 # ---------------------------------------------------------------------------
 # Safe evaluator
 # ---------------------------------------------------------------------------
@@ -94,29 +89,27 @@ def test_duration_years(value: str, years: float) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_applicability_written_to_gen(make_repo: MakeRepo) -> None:
+def test_applicability_is_derived_not_written(make_repo: MakeRepo) -> None:
     root = make_repo(snow=SNOW_ONE_UNIT, files=valid_tree())
 
     report = run_check(root, strict=True)
 
     assert report.exit_code is ExitCode.CLEAN, report.diagnostics
-    recipient = _gen(root, "recipient.stripe")
-    assert recipient["by"] == "extractor"
-    assert recipient["stable_id"] == "recipient:stripe"
-    assert recipient["applicable_rules"] == ["GDPR-PROCESSOR-DPA", "GDPR-TRANSFER"]
-    not_applicable = recipient["not_applicable"]
-    assert isinstance(not_applicable, dict)
-    assert not_applicable["MW-SEC-001"] == (
-        "applies to http_route, element is recipient"
-    )
-    activity = _gen(root, "activity.billing")
-    assert activity["applicable_rules"] == [
+    elements = root / "api/compliance/elements"
+    assert not list(elements.glob("*.gen.yaml"))
+    ds, _ = load_declarations(root / "api/compliance", root / "compliance", "api")
+    evaluation = evaluate_unit(ds, load_knowledge())
+    by_id = {e.stable_id: [r.id for r in e.applicable] for e in evaluation.elements}
+    assert by_id["recipient:stripe"] == ["GDPR-PROCESSOR-DPA", "GDPR-TRANSFER"]
+    assert by_id["activity:billing"] == [
         "GDPR-ACTIVITY-COVERAGE",
         "GDPR-DPIA",
         "GDPR-LAWFUL-BASIS",
         "GDPR-PURPOSE",
         "GDPR-RECIPIENT-DECLARED",
     ]
+    # The ledger's key set *is* the applicability, nothing more to store.
+    assert set(_ledger(root, "recipient.stripe")) == set(by_id["recipient:stripe"])
 
 
 def test_verify_rules_seeded_unknown_and_preserved(make_repo: MakeRepo) -> None:
@@ -164,6 +157,7 @@ def test_all_shipped_gates_evaluate_on_valid_tree(make_repo: MakeRepo) -> None:
     assert {g.rule.id for g in evaluation.gates} == {
         "GDPR-ACTIVITY-COVERAGE",
         "GDPR-CLASSIFICATION-STALE",
+        "GDPR-CLASSIFY",
         "GDPR-DPIA",
         "GDPR-LAWFUL-BASIS",
         "GDPR-PROCESSOR-DPA",
@@ -369,8 +363,6 @@ def test_framework_filter(make_repo: MakeRepo) -> None:
     assert (
         run_check(root, strict=False, framework="gdpr").exit_code is ExitCode.FINDINGS
     )
-    gen = _gen(root, "recipient.stripe")
-    assert gen["applicable_rules"] == ["GDPR-PROCESSOR-DPA", "GDPR-TRANSFER"]
 
 
 def test_no_write_leaves_tree_untouched(make_repo: MakeRepo, invoke: Invoke) -> None:
@@ -413,3 +405,65 @@ def test_github_renders_findings_as_errors(make_repo: MakeRepo, invoke: Invoke) 
         "::error file=api/compliance/recipients/stripe.yaml,"
         "title=F-0002 GDPR-PROCESSOR-DPA::" in result.output
     )
+
+
+# ---------------------------------------------------------------------------
+# personal_data narrows the GDPR set
+# ---------------------------------------------------------------------------
+
+
+def test_undeclared_data_object_has_one_checkpoint(make_repo: MakeRepo) -> None:
+    files = valid_tree()
+    files["api/compliance/data/wagtailcore.workflow.gen.yaml"] = (
+        "by: extractor\nsources: [store:wagtailcore.Workflow]\nfields:\n"
+        "  name: {type: CharField}\npii_suspected: false\n"
+    )
+    root = make_repo(snow=SNOW_ONE_UNIT, files=files)
+
+    report = run_check(root, strict=False)
+
+    ledger = _ledger(root, "data_object.wagtailcore.workflow")
+    assert list(ledger) == ["GDPR-CLASSIFY"]
+    assert ledger["GDPR-CLASSIFY"]["status"] == "unknown"
+    assert ledger["GDPR-CLASSIFY"]["staged_because"] == "declaration missing"
+    blocking = [d for d in report.diagnostics if d.severity is Severity.FINDING]
+    assert [d.code for d in blocking] == ["GDPR-CLASSIFY"]
+    assert not (root / "api/compliance/findings/F-0002.yaml").exists()
+
+
+def test_non_personal_declaration_closes_everything(make_repo: MakeRepo) -> None:
+    files = valid_tree()
+    files["api/compliance/data/wagtailcore.workflow.gen.yaml"] = (
+        "by: extractor\nsources: [store:wagtailcore.Workflow]\n"
+    )
+    files["api/compliance/data/wagtailcore.workflow.yaml"] = (
+        "personal_data: false\ndescription: Wagtail moderation workflow definitions.\n"
+    )
+    root = make_repo(snow=SNOW_ONE_UNIT, files=files)
+
+    report = run_check(root, strict=True)
+
+    assert report.exit_code is ExitCode.CLEAN, report.diagnostics
+    ledger = _ledger(root, "data_object.wagtailcore.workflow")
+    assert list(ledger) == ["GDPR-CLASSIFY"]
+    assert ledger["GDPR-CLASSIFY"]["status"] == "ok"
+
+
+def test_non_personal_with_pii_items_is_rejected(make_repo: MakeRepo) -> None:
+    files = valid_tree()
+    files["api/compliance/data/x.yaml"] = (
+        "personal_data: false\ndescription: d\nfields:\n  email: {item: email}\n"
+    )
+    root = make_repo(snow=SNOW_ONE_UNIT, files=files)
+    report = run_check(root, strict=False)
+    assert report.exit_code is ExitCode.DECLARATION_ERROR
+    assert any("personal_data: false" in d.message for d in report.diagnostics)
+
+
+def test_personal_data_requires_full_description(make_repo: MakeRepo) -> None:
+    files = valid_tree()
+    files["api/compliance/data/x.yaml"] = "description: d\n"
+    root = make_repo(snow=SNOW_ONE_UNIT, files=files)
+    report = run_check(root, strict=False)
+    assert report.exit_code is ExitCode.DECLARATION_ERROR
+    assert any("personal data object needs" in d.message for d in report.diagnostics)

@@ -103,10 +103,9 @@ NOT_OK_EVAL = json.dumps(
 
 def test_shipped_routing_and_overrides(tmp_path: Path) -> None:
     routing = load_routing()
-    assert routing.default.startswith("openrouter/")
-    assert routing.model_for("evaluate") != routing.model_for("classify")
-    assert routing.model_for("reconcile") == routing.default
-    assert "wtf-evaluate" in routing.agent_models()
+    assert routing.default == "openrouter/openrouter/auto"
+    assert routing.model_for("evaluate") == routing.default
+    assert routing.agent_models() == {}
 
     (tmp_path / ".model-wtf.yml").write_text(
         "units: []\nrouting:\n  stages:\n    classify: openrouter/repo/cheap\n"
@@ -338,6 +337,7 @@ def test_discover_then_classify_drafts_without_touching_humans(
     )
     classify_obj = json.dumps(
         {
+            "personal_data": True,
             "name": "Your lead",
             "description": "Form submissions.",
             "fields": [

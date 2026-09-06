@@ -95,7 +95,10 @@ facts and the code. Humans will correct you; be specific and honest.
 
 Load skills `data-items` and `pii-detection` first.
 
-- Data object: for every field, say WHAT it holds using vocabulary items
+- Data object: FIRST decide `personal_data`. Lookup tables, CMS plumbing
+  (workflows, revisions, renditions), permissions, feature flags are
+  `false`: give a one-line description and stop. Only when `true`, for
+  every field say WHAT it holds using vocabulary items
   only (`none` when you looked and it is not personal data). For opaque
   fields (JSON/blob/text) list each content with its item; the same
   information at three JSON paths is one content. Set `unknown_contents`

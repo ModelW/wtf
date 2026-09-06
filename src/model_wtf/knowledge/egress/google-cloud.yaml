@@ -1,0 +1,7 @@
+name: Google Cloud Platform
+kind: processor
+default_third_country: US
+detection: {packages: [google-cloud-storage, google-cloud-pubsub, google-cloud-bigquery], hosts: [googleapis.com], env: [GCP_CREDENTIALS, GCP_KEY, GOOGLE_SERVICE_ACCOUNT_JSON, GS_BUCKET_NAME]}
+typical_items: [free_text, identifier, behavioural]
+sink: true
+notes: Storage, Pub/Sub, BigQuery; region depends on the project.

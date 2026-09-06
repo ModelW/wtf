@@ -1,5 +1,6 @@
 {
   "schema": "modelw.surface/1",
+  "extractor_version": 1,
   "unit": "api",
   "stack": ["django", "ninja", "wagtail"],
   "entrypoints": [

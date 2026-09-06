@@ -268,6 +268,7 @@ def test_uncovered_member_becomes_a_finding(make_repo: MakeRepo) -> None:
     assert people_ledger["GDPR-ACTIVITY-COVERAGE"]["status"] == "ok"
     # Undeclared gen-only clusters (cms, health) still block, saying why.
     cms_ledger = yaml.safe_load((folder / "elements" / "activity.cms.yaml").read_text())
+    assert list(cms_ledger) == ["GDPR-PURPOSE"]
     assert cms_ledger["GDPR-PURPOSE"]["staged_because"] == "declaration missing"
     assert check.exit_code is ExitCode.FINDINGS
 

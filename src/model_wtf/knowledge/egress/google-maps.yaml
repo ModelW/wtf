@@ -1,0 +1,7 @@
+name: Google Maps Platform
+kind: processor
+default_third_country: US
+detection: {packages: [googlemaps], hosts: [maps.googleapis.com], env: [GOOGLE_MAPS_API_KEY, GOOGLE_API_KEY]}
+typical_items: [address, location]
+sink: false
+notes: Geocoding and routing; addresses and coordinates are sent.

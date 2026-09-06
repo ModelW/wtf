@@ -11,8 +11,8 @@ import yaml
 
 from model_wtf.auto.run import AutoOptions, run_auto
 from model_wtf.extractors.django import (
-    detect_runner,
-    find_manage,
+    INTROSPECT,
+    detect_interpreter,
     is_django_unit,
     load_surface_file,
     run_extractor,
@@ -104,68 +104,85 @@ def test_is_django_unit(tmp_path: Path) -> None:
     assert is_django_unit(ctx)
 
 
-def test_detect_runner_prefers_lockfiles(
+def test_detect_interpreter_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ctx = tmp_path / "api"
     ctx.mkdir()
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
     monkeypatch.setattr(
-        "model_wtf.extractors.django.shutil.which", lambda name: f"/bin/{name}"
+        "model_wtf.extractors.django.runner.shutil.which", lambda n: f"/bin/{n}"
     )
-    assert detect_runner(ctx).kind == "python"  # type: ignore[union-attr]
+    assert detect_interpreter(ctx) is None
+    monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / "venv"))
+    (tmp_path / "venv" / "bin").mkdir(parents=True)
+    (tmp_path / "venv" / "bin" / "python").write_text("")
+    assert detect_interpreter(ctx).kind == "VIRTUAL_ENV"  # type: ignore[union-attr]
+    (ctx / ".venv" / "bin").mkdir(parents=True)
+    (ctx / ".venv" / "bin" / "python").write_text("")
+    assert detect_interpreter(ctx).kind == ".venv"  # type: ignore[union-attr]
     (ctx / "poetry.lock").write_text("")
-    assert detect_runner(ctx).kind == "poetry"  # type: ignore[union-attr]
+    assert detect_interpreter(ctx).kind == "poetry"  # type: ignore[union-attr]
     (ctx / "uv.lock").write_text("")
-    runner = detect_runner(ctx)
-    assert runner is not None
-    assert runner.kind == "uv"
-    assert runner.command(ctx / "manage.py")[-2:] == [
-        "export_compliance_surface",
-        "--json",
-    ]
-    monkeypatch.setattr("model_wtf.extractors.django.shutil.which", lambda name: None)
-    assert detect_runner(ctx) is None
+    uv = detect_interpreter(ctx)
+    assert uv is not None
+    assert uv.kind == "uv"
+    assert uv.argv[-2:] == ("python", "-")
+    assert "--project" in uv.argv
+    assert detect_interpreter(ctx, python="/opt/py").argv == ("/opt/py", "-")  # type: ignore[union-attr]
 
 
-def test_find_manage(tmp_path: Path) -> None:
+def test_uv_detected_from_tool_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     ctx = tmp_path / "api"
-    (ctx / ".venv" / "x").mkdir(parents=True)
-    (ctx / ".venv" / "x" / "manage.py").write_text("")
-    assert find_manage(ctx) is None
-    (ctx / "src").mkdir()
-    (ctx / "src" / "manage.py").write_text("")
-    assert find_manage(ctx) == ctx / "src" / "manage.py"
-    (ctx / "manage.py").write_text("")
-    assert find_manage(ctx) == ctx / "manage.py"
+    ctx.mkdir()
+    (ctx / "pyproject.toml").write_text("[tool.uv]\ndev-dependencies=[]\n")
+    monkeypatch.setattr(
+        "model_wtf.extractors.django.runner.shutil.which", lambda n: f"/bin/{n}"
+    )
+    assert detect_interpreter(ctx).kind == "uv"  # type: ignore[union-attr]
 
 
 def test_run_extractor_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ctx = tmp_path / "api"
     ctx.mkdir()
-    with pytest.raises(SurfaceError, match=r"no manage\.py"):
-        run_extractor(ctx)
-    (ctx / "manage.py").write_text("")
-    monkeypatch.setattr("model_wtf.extractors.django.shutil.which", lambda name: None)
-    with pytest.raises(SurfaceError, match="no Python runner"):
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.setattr(
+        "model_wtf.extractors.django.runner.shutil.which", lambda n: None
+    )
+    with pytest.raises(SurfaceError, match="no Python interpreter"):
         run_extractor(ctx)
 
 
-def test_run_extractor_executes_command(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_run_extractor_pipes_script_and_checks_version(tmp_path: Path) -> None:
+    """A fake interpreter: whatever is piped in, print the recorded surface."""
     ctx = tmp_path / "api"
     ctx.mkdir()
-    # A fake manage.py: any `python manage.py export_compliance_surface --json`
-    # prints the recorded surface.
-    (ctx / "manage.py").write_text(
-        f"import sys, pathlib\nprint(pathlib.Path({str(SURFACE)!r}).read_text())\n"
-    )
-    monkeypatch.setattr(
-        "model_wtf.extractors.django.shutil.which",
-        lambda name: "/usr/bin/python3" if name == "python3" else None,
-    )
-    surface = run_extractor(ctx)
+    fake = tmp_path / "fakepython"
+    fake.write_text(f"#!/bin/sh\ncat > {tmp_path}/received.py\ncat {SURFACE}\n")
+    fake.chmod(0o755)
+
+    surface = run_extractor(ctx, unit_id="api", python=str(fake))
+
     assert surface.unit == "api"
+    assert (tmp_path / "received.py").read_text() == INTROSPECT.read_text()
+
+    stale = tmp_path / "stale"
+    stale.write_text(
+        "#!/bin/sh\ncat >/dev/null\n"
+        "python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); "
+        f'd["extractor_version"]=99; print(json.dumps(d))\' {SURFACE}\n'
+    )
+    stale.chmod(0o755)
+    with pytest.raises(SurfaceError, match="version mismatch"):
+        run_extractor(ctx, python=str(stale))
+
+
+def test_introspect_script_is_self_contained() -> None:
+    text = INTROSPECT.read_text()
+    assert "model_wtf" not in text.replace("model-wtf", "")
+    assert "EXTRACTOR_VERSION = 1" in text
 
 
 # ---------------------------------------------------------------------------
@@ -337,10 +354,13 @@ def test_auto_uses_surface_file_instead_of_agent(make_repo: MakeRepo) -> None:
     assert (root / "api/compliance/data/people.user.gen.yaml").exists()
 
     # Human files, ledgers, findings untouched by a second run with the same surface.
+    (root / "api/compliance/actors").mkdir(exist_ok=True)
+    (root / "api/compliance/actors/customers.yaml").write_text("name: Customers\n")
     human = root / "api/compliance/data/people.user.yaml"
     human.write_text(
         "name: Your account\ndescription: d\nfields:\n  email: {item: email}\n"
-        "subject_categories: []\nidentification: identified\nrectification: dpo\n"
+        "subject_categories: [customers]\nidentification: identified\n"
+        "rectification: dpo\n"
     )
     before = human.read_text()
     again = run_auto(root, NoWorker(), Routing(default="openrouter/x/y"), options)
@@ -357,7 +377,10 @@ def test_django_unit_without_surface_reports_failure_not_agent(
     (root / "api/pyproject.toml").write_text(
         '[project]\nname="api"\ndependencies=["django"]\n'
     )
-    monkeypatch.setattr("model_wtf.extractors.django.shutil.which", lambda name: None)
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.setattr(
+        "model_wtf.extractors.django.runner.shutil.which", lambda name: None
+    )
 
     report = run_auto(
         root,
@@ -367,7 +390,8 @@ def test_django_unit_without_surface_reports_failure_not_agent(
     )
 
     assert report.stages["extract"].failed == 1
-    assert "no manage.py" in next(iter(report.stages["extract"].failures.values()))
+    failure = next(iter(report.stages["extract"].failures.values()))
+    assert "no Python interpreter" in failure
     assert report.stages["discover"].items == 0
 
 

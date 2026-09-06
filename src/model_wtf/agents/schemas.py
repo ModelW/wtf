@@ -136,13 +136,25 @@ class ClassifiedField(AgentOutput):
 
 
 class ClassifyDataObjectOutput(AgentOutput):
-    """Draft of ``data/<id>.yaml``."""
+    """Draft of ``data/<id>.yaml``.
 
-    name: str = Field(description="Subject-facing noun (Your invoices).")
+    Answer ``personal_data`` first. When false (lookup tables, CMS
+    plumbing, permissions), only ``description`` and ``rationale`` matter;
+    the other fields may be left empty.
+    """
+
+    personal_data: bool = Field(
+        description="Does this model hold data about identifiable people?"
+    )
+    name: str | None = Field(
+        default=None, description="Subject-facing noun (Your invoices)."
+    )
     description: str
-    fields: list[ClassifiedField]
-    subject_categories: list[str] = Field(description="Actor ids.")
-    identification: Identification
+    fields: list[ClassifiedField] = Field(default_factory=list)
+    subject_categories: list[str] = Field(
+        default_factory=list, description="Actor ids."
+    )
+    identification: Identification | None = None
     multi_subject: bool = False
     rationale: str = Field(description="One paragraph: why these items.")
 

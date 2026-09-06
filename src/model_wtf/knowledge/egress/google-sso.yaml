@@ -1,0 +1,7 @@
+name: Google Identity (SSO)
+kind: processor
+default_third_country: US
+detection: {packages: [django_google_sso, google-auth], hosts: [accounts.google.com, oauth2.googleapis.com], env: [GOOGLE_SSO_CLIENT_ID, GOOGLE_SSO_CLIENT_SECRET]}
+typical_items: [email, name, identifier]
+sink: false
+notes: Login with Google; identity claims flow both ways.

@@ -1,0 +1,7 @@
+name: Anthropic
+kind: processor
+default_third_country: US
+detection: {packages: [anthropic], hosts: [api.anthropic.com], env: [ANTHROPIC_API_KEY]}
+typical_items: [free_text]
+sink: false
+notes: LLM API; prompts may carry personal data.

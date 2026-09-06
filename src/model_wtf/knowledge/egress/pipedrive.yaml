@@ -1,0 +1,7 @@
+name: Pipedrive
+kind: processor
+default_third_country: null
+detection: {hosts: [api.pipedrive.com], env: [PIPEDRIVE_TOKEN]}
+typical_items: [name, email, phone, free_text]
+sink: false
+notes: CRM; EU-hosted for EU accounts.

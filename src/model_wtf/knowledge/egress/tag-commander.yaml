@@ -1,0 +1,7 @@
+name: Commanders Act (TagCommander)
+kind: third_party
+default_third_country: null
+detection: {hosts: [tagcommander.com, commander1.com], env: [TAG_COMMANDER_SCRIPT, TAG_COMMANDER_XTSITE]}
+typical_items: [behavioural, identifier]
+sink: true
+notes: Tag manager loading marketing tags; requires consent gating.

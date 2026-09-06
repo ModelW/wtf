@@ -15,6 +15,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 SCHEMA_ID = "modelw.surface/1"
+EXTRACTOR_VERSION = 1
+"""Bumped together with ``django/_introspect.py`` when its output changes;
+model-wtf refuses a script/consumer mismatch rather than guessing."""
 
 
 class Lenient(BaseModel):
@@ -80,6 +83,7 @@ class StorageField(Lenient):
     primary_key: bool = False
     fk_target: str | None = None
     on_delete: str | None = None
+    choices: list[str] = Field(default_factory=list)
     pii_hints: list[PiiHint] = Field(default_factory=list)
     opaque: bool = False
     candidate_contents: list[CandidateContent] = Field(default_factory=list)
@@ -115,6 +119,7 @@ class ConfigKey(Lenient):
     required: bool = False
     is_yaml: bool = False
     sink: str | None = Field(default=None, description="Known third party it feeds.")
+    secret: bool = False
 
 
 class Egress(Lenient):
@@ -143,6 +148,9 @@ class Surface(Lenient):
     """The whole extractor output for one unit."""
 
     schema_: str = Field(alias="schema", description=f"Must be {SCHEMA_ID}.")
+    extractor_version: int | None = Field(
+        default=None, description="Version of the script that produced this."
+    )
     unit: str
     stack: list[str] = Field(default_factory=lambda: ["django"])
     entrypoints: list[Entrypoint] = Field(default_factory=list)

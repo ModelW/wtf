@@ -154,6 +154,7 @@ def test_evaluate_output_validates_and_rejects_extras() -> None:
 def test_classify_iban_content_uses_financial() -> None:
     out = ClassifyDataObjectOutput.model_validate(
         {
+            "personal_data": True,
             "name": "Your invoices",
             "description": "d",
             "fields": [

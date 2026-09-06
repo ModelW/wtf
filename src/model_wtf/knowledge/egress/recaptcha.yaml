@@ -1,0 +1,7 @@
+name: Google reCAPTCHA
+kind: third_party
+default_third_country: US
+detection: {hosts: [www.google.com/recaptcha, recaptcha.net], env: [RECAPTCHA_SECRET_KEY, RECAPTCHA_SECRET]}
+typical_items: [identifier, behavioural]
+sink: true
+notes: Bot protection; IP and behavioural signals sent to Google.

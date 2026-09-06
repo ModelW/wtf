@@ -291,16 +291,19 @@ def test_mostly_restaged_unit_skips_agent(git_repo: Path) -> None:
 
 
 def test_changed_gen_facts_are_passed(git_repo: Path) -> None:
-    gen = git_repo / "api/compliance/elements/recipient.stripe.gen.yaml"
-    gen.write_text(gen.read_text() + "hosts: [api.stripe.com]\n")
+    gen = git_repo / "api/compliance/data/billing.invoices.gen.yaml"
+    gen.write_text("by: extractor\nfields:\n  amount: {type: DecimalField}\n")
+    _git(git_repo, "add", "-A")
+    _git(git_repo, "commit", "-qm", "gen")
+    gen.write_text(gen.read_text() + "  iban: {type: CharField}\n")
     (git_repo / "api/apps/billing/api.py").write_text("changed\n")
     stager = RecordingStager()
 
     run_stage(git_repo, StageOptions(base="main"), stager)
 
-    assert stager.requests[0].changed_facts == {
-        "recipient:stripe": {"hosts": ["api.stripe.com"]}
-    }
+    facts = stager.requests[0].changed_facts
+    assert "data_object:billing.invoices" in facts
+    assert "iban" in facts["data_object:billing.invoices"]["fields"]
 
 
 # ---------------------------------------------------------------------------

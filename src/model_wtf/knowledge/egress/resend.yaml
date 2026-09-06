@@ -1,0 +1,7 @@
+name: Resend
+kind: processor
+default_third_country: US
+detection: {packages: [resend], hosts: [api.resend.com], env: [RESEND_API_KEY]}
+typical_items: [email, name, free_text]
+sink: false
+notes: Transactional email delivery.

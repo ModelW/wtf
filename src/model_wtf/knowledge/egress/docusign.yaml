@@ -1,0 +1,7 @@
+name: DocuSign
+kind: processor
+default_third_country: US
+detection: {packages: [docusign_esign, docusign-esign], hosts: [docusign.net, docusign.com], env: [DOCUSIGN_INTEGRATION_KEY, DOCUSIGN_PRIVATE_KEY, DOCUSIGN_ACCOUNT_ID]}
+typical_items: [name, email, identity_document, financial]
+sink: false
+notes: Electronic signature; signed documents and signer identity are transferred.

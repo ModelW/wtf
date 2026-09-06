@@ -73,19 +73,36 @@ class ClusteringReport:
 # ---------------------------------------------------------------------------
 
 
+_UNSAFE = re.compile(r"[^a-z0-9_-]+")
+
+
+def safe_id(value: str) -> str:
+    """A file-name-safe activity id (``[a-z0-9_-]``, never empty)."""
+    cleaned = _UNSAFE.sub("-", value.lower()).strip("-_")
+    return cleaned or "misc"
+
+
 def app_of(entry: Entrypoint | Task) -> str:
     """The app (cluster id) an entrypoint or task belongs to.
 
     Infrastructure tags win (a ``/health/`` route is not "the people
     app"); then the view/task module path (``apps.people.api.login`` ->
-    ``people``); then the URL namespace; finally the first path segment.
+    ``people``); then the URL namespace; finally the first path segment
+    that is not a parameter.
     """
+    return safe_id(_raw_app_of(entry))
+
+
+def _raw_app_of(entry: Entrypoint | Task) -> str:
     tags = getattr(entry, "tags", None) or []
     for tag in INFRA_TAGS:
         if tag in tags:
             return tag.split("-", 1)[0] if tag.startswith("cms-") else tag
-    dotted = getattr(entry, "view", None) or entry.id.partition(":")[2]
-    if match := _APP_FROM_MODULE.search(dotted):
+    view = getattr(entry, "view", None)
+    dotted = view or (
+        entry.id.partition(":")[2] if entry.id.startswith("task:") else ""
+    )
+    if dotted and (match := _APP_FROM_MODULE.search(dotted)):
         return match.group(1)
     namespace = getattr(entry, "namespace", None)
     if namespace:
@@ -94,8 +111,11 @@ def app_of(entry: Entrypoint | Task) -> str:
     if len(parts) >= 2:
         return parts[0]
     path = getattr(entry, "path", "") or ""
+    skip = {"back", "api", "v1", "v2"}
     segments = [
-        s for s in path.split("/") if s and s not in ("back", "api", "v1", "v2")
+        s
+        for s in path.split("/")
+        if s and s not in skip and not s.startswith(("[", ":", "<", "{"))
     ]
     return segments[0] if segments else "misc"
 

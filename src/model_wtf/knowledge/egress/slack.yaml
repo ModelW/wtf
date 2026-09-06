@@ -1,0 +1,7 @@
+name: Slack
+kind: processor
+default_third_country: US
+detection: {packages: [slack_sdk, slack-sdk], hosts: [slack.com, hooks.slack.com], env: [SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, SLACK_SIGNING_SECRET]}
+typical_items: [name, email, free_text]
+sink: true
+notes: Notifications; message bodies are kept by Slack.

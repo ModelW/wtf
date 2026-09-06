@@ -154,7 +154,7 @@ class OpenCodeServer:
         agent_models: dict[str, str] | None = None,
         credential: str | None = None,
         binary: str | None = None,
-        timeout: float = 600.0,
+        timeout: float = 1800.0,
     ) -> None:
         self.repo_root = repo_root.resolve()
         self.default_model = default_model

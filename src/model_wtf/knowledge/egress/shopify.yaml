@@ -1,0 +1,7 @@
+name: Shopify
+kind: processor
+default_third_country: CA
+detection: {packages: [shopifyapi, ShopifyAPI], hosts: [myshopify.com, shopify.com], env: [SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET]}
+typical_items: [name, email, address, financial]
+sink: false
+notes: E-commerce orders and customers.

@@ -1,0 +1,7 @@
+name: Mistral AI
+kind: processor
+default_third_country: null
+detection: {packages: [mistralai], hosts: [api.mistral.ai], env: [MISTRAL_API_KEY]}
+typical_items: [free_text]
+sink: false
+notes: LLM API; prompts may carry personal data.

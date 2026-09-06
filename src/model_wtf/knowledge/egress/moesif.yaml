@@ -1,0 +1,7 @@
+name: Moesif
+kind: processor
+default_third_country: US
+detection: {packages: [moesifdjango, moesifapi], hosts: [api.moesif.net], env: [MOESIF_APPLICATION_ID]}
+typical_items: [identifier, behavioural, free_text]
+sink: true
+notes: API analytics; request/response bodies may be captured.

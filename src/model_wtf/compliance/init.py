@@ -201,16 +201,23 @@ def _yaml(sample: str = "") -> YAML:
 
 
 def _wire_snow(path: Path, only: set[str], report: InitReport) -> list[UnitPlan]:
-    """Add ``compliance: compliance`` to every image lacking it (round-trip)."""
+    """Add ``compliance: compliance`` to every image lacking it.
+
+    The file is *read* with ruamel (to know what is declared) but *edited*
+    textually: a line is inserted after the last key of each image entry,
+    at that entry's own indentation. Re-serialising YAML, even with a
+    round-trip loader, re-indents nested mappings and rewraps scalars, and
+    the whole point is a diff that shows only the added lines.
+    """
     text = path.read_text(encoding="utf-8")
-    yaml = _yaml(text)
-    data = yaml.load(text) or CommentedMap()
+    data = _yaml().load(text) or CommentedMap()
     images = data.get("images")
     if not isinstance(images, CommentedSeq):
         return []
     plans: list[UnitPlan] = []
-    changed = False
-    for image in images:
+    lines = text.splitlines(keepends=True)
+    insertions: list[tuple[int, str]] = []
+    for index, image in enumerate(images):
         if not isinstance(image, CommentedMap) or "id" not in image:
             continue
         image_id = str(image["id"])
@@ -218,14 +225,45 @@ def _wire_snow(path: Path, only: set[str], report: InitReport) -> list[UnitPlan]
             continue
         context = str(image.get("context", "."))
         if "compliance" not in image:
-            image["compliance"] = "compliance"
+            line_no, indent = _image_span_end(lines, images, index)
+            insertions.append((line_no, f"{indent}compliance: compliance\n"))
             report.manifest_edits.append(f"{path.name}: images[{image_id}].compliance")
-            changed = True
-        plans.append(UnitPlan(image_id, context, str(image["compliance"])))
-    if changed:
-        with path.open("w", encoding="utf-8") as handle:
-            yaml.dump(data, handle)
+            plans.append(UnitPlan(image_id, context, "compliance"))
+        else:
+            plans.append(UnitPlan(image_id, context, str(image["compliance"])))
+    for line_no, new_line in sorted(insertions, reverse=True):
+        lines.insert(line_no, new_line)
+    if insertions:
+        path.write_text("".join(lines), encoding="utf-8")
     return plans
+
+
+def _image_span_end(
+    lines: list[str], images: CommentedSeq, index: int
+) -> tuple[int, str]:
+    """Line index just after image ``index``'s last key, and the key indent.
+
+    ruamel keeps the line of every mapping key (``lc.data``); the entry
+    ends before the next entry starts (or before the first line at an
+    indentation <= the ``- `` dash of the sequence). Trailing blank lines
+    and comments between entries stay attached to the *next* entry.
+    """
+    image = images[index]
+    key_lines = [pos[0] for pos in image.lc.data.values()]
+    key_indent = " " * min(pos[1] for pos in image.lc.data.values())
+    last_key = max(key_lines)
+    # Multi-line scalars: walk down while lines are deeper than the key.
+    key_col = len(key_indent)
+    end = last_key + 1
+    while end < len(lines):
+        stripped = lines[end].lstrip(" ")
+        if not stripped.strip() or stripped.startswith("#"):
+            break
+        if len(lines[end]) - len(stripped) > key_col:
+            end += 1
+            continue
+        break
+    return end, key_indent
 
 
 def _wire_fallback(

@@ -312,19 +312,32 @@ class ItemFailed(Exception):
 
 
 def _run_one(item: WorkItem, worker: Worker, model: str) -> list[Path]:
-    """Ask, validate, retry once with the errors, write."""
-    answer = worker.ask(item.agent, item.prompt, model=model, title=item.key)
+    """Ask, validate, retry once with the errors, write.
+
+    Transport failures (a session that hangs past the timeout, a dropped
+    connection) are item failures, not run failures: the other items keep
+    going and a re-run picks this one up.
+    """
+    try:
+        answer = worker.ask(item.agent, item.prompt, model=model, title=item.key)
+    except Exception as exc:
+        msg = f"worker error: {type(exc).__name__}: {exc}"
+        raise ItemFailed(msg) from exc
     if answer.error:
         msg = f"agent error: {answer.error[:500]}"
         raise ItemFailed(msg)
     try:
         parsed = parse_answer(answer.text, item.schema)
     except ValueError as first:
-        retry = worker.follow_up(
-            answer.session_id,
-            f"Your answer was rejected: {first}\n\nReply again with ONLY the JSON "
-            "object matching the schema.",
-        )
+        try:
+            retry = worker.follow_up(
+                answer.session_id,
+                f"Your answer was rejected: {first}\n\nReply again with ONLY the "
+                "JSON object matching the schema.",
+            )
+        except Exception as exc:
+            msg = f"worker error on retry: {type(exc).__name__}: {exc}"
+            raise ItemFailed(msg) from exc
         if retry.error:
             msg = f"agent error on retry: {retry.error[:500]}"
             raise ItemFailed(msg) from first
@@ -333,7 +346,11 @@ def _run_one(item: WorkItem, worker: Worker, model: str) -> list[Path]:
         except ValueError as second:
             msg = f"schema validation failed twice: {second}"
             raise ItemFailed(msg) from second
-    return item.write(parsed, answer.model or model)
+    try:
+        return item.write(parsed, answer.model or model)
+    except Exception as exc:
+        msg = f"could not write result: {type(exc).__name__}: {exc}"
+        raise ItemFailed(msg) from exc
 
 
 def render_json(report: RunReport) -> str:

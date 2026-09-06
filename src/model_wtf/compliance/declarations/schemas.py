@@ -412,35 +412,53 @@ DataField = Annotated[ScalarField | OpaqueField, Field(union_mode="left_to_right
 
 
 class DataObject(Strict):
-    """A subject-facing unit of personal data bound to code."""
+    """A subject-facing unit of personal data bound to code.
+
+    The first and only mandatory answer is ``personal_data``. A model that
+    holds none (a lookup table, a Wagtail workflow, a permission) is fully
+    declared with ``personal_data: false`` and a ``description``; every
+    other field -- and every other GDPR rule -- only matters when it does.
+    """
 
     drafted_by: Literal["agent"] | None = Field(
         default=None,
         title="Drafted by",
         description="Set when the agent wrote the first version.",
     )
-    name: str = Field(
-        title="Name", description="Subject-facing noun (``Your invoices``)."
+    personal_data: bool = Field(
+        default=True,
+        title="Personal data",
+        description="Whether the object holds data about identifiable people.",
+        json_schema_extra=ref("Art. 4(1)"),
+    )
+    name: str | None = Field(
+        default=None,
+        title="Name",
+        description="Subject-facing noun (``Your invoices``).",
     )
     description: str = Field(
         title="Description", description="What the object contains, for subjects."
     )
     fields: dict[str, DataField] = Field(
+        default_factory=dict,
         title="Fields",
         description="Per source field: the data items it holds.",
         json_schema_extra=ref("Art. 30(1)(c)"),
     )
     subject_categories: list[str] = Field(
+        default_factory=list,
         title="Subject categories",
         description="Ids of actors the object describes.",
         json_schema_extra=ref("Art. 30(1)(c)"),
     )
-    identification: Identification = Field(
+    identification: Identification | None = Field(
+        default=None,
         title="Identification",
         description="Identified, pseudonymous, or not linkable to a person.",
         json_schema_extra=ref("Art. 11"),
     )
-    rectification: Rectification = Field(
+    rectification: Rectification | None = Field(
+        default=None,
         title="Rectification",
         description="Self-service in the product or via the DPO.",
         json_schema_extra=ref("Art. 16"),
@@ -456,6 +474,36 @@ class DataObject(Strict):
         description="Erasure time limits, one per clock.",
         json_schema_extra=ref("Art. 30(1)(f)"),
     )
+
+    @model_validator(mode="after")
+    def _personal_data_needs_the_rest(self) -> DataObject:
+        """Personal data must be fully described; non-personal data must not."""
+        if self.personal_data:
+            missing = [
+                k
+                for k, v in (
+                    ("name", self.name),
+                    ("fields", self.fields),
+                    ("subject_categories", self.subject_categories),
+                    ("identification", self.identification),
+                    ("rectification", self.rectification),
+                )
+                if not v
+            ]
+            if missing:
+                msg = f"personal data object needs {', '.join(missing)}"
+                raise ValueError(msg)
+        elif any(
+            (isinstance(spec, ScalarField) and spec.item != "none")
+            or (
+                isinstance(spec, OpaqueField)
+                and any(c.item != "none" for c in spec.contents)
+            )
+            for spec in self.fields.values()
+        ):
+            msg = "personal_data: false but fields carry personal-data items"
+            raise ValueError(msg)
+        return self
 
 
 # ---------------------------------------------------------------------------

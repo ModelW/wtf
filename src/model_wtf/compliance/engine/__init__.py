@@ -7,9 +7,10 @@ Given the Knowledge and a unit's declarations, the engine:
 2. computes which rules apply to each (``applies_to`` x kind/stack),
 3. evaluates every applicable **gate** by running its ``condition`` in a
    sandboxed expression evaluator,
-4. persists the outcome: applicability into ``elements/<id>.gen.yaml``,
-   verdicts into the ledger ``elements/<id>.yaml``, and one finding file
-   per failing gate (deleted again when the gate passes).
+4. persists the outcome: verdicts into the ledger ``elements/<id>.yaml``
+   and one finding file per failing gate (deleted again when the gate
+   passes). Applicability itself is never written -- it is Knowledge x
+   element kind, recomputed every time.
 
 Verify rules are only *listed*; the agent resolves them later.
 """
