@@ -1031,7 +1031,8 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
         description=(
             "Declare the data items one touchpoint reads/writes, in a single call: "
             "`data` lists EVERY inventory item read or written, personal or not, as "
-            "{ref, direction?}; an empty list means 'checked, touches no item'. `exporting` lists what leaves the unit: "
+            "{ref, direction?}; an empty list means 'checked, touches no item'. "
+            "`exporting` lists what leaves the unit: "
             "[{party, data[], purpose?}] for every external API/provider the code "
             "calls (party must exist: parties_list / party_add). `reason` cites "
             "file:line."
