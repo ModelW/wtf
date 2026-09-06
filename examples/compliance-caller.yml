@@ -1,0 +1,25 @@
+# Copy this into the consuming repository as .github/workflows/compliance.yml.
+# It runs the model-wtf loop on every pull request and once a week on the
+# default branch (knowledge upgrades and `review_by` expiries surface there).
+
+name: Compliance
+
+on:
+    pull_request:
+        types: [opened, synchronize, reopened]
+    schedule:
+        - cron: "17 6 * * 1" # Mondays 06:17 UTC
+
+permissions:
+    contents: write
+    pull-requests: write
+
+jobs:
+    compliance:
+        uses: ModelW/wtf/.github/workflows/compliance.yml@develop
+        with:
+            budget: "2"
+            concurrency: 8
+            all: ${{ github.event_name == 'schedule' }}
+        secrets:
+            OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}

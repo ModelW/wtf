@@ -163,6 +163,19 @@ erasure time limits, derived rights matrix), recipients, data objects, and the
 byte-identical output. Templates are one Jinja file per kind under
 `src/model_wtf/compliance/templates/registry/`.
 
+## GitHub Actions
+
+`.github/workflows/compliance.yml` is a **reusable workflow** consuming repos
+call on `pull_request` and on a weekly `schedule` (caller snippet in
+`examples/compliance-caller.yml`). Per run: checkout the PR head → install
+model-wtf (`uv tool`) and OpenCode → `stage --base` (stop early when nothing is
+staged and no `compliance/` path changed) → `auto --budget` → `whitelist` +
+commit as `model-wtf[bot]` (patch artifact on forks; anything outside the
+whitelist aborts) → `gh-sync-comments` → `check --format github` as the job
+status. Inputs: `budget`, `concurrency`, `all` (weekly sweep), `model-wtf-ref`,
+`opencode-version`; secret `OPENROUTER_API_KEY`. Runs by the bot or
+commits/titles containing `[skip compliance]` do not retrigger.
+
 ## `compliance auto`
 
 ```

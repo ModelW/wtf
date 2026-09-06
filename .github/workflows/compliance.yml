@@ -1,0 +1,193 @@
+# Reusable compliance loop: stage -> auto -> bot commit -> PR comments -> check.
+#
+# Consuming repositories call this from a thin workflow on
+# `pull_request` [opened, synchronize, reopened] and on a weekly `schedule`
+# (see the README for the caller snippet). The reviewer is deterministic
+# (`check`); the agent (`auto`) is the labour. Everything the bot writes goes
+# through `compliance whitelist`; anything else aborts the run.
+
+name: model-wtf compliance
+
+on:
+    workflow_call:
+        inputs:
+            base:
+                description:
+                    Git ref to diff against (default the PR base branch, or the
+                    default branch on schedule).
+                type: string
+                default: ""
+            budget:
+                description: Maximum agent spend in USD for this run.
+                type: string
+                default: "2"
+            concurrency:
+                description: Sub-agent sessions run in parallel.
+                type: number
+                default: 8
+            all:
+                description:
+                    Re-stage every checkpoint (weekly knowledge/review_by
+                    sweep).
+                type: boolean
+                default: false
+            model-wtf-ref:
+                description: Git ref of ModelW/wtf to install model-wtf from.
+                type: string
+                default: develop
+            opencode-version:
+                description: OpenCode release to install on the runner.
+                type: string
+                default: "1.18.26"
+        secrets:
+            OPENROUTER_API_KEY:
+                required: true
+
+permissions:
+    contents: write
+    pull-requests: write
+
+concurrency:
+    group: compliance-${{ github.event.pull_request.number || github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    compliance:
+        runs-on: ubuntu-latest
+        # Bot-loop guard: our own commits (and explicit opt-outs) never
+        # trigger another run. GITHUB_TOKEN pushes do not fire pull_request
+        # events anyway, but an App token would, so the guard stays.
+        if: >-
+            github.event.pull_request.user.login != 'model-wtf[bot]' &&
+            !contains(github.event.head_commit.message || '', '[skip
+            compliance]') && !contains(github.event.pull_request.title || '',
+            '[skip compliance]')
+        env:
+            PR_NUMBER: ${{ github.event.pull_request.number }}
+            HEAD_REF:
+                ${{ github.event.pull_request.head.ref || github.ref_name }}
+            IS_FORK:
+                ${{ github.event.pull_request.head.repo.full_name !=
+                github.repository }}
+        steps:
+            # 1. The PR head, full history (stage diffs against the base).
+            - uses: actions/checkout@v4
+              with:
+                  ref: ${{ github.event.pull_request.head.sha || github.sha }}
+                  fetch-depth: 0
+
+            # 2. Tooling: uv + model-wtf as a tool, OpenCode pinned.
+            - uses: astral-sh/setup-uv@v5
+              with:
+                  enable-cache: true
+            - name: Install model-wtf
+              run:
+                  uv tool install "git+https://github.com/ModelW/wtf.git@${{
+                  inputs.model-wtf-ref }}"
+            - name: Install OpenCode
+              run: |
+                  curl -fsSL https://opencode.ai/install | bash -s -- --version "${{ inputs.opencode-version }}"
+                  echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+            - name: Resolve base ref
+              id: base
+              run: |
+                  base="${{ inputs.base }}"
+                  if [ -z "$base" ]; then
+                    base="${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}"
+                  fi
+                  git fetch --no-tags origin "$base:refs/remotes/origin/$base" || true
+                  echo "ref=origin/$base" >> "$GITHUB_OUTPUT"
+
+            # 3. Mechanical staging; stop early when there is nothing to do.
+            - name: Stage
+              id: stage
+              run: |
+                  args=(--base "${{ steps.base.outputs.ref }}" --format json)
+                  if [ "${{ inputs.all }}" = "true" ]; then args+=(--all); fi
+                  model-wtf compliance stage "${args[@]}" > stage.json
+                  cat stage.json
+                  empty=$(python3 -c 'import json;print(str(json.load(open("stage.json"))["empty"]).lower())')
+                  touched=$(git diff --name-only "${{ steps.base.outputs.ref }}...HEAD" | grep -E '(^|/)compliance/' || true)
+                  if [ "$empty" = "true" ] && [ -z "$touched" ]; then
+                    echo "skip=true" >> "$GITHUB_OUTPUT"
+                    echo "Nothing staged and no compliance/ change: done." >> "$GITHUB_STEP_SUMMARY"
+                  else
+                    echo "skip=false" >> "$GITHUB_OUTPUT"
+                  fi
+
+            # 4. The agent evaluates what is unknown, drafts what is missing.
+            - name: Auto
+              id: auto
+              if: steps.stage.outputs.skip != 'true'
+              env:
+                  OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+              run: |
+                  set +e
+                  model-wtf compliance auto \
+                    --base "${{ steps.base.outputs.ref }}" \
+                    --budget "${{ inputs.budget }}" \
+                    --concurrency "${{ inputs.concurrency }}" \
+                    --format json > auto.json
+                  status=$?
+                  set -e
+                  cat auto.json
+                  spent=$(python3 -c 'import json;print(json.load(open("auto.json")).get("usage",{}).get("cost_usd",0))')
+                  echo "spent=\$${spent}" >> "$GITHUB_OUTPUT"
+                  echo "status=$status" >> "$GITHUB_OUTPUT"
+                  if [ "$status" = "5" ]; then echo "::error title=model-wtf::auto could not run (tool error)"; exit 5; fi
+                  if [ "$status" = "4" ]; then echo "::warning title=model-wtf::agent budget exhausted; partial results committed"; fi
+
+            # 5. Commit what the bot may write; abort on anything else.
+            - name: Bot commit
+              id: commit
+              if: steps.stage.outputs.skip != 'true'
+              run: |
+                  changed=$(git status --porcelain --untracked-files=all | awk '{print $2}' | grep -E '(^|/)compliance/' || true)
+                  others=$(git status --porcelain --untracked-files=all | awk '{print $2}' | grep -vE '(^|/)compliance/' || true)
+                  if [ -n "$others" ]; then
+                    echo "::error title=model-wtf::the run modified files outside compliance/:"; echo "$others"; exit 1
+                  fi
+                  if [ -z "$changed" ]; then echo "committed=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+                  # shellcheck disable=SC2086
+                  model-wtf compliance whitelist $changed
+                  evaluated=$(python3 -c 'import json;s=json.load(open("auto.json")).get("stages",{}).get("evaluate",{});print(s.get("done",0))' 2>/dev/null || echo 0)
+                  findings=$(git status --porcelain --untracked-files=all | awk '{print $2}' | grep -cE 'findings/F-[0-9]+\.yaml$' || true)
+                  git config user.name "model-wtf[bot]"
+                  git config user.email "model-wtf[bot]@users.noreply.github.com"
+                  # shellcheck disable=SC2086
+                  git add $changed
+                  git commit -m "compliance: ${evaluated} checkpoints evaluated, ${findings} findings" -m "[skip compliance]"
+                  if [ "$IS_FORK" = "true" ] || [ -z "$HEAD_REF" ]; then
+                    git format-patch -1 --stdout > compliance.patch
+                    echo "committed=artifact" >> "$GITHUB_OUTPUT"
+                  else
+                    git push origin "HEAD:${HEAD_REF}"
+                    echo "committed=true" >> "$GITHUB_OUTPUT"
+                  fi
+            - name: Upload patch (fork or no write access)
+              if: steps.commit.outputs.committed == 'artifact'
+              uses: actions/upload-artifact@v4
+              with:
+                  name: compliance-patch
+                  path: compliance.patch
+
+            # 6. One review comment per finding, one summary comment.
+            - name: Sync PR comments
+              if: steps.stage.outputs.skip != 'true' && env.PR_NUMBER != ''
+              continue-on-error: true
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  model-wtf compliance gh-sync-comments \
+                    --pr "$PR_NUMBER" --repo "${{ github.repository }}" \
+                    --stage-report stage.json \
+                    --budget-used "${{ steps.auto.outputs.spent }}"
+                  if [ "${{ steps.commit.outputs.committed }}" = "artifact" ]; then
+                    gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body \
+                      "<!-- model-wtf patch --> model-wtf could not push to this fork; apply the \`compliance-patch\` artifact of run ${{ github.run_id }} to your branch."
+                  fi
+
+            # 7. The deterministic verdict is the job status.
+            - name: Check
+              if: steps.stage.outputs.skip != 'true'
+              run: model-wtf compliance check --format github
