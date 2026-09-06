@@ -39,10 +39,10 @@ def render_text(report: Report, console: Console) -> None:
             console.print()
     for diag in report.diagnostics:
         style = _SEVERITY_STYLE[diag.severity]
+        # Todos are warnings severity-wise but fail the check; name them.
+        label = "todo" if diag.code == "todo" else diag.severity.value
         where = f" ({diag.scope_id})" if diag.scope_id else ""
-        console.print(
-            f"[{style}]{diag.severity.value}[/{style}]{where}: {diag.message}"
-        )
+        console.print(f"[{style}]{label}[/{style}]{where}: {diag.message}")
 
 
 def render_json(report: Report) -> str:

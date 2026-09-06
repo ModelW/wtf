@@ -11,32 +11,69 @@ reported verbatim (with their YAML location) as declaration errors.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from model_wtf.compliance.report import DeclarationError, Diagnostic, Severity, Unit
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
 SNOW_MANIFEST = "snow.yml"
 FALLBACK_MANIFEST = ".model-wtf.yml"
+
+
+Discovery = Literal["django", "sveltekit", "none"]
+"""Which extractor understands the image's codebase.
+
+``none`` opts an image into compliance without any automatic discovery
+(everything declared by hand).
+"""
+
+DEFAULT_FOLDER_NAME = "compliance"
+
+
+class ComplianceBlock(BaseModel):
+    """The ``compliance:`` mapping on an image.
+
+    ``discover`` names the discovery engine; ``dir`` relocates the folder
+    (relative to the image's build context). When ``dir`` is omitted the
+    folder sits next to the Dockerfile, which is where the unit's code is.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    discover: Discovery
+    dir: str | None = Field(default=None, min_length=1)
 
 
 class UnitDeclaration(BaseModel):
     """One entry of ``snow.yml#images`` or ``.model-wtf.yml#units``.
 
     Only the keys relevant to compliance are modelled; everything else a
-    Snow image carries (``dockerfile``, ``envs``, ...) is ignored.
+    Snow image carries (``envs``, ``build_args``, ...) is ignored.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     id: str = Field(min_length=1)
     context: str = "."
-    compliance: str | None = Field(default=None, min_length=1)
+    dockerfile: str | None = Field(default=None, min_length=1)
+    compliance: ComplianceBlock | None = None
+
+    def folder(self, root: Path) -> Path:
+        """Absolute compliance folder; requires ``compliance`` to be set."""
+        assert self.compliance is not None  # noqa: S101 - caller checks
+        return normalise_folder(
+            root, self.context, self.dockerfile, self.compliance.dir
+        )
+
+    def code_root(self, root: Path) -> Path:
+        """Where the unit's code lives: the Dockerfile's folder."""
+        base = root / self.context
+        if self.dockerfile:
+            base = base / Path(self.dockerfile).parent
+        return base.resolve()
 
 
 class _Manifest(BaseModel):
@@ -155,7 +192,7 @@ def load_units(
 
     for entry in parsed.declarations:
         if entry.compliance is None:
-            msg = f"{what} {entry.id!r} declares no 'compliance' folder"
+            msg = f"{what} {entry.id!r} declares no 'compliance' block"
             diagnostics.append(
                 Diagnostic(
                     Severity.ERROR if strict else Severity.WARNING,
@@ -167,20 +204,35 @@ def load_units(
             )
             continue
         units.append(
-            Unit(entry.id, normalise_folder(root, entry.context, entry.compliance))
+            Unit(
+                entry.id,
+                entry.folder(root),
+                discover=entry.compliance.discover,
+                code_root=entry.code_root(root),
+            )
         )
 
     return units, diagnostics
 
 
-def normalise_folder(root: Path, context: str, compliance: str) -> Path:
-    """Resolve ``<context>/<compliance>`` against ``root``.
+def normalise_folder(
+    root: Path, context: str, dockerfile: str | None, folder: str | None
+) -> Path:
+    """Resolve the compliance folder of an image.
 
-    ``Path`` arithmetic already drops ``.`` segments, so ``context: "."``
-    yields ``root/compliance`` rather than ``root/./compliance``. ``..``
-    segments are collapsed too, which matters for display and equality.
+    ``folder`` (the ``compliance.dir`` key) is relative to ``context``.
+    Without it the folder is ``compliance/`` next to the Dockerfile, i.e.
+    ``<context>/<dirname(dockerfile)>/compliance``; with no ``dockerfile``
+    key Snow assumes ``<context>/Dockerfile`` so it is ``<context>/compliance``.
+    ``Path`` arithmetic collapses ``.`` and ``..`` segments, which matters
+    for display and equality.
     """
-    return (root / context / compliance).resolve()
+    base = root / context
+    if folder is not None:
+        return (base / folder).resolve()
+    if dockerfile:
+        base = base / Path(dockerfile).parent
+    return (base / DEFAULT_FOLDER_NAME).resolve()
 
 
 def _parse_manifest(manifest: Path) -> SnowManifest | ModelWtfManifest:

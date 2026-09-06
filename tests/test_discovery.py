@@ -96,7 +96,9 @@ def test_load_units_from_model_wtf_reads_units_key(make_repo: MakeRepo) -> None:
     text = """
 units:
   - id: worker
-    compliance: docs/compliance
+    compliance:
+      discover: none
+      dir: docs/compliance
 """
     root = make_repo(model_wtf=text)
 
@@ -157,9 +159,9 @@ def test_load_units_undeclared_image_is_diagnosed_not_a_unit(
 DUPLICATE_IDS = """
 images:
   - id: api
-    compliance: compliance
+    compliance: {discover: none}
   - id: api
-    compliance: other
+    compliance: {discover: none}
 """
 
 
@@ -175,18 +177,32 @@ images:
         ),
         pytest.param("images: api\n", "images", id="images-not-list"),
         pytest.param(
-            "images:\n  - compliance: compliance\n", "images.0.id", id="id-missing"
+            "images:\n  - compliance: {discover: none}\n",
+            "images.0.id",
+            id="id-missing",
         ),
         pytest.param(
-            "images:\n  - id: ''\n    compliance: x\n", "images.0.id", id="id-empty"
+            "images:\n  - id: ''\n    compliance: {discover: none}\n",
+            "images.0.id",
+            id="id-empty",
         ),
         pytest.param(
-            "images:\n  - id: api\n    compliance: [a]\n",
+            "images:\n  - id: api\n    compliance: compliance\n",
             "images.0.compliance",
-            id="compliance-not-str",
+            id="compliance-legacy-string",
         ),
         pytest.param(
-            "images:\n  - id: api\n    context: 3\n    compliance: x\n",
+            "images:\n  - id: api\n    compliance: {discover: php}\n",
+            "images.0.compliance.discover",
+            id="unknown-engine",
+        ),
+        pytest.param(
+            "images:\n  - id: api\n    compliance: {discover: none, dirr: x}\n",
+            "images.0.compliance.dirr",
+            id="compliance-unknown-key",
+        ),
+        pytest.param(
+            "images:\n  - id: api\n    context: 3\n    compliance: {discover: none}\n",
             "images.0.context",
             id="context-not-str",
         ),
@@ -213,21 +229,39 @@ def test_load_units_malformed_manifest(
 
 
 @pytest.mark.parametrize(
-    ("context", "compliance", "expected"),
+    ("context", "dockerfile", "folder", "expected"),
     [
-        pytest.param(".", "compliance", ("compliance",), id="dot-context"),
-        pytest.param("front", "compliance", ("front", "compliance"), id="nested"),
+        pytest.param(".", None, None, ("compliance",), id="dot-context"),
+        pytest.param("api", None, None, ("api", "compliance"), id="nested"),
         pytest.param(
-            "front/../api", "compliance", ("api", "compliance"), id="dotdot-collapsed"
+            ".",
+            "front/Dockerfile",
+            None,
+            ("front", "compliance"),
+            id="next-to-dockerfile",
         ),
         pytest.param(
-            "./front", "./compliance", ("front", "compliance"), id="dot-prefixes"
+            ".",
+            "front/Dockerfile",
+            "docs/c",
+            ("docs", "c"),
+            id="dir-wins-over-dockerfile",
         ),
+        pytest.param(
+            "front/../api", None, None, ("api", "compliance"), id="dotdot-collapsed"
+        ),
+        pytest.param("./front", None, "./c", ("front", "c"), id="dot-prefixes"),
     ],
 )
 def test_normalise_folder(
-    tmp_path: Path, context: str, compliance: str, expected: tuple[str, ...]
+    tmp_path: Path,
+    context: str,
+    dockerfile: str | None,
+    folder: str | None,
+    expected: tuple[str, ...],
 ) -> None:
     root = tmp_path.resolve()
 
-    assert normalise_folder(root, context, compliance) == root.joinpath(*expected)
+    assert normalise_folder(root, context, dockerfile, folder) == root.joinpath(
+        *expected
+    )
