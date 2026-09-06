@@ -13,6 +13,7 @@ from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.init_cmd import (
     PartySpec,
     detect_dockerfiles,
+    guess_discovery,
     run_init,
     slugify,
 )
@@ -31,7 +32,8 @@ images:
     - id: front
       context: .
       dockerfile: front/Dockerfile
-      compliance: compliance
+      compliance:
+          discover: sveltekit
 
 components: []
 """
@@ -81,7 +83,7 @@ def test_scaffold_is_complete_and_checkable(make_repo: MakeRepo) -> None:
         "compliance/parties/with-madrid-sl.yaml",
         "front/compliance",
     ]
-    assert result.patched == ["snow.yml: images[front].compliance"]
+    assert result.patched == ["snow.yml: images[front].compliance.discover = none"]
 
     app = load_yaml(root / "compliance/app.yaml")
     assert app == {
@@ -124,10 +126,14 @@ def test_snow_patch_preserves_comments_and_existing_keys(make_repo: MakeRepo) ->
     text = (root / "snow.yml").read_text(encoding="utf-8")
     assert "# deployment manifest" in text
     assert "context: api   # django" in text
-    assert text.count("compliance: compliance") == 2
-    assert result.patched == ["snow.yml: images[api].compliance"]
+    assert text.count("discover:") == 2
+    assert (
+        "context: api   # django\n      compliance:\n          discover: none\n" in text
+    )
+    assert result.patched == ["snow.yml: images[api].compliance.discover = none"]
     assert (root / "api/compliance/.gitkeep").is_file()
-    # front has context ".": its unit folder is the shared one, no .gitkeep.
+    # front's Dockerfile is in front/: its folder sits next to it.
+    assert (root / "front/compliance/.gitkeep").is_file()
     assert not (root / "compliance/.gitkeep").exists()
     assert "processor" not in load_yaml(root / "compliance/app.yaml")
 
@@ -143,14 +149,41 @@ def test_snow_patch_touches_only_the_added_lines(make_repo: MakeRepo) -> None:
     )
 
     text = (root / "snow.yml").read_text(encoding="utf-8")
-    added = [line for line in text.splitlines() if "compliance: compliance" in line]
-    assert added == ["      compliance: compliance"] * 2
-    without = "\n".join(
-        line for line in text.splitlines() if "compliance: compliance" not in line
-    )
+    block = ["      compliance:", "          discover: none"]
+    added = [line for line in text.splitlines() if line in block]
+    assert added == block * 2
+    without = "\n".join(line for line in text.splitlines() if line not in block)
     assert without + "\n" == SNOW_FOLDED
     # Inserted right after ``envs``, before the blank line.
-    assert "envs: [sentry-build]\n      compliance: compliance\n\ncomponents" in text
+    assert "envs: [sentry-build]\n" + "\n".join(block) + "\n\ncomponents" in text
+
+
+def test_discovery_engine_is_guessed_from_the_code_folder(make_repo: MakeRepo) -> None:
+    root = make_repo(
+        snow=SNOW_FOLDED,
+        files={
+            "api/manage.py": "",
+            "front/package.json": '{"devDependencies": {"@sveltejs/kit": "2"}}',
+        },
+    )
+
+    result = run_init(
+        root,
+        app_name="x",
+        controller=PartySpec(name="A", country="FR"),
+        processor=None,
+    )
+
+    assert result.patched == [
+        "snow.yml: images[api].compliance.discover = django",
+        "snow.yml: images[front].compliance.discover = sveltekit",
+    ]
+    assert guess_discovery(root / "api") == "django"
+    assert guess_discovery(root / "front") == "sveltekit"
+    assert guess_discovery(root) == "none"
+    # front is built from the repo root but its Dockerfile is in front/.
+    assert (root / "front/compliance/.gitkeep").is_file()
+    assert (root / "api/compliance/.gitkeep").is_file()
 
 
 def test_init_is_idempotent(make_repo: MakeRepo) -> None:
@@ -195,8 +228,8 @@ def test_without_snow_a_fallback_manifest_is_proposed(make_repo: MakeRepo) -> No
     manifest = load_yaml(root / ".model-wtf.yml")
     assert manifest == {
         "units": [
-            {"id": "api", "context": "api", "compliance": "compliance"},
-            {"id": "front", "context": "front", "compliance": "compliance"},
+            {"id": "api", "context": "api", "compliance": {"discover": "none"}},
+            {"id": "front", "context": "front", "compliance": {"discover": "none"}},
         ]
     }
     assert (root / "api/compliance/.gitkeep").is_file()

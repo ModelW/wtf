@@ -20,10 +20,12 @@ SNOW_TWO_UNITS = """
 images:
   - id: api
     context: api
-    compliance: compliance
+    compliance:
+      discover: django
   - id: front
     context: front
-    compliance: compliance
+    compliance:
+      discover: sveltekit
 """
 
 # ``front`` ships without a compliance declaration.
@@ -31,7 +33,8 @@ SNOW_FRONT_UNDECLARED = """
 images:
   - id: api
     context: api
-    compliance: compliance
+    compliance:
+      discover: django
   - id: front
     context: front
 """

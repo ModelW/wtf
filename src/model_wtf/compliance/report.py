@@ -85,10 +85,18 @@ class Unit:
         The image / unit identifier (``api``, ``front``, ...).
     folder
         Absolute path to the unit's compliance folder.
+    discover
+        Discovery engine declared for the unit (``django``, ``sveltekit``,
+        ``none``).
+    code_root
+        Where the unit's code lives (the Dockerfile's folder); the folder
+        extractors are run against.
     """
 
     id: str
     folder: Path
+    discover: str = "none"
+    code_root: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)

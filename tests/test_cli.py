@@ -92,7 +92,7 @@ def test_github_output_emits_annotation(
     annotations = [line for line in lines if line.startswith("::")]
     assert annotations == [
         f"::{severity} file=snow.yml,title=unit-no-compliance::"
-        "image 'front' declares no 'compliance' folder"
+        "image 'front' declares no 'compliance' block"
     ]
 
 

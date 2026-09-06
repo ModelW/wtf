@@ -161,9 +161,11 @@ def test_missing_manifest_becomes_report(make_repo: MakeRepo) -> None:
 DUPLICATE_IDS = """
 images:
   - id: api
-    compliance: compliance
+    compliance:
+      discover: none
   - id: api
-    compliance: compliance
+    compliance:
+      discover: none
 """
 
 
