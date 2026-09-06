@@ -23,8 +23,9 @@ import re
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, ConfigDict, Field
@@ -45,8 +46,9 @@ from model_wtf.compliance.data import (
 from model_wtf.compliance.declarations import PARTIES_DIR, load_declarations
 from model_wtf.compliance.discovery import find_repo_root, load_units, select_manifest
 from model_wtf.compliance.knowledge import Knowledge, load_knowledge
+from model_wtf.compliance.ops import OPS_HELP, OpError, OpSpec, parse_ops_json
 from model_wtf.compliance.review import Lock
-from model_wtf.compliance.touchpoints import Export, write_manifest
+from model_wtf.compliance.touchpoints import Transfer, write_manifest
 from model_wtf.compliance.workspace import Workspace, load_workspace
 from model_wtf.compliance.yaml_io import todo_text
 from model_wtf.introspect.runner import IntrospectionFailed
@@ -102,16 +104,22 @@ class Decision(BaseModel):
 
 
 class DataRef(BaseModel):
-    """One data item a touchpoint handles."""
+    """One data item (or glob) a touchpoint handles, with what it does to it."""
 
     model_config = ConfigDict(extra="forbid")
 
-    ref: str = Field(description="`unit:app.Model.field` (or @json/@files row)")
-    direction: Literal["read", "write", "read+write"] = "read+write"
+    ref: str = Field(
+        description="`unit:app.Model.field` (or @json/@files row); "
+        "`unit:app.Model.*` for every field of a model"
+    )
+    ops: list[dict[str, Any]] = Field(
+        default_factory=lambda: [{"op": "read"}],
+        description="What the code does to the item: [{op, ...metadata}]. " + OPS_HELP,
+    )
 
 
 class ExportDecision(BaseModel):
-    """Data a touchpoint sends to an external party."""
+    """Data a touchpoint sends to another organisation (a transfer)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -485,7 +493,7 @@ class Tools:
         ref: str,
         data: list[DataRef],
         reason: str,
-        exporting: list[ExportDecision] | None = None,
+        transfers: list[ExportDecision] | None = None,
     ) -> str:
         """``touchpoint_set_data``: write a touchpoint's manifest."""
         ws = self.workspace()
@@ -500,18 +508,26 @@ class Tools:
             msg = "a one-line reason citing file:line is required (even for [])"
             raise ValueError(msg)
         problems: list[str] = []
+        warnings: list[str] = []
         refs: list[str] = []
-        direction: dict[str, str] = {}
+        ops: dict[str, list[OpSpec]] = {}
         for item in data:
-            full = self._resolve_ref(item.ref, tp.unit, problems)
+            full = self._resolve_pattern(item.ref, tp.unit, problems)
             if full is None:
                 continue
-            refs.append(full)
-            if item.direction != "read+write":
-                direction[full] = item.direction
+            try:
+                parsed, warned = parse_ops_json(item.ops)
+            except OpError as exc:
+                problems.append(f"{item.ref}: {exc}")
+                continue
+            warnings.extend(f"{item.ref}: {w}" for w in warned)
+            if full not in refs:
+                refs.append(full)
+            bucket = ops.setdefault(full, [])
+            bucket.extend(o for o in parsed if o not in bucket)
         parties = set(load_declarations(self.root / SHARED_FOLDER).parties)
-        exports: list[Export] = []
-        for export in exporting or []:
+        exports: list[Transfer] = []
+        for export in transfers or []:
             if export.party not in parties:
                 known = ", ".join(sorted(parties)) or "none"
                 problems.append(
@@ -525,7 +541,7 @@ class Tools:
                 if (full := self._resolve_ref(r, tp.unit, problems)) is not None
             ]
             exports.append(
-                Export(party=export.party, data=resolved, purpose=export.purpose)
+                Transfer(party=export.party, data=resolved, purpose=export.purpose)
             )
         if problems:
             return "Error: nothing written; fix these:\n  " + "\n  ".join(problems)
@@ -534,8 +550,8 @@ class Tools:
             unit,
             tp,
             refs,
-            direction=direction,
-            exporting=exports,
+            ops=ops,
+            transfers=exports,
             note=reason.strip(),
         )
         self.workspace(refresh=True)
@@ -548,11 +564,29 @@ class Tools:
         sent = ""
         if exports:
             plural = "y" if len(exports) == 1 else "ies"
-            sent = f", exporting to {len(exports)} part{plural}"
-        return (
-            f"{ref}: {len(refs)} data item(s) declared{sent} "
-            f"({path.relative_to(self.root)})"
-        )
+            sent = f", transfers to {len(exports)} part{plural}"
+        rel = path.relative_to(self.root)
+        out = f"{ref}: {len(refs)} data item(s) declared{sent} ({rel})"
+        if warnings:
+            out += "\nWarnings:\n  " + "\n  ".join(warnings)
+        return out
+
+    def _resolve_pattern(
+        self, ref: str, unit_id: str, problems: list[str]
+    ) -> str | None:
+        """A ref, or a glob that must match at least one item of its unit."""
+        full = ref if ":" in ref else f"{unit_id}:{ref}"
+        if not any(c in full for c in "*?["):
+            return self._resolve_ref(ref, unit_id, problems)
+        ws = self.workspace()
+        ref_unit, _, pattern = full.partition(":")
+        if not any(
+            r.startswith(f"{ref_unit}:") and fnmatchcase(r.split(":", 1)[1], pattern)
+            for r in ws.rows
+        ):
+            problems.append(f"{full!r} matches no data item (data_model lists ids)")
+            return None
+        return full
 
     def _resolve_ref(self, ref: str, unit_id: str, problems: list[str]) -> str | None:
         ws = self.workspace()
@@ -610,7 +644,7 @@ class Tools:
         ws = self.workspace()
         lines: list[str] = []
         for tp in ws.all_touchpoints.values():
-            if tp.ignore or not (tp.data or tp.exporting):
+            if tp.ignore or not (tp.data or tp.transfers):
                 continue
             refs = list(tp.data or ())
             pii = [r for r in refs if r in ws.rows and ws.rows[r].pii]
@@ -628,8 +662,8 @@ class Tools:
                 edges.append("calls " + ", ".join(tp.calls))
             if tp.facts.defers:
                 edges.append("defers " + ", ".join(tp.facts.defers))
-            if tp.exporting:
-                edges.append("exports to " + ", ".join(e.party for e in tp.exporting))
+            if tp.transfers:
+                edges.append("transfers to " + ", ".join(e.party for e in tp.transfers))
             personal = (
                 f"{len(pii)} personal ({', '.join(cats)})" if pii else "0 personal"
             )
@@ -1033,23 +1067,24 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
     @server.tool(
         name="touchpoint_set_data",
         description=(
-            "Declare the data items one touchpoint reads/writes, in a single call: "
-            "`data` lists EVERY inventory item read or written, personal or not, as "
-            "{ref, direction?}; an empty list means 'checked, touches no item'. "
-            "`exporting` lists what leaves the unit: "
-            "[{party, data[], purpose?}] for every external API/provider the code "
-            "calls (party must exist: parties_list / party_add). `reason` cites "
-            "file:line."
+            "Declare what one touchpoint does to data, in a single call: `data` "
+            "lists EVERY inventory item touched, personal or not, as {ref, ops}; "
+            "ops = [{op, ...metadata}] with the closed vocabulary " + OPS_HELP + ". "
+            "A bare {ref} is a read. `unit:app.Model.*` covers every field of a "
+            "model. An empty list means 'checked, touches no item'. `transfers` "
+            "lists what leaves to another organisation: [{party, data[], "
+            "purpose?}] for every external API/provider the code calls (party "
+            "must exist: parties_list / party_add). `reason` cites file:line."
         ),
     )
     def touchpoint_set_data(
         touchpoint: str,
         data: list[DataRef],
         reason: str,
-        exporting: list[ExportDecision] | None = None,
+        transfers: list[ExportDecision] | None = None,
     ) -> str:
         return _guard(
-            lambda: tools.touchpoint_set_data(touchpoint, data, reason, exporting)
+            lambda: tools.touchpoint_set_data(touchpoint, data, reason, transfers)
         )
 
     @server.tool(

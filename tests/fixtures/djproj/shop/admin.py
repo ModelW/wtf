@@ -15,3 +15,6 @@ class CustomerAdmin(admin.ModelAdmin):
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
     list_display = ("customer", "total")
+
+    def has_delete_permission(self, request, obj=None):
+        return False

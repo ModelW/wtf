@@ -121,7 +121,13 @@ class Diagnostic:
 
 
 REVIEW_CODES = frozenset(
-    {"pending-review", "touchpoint-pending", "touchpoint-orphan", "manual-exemption"}
+    {
+        "pending-review",
+        "touchpoint-pending",
+        "touchpoint-orphan",
+        "touchpoint-stale-form",
+        "manual-exemption",
+    }
 )
 """Warning codes that ask for a review round and fail the check."""
 

@@ -115,6 +115,14 @@ def test_django_touchpoints_introspected(repo: Path) -> None:
     purge = tps.get("task:shop.purge_carts")
     assert purge is not None
     assert purge.facts.periodic is True
+    # Op hints: the task name, the ``.delete()`` and the ``timedelta`` in the
+    # body are pre-filled for the reviewer to confirm.
+    assert purge.facts.hints == [
+        "retention_purge: task name",
+        "after: `timedelta(days=30)`",
+        "delete: `.delete()` called",
+    ]
+    assert checkout.facts.hints[0] == "create: POST"
     receipt = tps.get("task:shop.send_receipt")
     assert receipt is not None
     assert receipt.facts.request == {"order_id": "int"}
@@ -123,6 +131,15 @@ def test_django_touchpoints_introspected(repo: Path) -> None:
     assert admin is not None
     assert admin.facts.request["iban"] == "readonly_fields"
     assert admin.facts.request["email"] == "list_display"
+    assert "read only: iban" in admin.facts.hints
+    assert "erase(by=staff)|delete: has_delete_permission default (allowed)" in (
+        admin.facts.hints
+    )
+    order_admin = tps.get("admin:shop.Order")
+    assert order_admin is not None
+    assert "no erase(by=staff)|delete: has_delete_permission returns False" in (
+        order_admin.facts.hints
+    )
 
     # Plumbing is hidden by default; the health check pattern as well.
     hidden = {t.id for t in tps.items if t.ignore}
@@ -177,27 +194,72 @@ def test_manifests_and_reference_checks(repo: Path) -> None:
     (folder / "checkout.yaml").write_text(
         "data:\n  - shop.Customer.email: write\n  - api:shop.Order.total\n"
         "  - shop.Customer.nope\n  - other:shop.Customer.email\n"
+        "  - shop.Customer.*: {erase: {by: subject, mode: anonymise}}\n"
+        "  - shop.Customer.iban: [create, {rectify: {by: staff}}]\n"
+        "  - shop.Customer.zzz*: read\n"
     )
     (folder / "whealth_recap.yaml").write_text("ignore: true\n")
     (folder / "getCustomer.yaml").write_text("data: []\n")
     (folder / "ghost.yaml").write_text("data: []\n")
     (folder / "contact.yaml").write_text("data: []\ncolour: red\n")
+    (folder / "task__shop.send_receipt.yaml").write_text(
+        "data:\n  - shop.Customer.email: {frobnicate: {}}\n"
+    )
+    (folder / "admin__shop.Customer.yaml").write_text(
+        "data:\n  - shop.Customer.email: {erase: {}}\n"
+        "exporting: [{party: acme, data: [shop.Customer.email]}]\n"
+    )
 
     ws = _ws(repo)
     tps = ws.touchpoints["api"]
     checkout = tps.get("checkout")
     assert checkout is not None
-    assert checkout.data == ("api:shop.Customer.email", "api:shop.Order.total")
-    assert checkout.direction == {"api:shop.Customer.email": "write"}
+    # The glob expands to every Customer field, after the explicit refs.
+    assert checkout.data[:2] == ("api:shop.Customer.email", "api:shop.Order.total")
+    assert "api:shop.Customer.phone" in checkout.data
+    assert [o.label() for o in checkout.ops_of("api:shop.Customer.email")] == [
+        "create",
+        "update",
+        "erase(by=subject, mode=anonymise)",
+    ]
+    assert [o.label() for o in checkout.ops_of("api:shop.Customer.iban")] == [
+        "erase(by=subject, mode=anonymise)",
+        "create",
+        "rectify(by=staff)",
+    ]
+    assert [o.label() for o in checkout.ops_of("api:shop.Order.total")] == ["read"]
     assert checkout.pending is False
     assert tps.get("getCustomer").pending is False  # type: ignore[union-attr]
-    codes = sorted(d.code for d in tps.diagnostics)
-    assert codes == [
+    by_code: dict[str, list[str]] = {}
+    for d in tps.diagnostics:
+        by_code.setdefault(d.code, []).append(d.message)
+    assert sorted(by_code) == [
         "data-ref-unknown",
         "data-ref-unknown-unit",
+        "op-ambiguous",
         "schema-error",
         "touchpoint-orphan-manifest",
     ]
+    assert len(by_code["data-ref-unknown"]) == 2  # nope + the empty glob
+    assert any("matches no data item" in m for m in by_code["data-ref-unknown"])
+    assert "write" in by_code["op-ambiguous"][0]
+    schema = by_code["schema-error"]
+    assert any("unknown op 'frobnicate'" in m for m in schema)
+    assert any("erase needs" in m for m in schema)
+    assert any("colour" in m for m in schema)
+    # ``exporting`` still loads (folded into transfers) but says so.
+    admin = tps.get("admin:shop.Customer")
+    assert admin is not None
+    assert admin.pending  # its manifest failed on the erase op
+    (folder / "admin__shop.Customer.yaml").write_text(
+        "data: [shop.Customer.email]\n"
+        "exporting: [{party: acme, data: [shop.Customer.email]}]\n"
+    )
+    ws = _ws(repo)
+    admin = ws.touchpoints["api"].get("admin:shop.Customer")
+    assert admin is not None
+    assert [t.party for t in admin.transfers] == ["acme"]
+    assert "exporting-deprecated" in {d.code for d in ws.touchpoints["api"].diagnostics}
     assert slugify("/kitchen/[restaurant_uuid]") == "kitchen__[restaurant_uuid]"
     assert slugify("/") == "__root__"
     assert slugify("admin:orders.Order") == "admin__orders.Order"
@@ -331,8 +393,9 @@ def test_cli_touchpoints_activities_why(repo: Path) -> None:
             *tp,
             "set-data",
             "api:checkout",
-            "shop.Customer.email=write",
+            "shop.Customer.email=create,read",
             "shop.Customer.iban",
+            "shop.Customer.phone={rectify: {by: subject}}",
             *root,
             "--note",
             "api.py:24",
@@ -341,9 +404,16 @@ def test_cli_touchpoints_activities_why(repo: Path) -> None:
     assert set_ok.exit_code == 0, set_ok.output
     manifest = repo / "api" / "compliance" / "touchpoints" / "checkout.yaml"
     assert manifest.read_text() == (
-        "data:\n  - api:shop.Customer.email: write\n  - api:shop.Customer.iban\n"
+        "data:\n  - api:shop.Customer.email: [create, read]\n"
+        "  - api:shop.Customer.iban\n"
+        "  - api:shop.Customer.phone:\n      rectify: {by: subject}\n"
         "note: api.py:24\n"
     )
+    bad_op = runner.invoke(
+        cli, [*tp, "set-data", "api:checkout", "shop.Customer.email=frob", *root]
+    )
+    assert bad_op.exit_code == 2
+    assert "unknown op 'frob'" in bad_op.output
     added = runner.invoke(
         cli, [*tp, "set-data", "api:checkout", "shop.Order.total", *root, "--add"]
     )
@@ -420,8 +490,14 @@ def test_cli_touchpoints_activities_why(repo: Path) -> None:
         ],
     )
     results = {r["id"]: r for r in json.loads(why_json.output)}
-    assert results["api:shop.Customer.phone"]["verdict"] == "unreferenced"
+    assert results["api:shop.Customer.ip_address"]["verdict"] == "unreferenced"
     assert results["api:shop.Customer.email"]["verdict"] == "held"
+    assert results["api:shop.Customer.email"]["lifecycle"] == (
+        "created by api:checkout, read by api:checkout, never erased"
+    )
+    assert results["api:shop.Customer.phone"]["lifecycle"] == (
+        "rectified by api:checkout (by subject), never erased"
+    )
     manifests = runner.invoke(
         cli,
         ["compliance", "data", "why", "api:shop.Customer.email", *root, "--manifests"],
@@ -497,16 +573,54 @@ def test_mcp_touchpoint_write_tools(repo: Path) -> None:
     ok = tools.touchpoint_set_data(
         "api:checkout",
         [
-            DataRef(ref="shop.Customer.email", direction="write"),
+            DataRef(ref="shop.Customer.email", ops=[{"op": "create"}]),
             DataRef(ref="api:checkout.card_number"),
+            DataRef(
+                ref="shop.Customer.*",
+                ops=[
+                    {
+                        "op": "retention_purge",
+                        "after": {"years": 1},
+                        "from": "api:shop.Customer.email",
+                    }
+                ],
+            ),
         ],
         reason="api.py:22-30",
     )
-    assert "2 data item(s) declared" in ok
+    assert "3 data item(s) declared" in ok
     manifest = repo / "api" / "compliance" / "touchpoints" / "checkout.yaml"
     assert manifest.read_text() == (
-        "data:\n  - api:shop.Customer.email: write\n  - api:checkout.card_number\n"
+        "data:\n  - api:shop.Customer.email: create\n  - api:checkout.card_number\n"
+        "  - api:shop.Customer.*:\n      retention_purge:\n"
+        "        after: {years: 1}\n        from: api:shop.Customer.email\n"
         "note: api.py:22-30\n"
+    )
+    bad_ops = tools.touchpoint_set_data(
+        "api:checkout",
+        [
+            DataRef(ref="shop.Customer.email", ops=[{"op": "portability"}]),
+            DataRef(ref="shop.Nope.*"),
+        ],
+        reason="x",
+    )
+    assert "portability: format: Field required" in bad_ops
+    assert "matches no data item" in bad_ops
+    aliased = tools.touchpoint_set_data(
+        "api:checkout",
+        [DataRef(ref="shop.Customer.email", ops=[{"op": "write"}])],
+        reason="x",
+    )
+    assert "Warnings:" in aliased
+    assert "ambiguous" in aliased
+    assert "[create, update]" in manifest.read_text()
+    tools.touchpoint_set_data(
+        "api:checkout",
+        [
+            DataRef(ref="shop.Customer.email", ops=[{"op": "create"}]),
+            DataRef(ref="api:checkout.card_number"),
+        ],
+        reason="api.py:22-30",
     )
     empty = tools.touchpoint_set_data("api:getCustomer", [], reason="returns ids only")
     assert "0 data item(s)" in empty
@@ -629,29 +743,29 @@ def test_exports_and_parties(repo: Path) -> None:
         "api:checkout",
         [DataRef(ref="shop.Customer.email")],
         reason="x",
-        exporting=[ExportDecision(party="stripe", data=["shop.Customer.iban"])],
+        transfers=[ExportDecision(party="stripe", data=["shop.Customer.iban"])],
     )
     assert "party 'stripe' is not declared" in unknown_party
     ok = tools.touchpoint_set_data(
         "api:checkout",
         [DataRef(ref="shop.Customer.email")],
         reason="api.py:22",
-        exporting=[
+        transfers=[
             ExportDecision(
                 party="mapbox", data=["shop.Customer.phone"], purpose="geocoding"
             )
         ],
     )
-    assert "exporting to 1 party" in ok
+    assert "transfers to 1 party" in ok
     manifest = repo / "api" / "compliance" / "touchpoints" / "checkout.yaml"
     assert manifest.read_text() == (
         "data:\n  - api:shop.Customer.email\n"
-        "exporting:\n  - party: mapbox\n    data: [api:shop.Customer.phone]\n"
+        "transfers:\n  - party: mapbox\n    data: [api:shop.Customer.phone]\n"
         "    purpose: geocoding\n"
         "note: api.py:22\n"
     )
     shown = tools.touchpoint_show("api:checkout")
-    assert "exporting to mapbox (geocoding): api:shop.Customer.phone" in shown
+    assert "transfers to mapbox (geocoding): api:shop.Customer.phone" in shown
 
     tools.activity_create("ordering", "Ordering", "p", ["api:checkout"], "r")
     ws = _ws(repo)

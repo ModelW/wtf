@@ -6,10 +6,11 @@ from __future__ import annotations
 import difflib
 import fnmatch
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import rich_click as click
+import yaml
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
@@ -24,14 +25,16 @@ from model_wtf.compliance.data import parse_full_id
 from model_wtf.compliance.data_cli import data, load_context, run_auto_review
 from model_wtf.compliance.declarations import load_declarations
 from model_wtf.compliance.exit_codes import ExitCode
+from model_wtf.compliance.ops import Op, OpError, OpSpec, describe, parse_ops
 from model_wtf.compliance.options import ROOT_OPTION
 from model_wtf.compliance.report import Severity
-from model_wtf.compliance.touchpoints import Export, Kind, write_manifest
+from model_wtf.compliance.touchpoints import Kind, Transfer, write_manifest
 from model_wtf.compliance.workspace import Workspace, load_workspace
 from model_wtf.compliance.yaml_io import Marker
 from model_wtf.introspect.runner import IntrospectionFailed
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     from model_wtf.compliance.activities import Activity
@@ -237,6 +240,26 @@ def render_touchpoint(tp: Touchpoint, ws: Workspace) -> Text:
     line("form fields", ", ".join(f.form_fields))
     line("calls", ", ".join(tp.calls))
     line("raw fetches", ", ".join(f.fetches))
+    _render_shapes(out, tp)
+    out.append("\n")
+    _render_declared_data(out, tp, ws)
+    for transfer in tp.transfers:
+        out.append("  transfers to ", style="dim")
+        out.append(transfer.party, style="bold red")
+        if transfer.purpose:
+            out.append(f" ({transfer.purpose})", style="dim")
+        out.append(": " + (", ".join(transfer.data) or "no inventory item") + "\n")
+    if tp.note:
+        line("note", tp.note)
+    acts = ws.activities.of_touchpoint(tp.full_id)
+    out.append("  activities: ", style="dim")
+    out.append((", ".join(a.slug for a in acts) or "none") + "\n")
+    return out
+
+
+def _render_shapes(out: Text, tp: Touchpoint) -> None:
+    """Request/response/page shapes, then the introspection's op hints."""
+    f = tp.facts
     for title, shape in (
         ("request", f.request),
         ("response", f.response),
@@ -247,20 +270,10 @@ def render_touchpoint(tp: Touchpoint, ws: Workspace) -> Text:
             out.append(f"  {title}:\n", style="dim")
             for name, kind in sorted(shape.items()):
                 out.append(f"    {name}: {kind}\n")
-    out.append("\n")
-    _render_declared_data(out, tp, ws)
-    for export in tp.exporting:
-        out.append("  exporting to ", style="dim")
-        out.append(export.party, style="bold red")
-        if export.purpose:
-            out.append(f" ({export.purpose})", style="dim")
-        out.append(": " + (", ".join(export.data) or "no inventory item") + "\n")
-    if tp.note:
-        line("note", tp.note)
-    acts = ws.activities.of_touchpoint(tp.full_id)
-    out.append("  activities: ", style="dim")
-    out.append((", ".join(a.slug for a in acts) or "none") + "\n")
-    return out
+    if f.hints:
+        out.append("  likely ops (confirm against the code):\n", style="dim")
+        for hint in f.hints:
+            out.append(f"    {hint}\n", style="cyan")
 
 
 def _render_declared_data(out: Text, tp: Touchpoint, ws: Workspace) -> None:
@@ -277,9 +290,18 @@ def _render_declared_data(out: Text, tp: Touchpoint, ws: Workspace) -> None:
                 if row
                 else "?"
             )
-            direction = tp.direction.get(ref, "read+write")
-            out.append(f"    {ref}  {direction}  ", "")
+            out.append(f"    {ref}  ", "")
+            out.append(describe(list(tp.ops_of(ref))), style="cyan")
+            out.append("  ")
             out.append(f"{verdict}\n", style="red" if row and row.pii else "dim")
+
+
+def _ops_yaml(text: str) -> str:
+    """``create,read`` → ``[create, read]``; a ``{...}``/``[...]`` form is kept."""
+    stripped = text.strip()
+    if stripped.startswith(("{", "[")):
+        return stripped
+    return "[" + ", ".join(p.strip() for p in stripped.split(",")) + "]"
 
 
 def _unknown_touchpoint(ref: str, ws: Workspace) -> str:
@@ -301,10 +323,11 @@ def _unknown_touchpoint(ref: str, ws: Workspace) -> str:
 @click.option("--remove", "mode", flag_value="remove", help="Remove from the list.")
 @click.option("--ignore", is_flag=True, help="Mark the touchpoint as carrying nothing.")
 @click.option(
+    "--transfer",
     "--export",
     "exports",
     multiple=True,
-    help="party=ref,ref[;purpose] — data sent to an external party; repeatable.",
+    help="party=ref,ref[;purpose] — data sent to another organisation; repeatable.",
 )
 @click.option("--note", default=None, help="One line on what was looked at.")
 @PYTHON_OPTION
@@ -325,9 +348,11 @@ def tp_set_data(
     """Declare the data items a touchpoint handles (writes its manifest).
 
     REFS are ``<unit>:<app.Model.field>`` data ids (``@json``/``@files`` rows
-    allowed; a ref without unit means the touchpoint's unit). ``ref=write``
-    or ``ref=read`` sets the direction. No REF at all declares an empty list:
-    "touches no inventory item, checked".
+    allowed; a ref without unit means the touchpoint's unit). ``ref=<ops>``
+    states what the code does to the item, as in a manifest:
+    ``ref=create``, ``ref=create,read``, ``ref='{erase: {by: subject}}'``;
+    a bare ref is a read. No REF at all declares an empty list: "touches no
+    inventory item, checked".
     """
     console = Console()
     ws = workspace_or_exit(ctx, root, python=python)
@@ -335,42 +360,46 @@ def tp_set_data(
     if tp is None:
         raise click.UsageError(_unknown_touchpoint(touchpoint_id, ws))
     unit = next(u for u in ws.units if u.id == tp.unit)
-    direction = dict(tp.direction)
+    ops: dict[str, Sequence[OpSpec]] = dict(tp.ops)
     wanted: list[str] = []
     for raw in refs:
-        ref, _, dir_text = raw.partition("=")
+        ref, _, ops_text = raw.partition("=")
         full = ref if ":" in ref else f"{tp.unit}:{ref}"
         if full not in ws.rows:
             close = difflib.get_close_matches(full, sorted(ws.rows), n=3, cutoff=0.6)
             hint = f"; did you mean {', '.join(close)}?" if close else ""
             msg = f"no data item {full!r}{hint}"
             raise click.UsageError(msg)
-        if dir_text:
-            if dir_text not in ("read", "write", "read+write"):
-                msg = f"{raw!r}: direction must be read, write or read+write"
-                raise click.UsageError(msg)
-            direction[full] = dir_text
+        if ops_text:
+            try:
+                parsed, warnings = parse_ops(yaml.safe_load(_ops_yaml(ops_text)))
+            except (OpError, yaml.YAMLError) as exc:
+                msg = f"{raw!r}: {exc}"
+                raise click.UsageError(msg) from exc
+            for warning in warnings:
+                console.print(
+                    Text.assemble(("warning ", "yellow"), f"{ref}: {warning}")
+                )
+            ops[full] = parsed
         wanted.append(full)
     current = list(tp.data or ())
     if mode == "add":
         final = current + [r for r in wanted if r not in current]
     elif mode == "remove":
         final = [r for r in current if r not in wanted]
-        for r in wanted:
-            direction.pop(r, None)
     else:
         final = wanted
-    direction = {k: v for k, v in direction.items() if k in final}
+    ops = {k: v for k, v in ops.items() if k in final}
     parties = set(load_declarations(ws.shared).parties)
-    exporting = list(tp.exporting) if mode in ("add", "remove") else []
+    transfers = list(tp.transfers) if mode in ("add", "remove") else []
     for raw in exports:
-        exporting.append(_parse_export(raw, tp.unit, ws, parties))
+        transfers.append(_parse_export(raw, tp.unit, ws, parties))
     path = write_manifest(
         unit,
         tp,
         final,
-        direction=direction,
-        exporting=exporting,
+        ops=ops,
+        transfers=transfers,
         note=note or tp.note,
         ignore=ignore,
     )
@@ -411,6 +440,11 @@ def tp_set_data(
     type=click.IntRange(1, 32),
     help="Parallel OpenCode sessions per round, each reviewing --batch touchpoints.",
 )
+@click.option(
+    "--stale",
+    is_flag=True,
+    help="Also re-review manifests written with `write` / `exporting`.",
+)
 @click.option("--keep-scratch", is_flag=True, hidden=True)
 @PYTHON_OPTION
 @ROOT_OPTION
@@ -425,6 +459,7 @@ def tp_auto_review(
     max_tokens: int | None,
     group: bool,
     group_only: bool,
+    stale: bool,
     workers: int,
     keep_scratch: bool,
     python: str | None,
@@ -458,14 +493,14 @@ def tp_auto_review(
         python=python,
         max_tokens=max_tokens,
         keep_scratch=keep_scratch,
-        target=TOUCHPOINTS_TARGET,
+        target=replace(TOUCHPOINTS_TARGET, stale=stale),
         group=group or group_only,
         workers=workers,
     )
 
 
-def _parse_export(raw: str, unit_id: str, ws: Workspace, parties: set[str]) -> Export:
-    """``mapbox=geo.Address.position,geo.Address.text;geocoding`` → :class:`Export`."""
+def _parse_export(raw: str, unit_id: str, ws: Workspace, parties: set[str]) -> Transfer:
+    """``mapbox=geo.Address.position,geo.Address.text;geocoding`` → a transfer."""
     spec, _, purpose = raw.partition(";")
     party, sep, refs_text = spec.partition("=")
     if not sep or not party:
@@ -485,7 +520,7 @@ def _parse_export(raw: str, unit_id: str, ws: Workspace, parties: set[str]) -> E
             msg = f"{raw!r}: no data item {full!r}"
             raise click.UsageError(msg)
         refs.append(full)
-    return Export(party=party, data=refs, purpose=purpose.strip() or None)
+    return Transfer(party=party, data=refs, purpose=purpose.strip() or None)
 
 
 # ---------------------------------------------------------------------------
@@ -751,14 +786,44 @@ class Why:
             return "referenced by touchpoints in no activity (orphan)"
         return "not referenced by any touchpoint"
 
+    def lifecycle(self) -> str:
+        """One sentence from the ops: where it is created, read, corrected, erased.
+
+        This is the item's life as the code tells it, without any judgement
+        (the rights derivation adds that): *created by api:signup, read by
+        6, rectified by admin:people.User (staff), never erased, purged
+        after 30 days by api:task:cart.purge, sent to mapbox*.
+        """
+        by_op: dict[Op, list[tuple[Touchpoint, OpSpec]]] = {}
+        for tp in self.touchpoints:
+            for op in tp.ops_of(self.ref):
+                by_op.setdefault(op.op, []).append((tp, op))
+        parts = [
+            _lifecycle_part(verb, by_op.get(kind, []), detail=detail)
+            for kind, verb, detail in _LIFECYCLE
+            if kind in by_op
+        ]
+        if Op.ERASE not in by_op:
+            parts.insert(min(len(parts), 4), "never erased")
+        parties = sorted(
+            t.party
+            for tp in self.touchpoints
+            for t in tp.transfers
+            if self.ref in t.data
+        )
+        if parties:
+            parts.append(f"sent to {', '.join(dict.fromkeys(parties))}")
+        return ", ".join(parts)
+
     def to_dict(self, ws: Workspace) -> dict[str, Any]:
         """JSON form."""
         return {
             "id": self.ref,
+            "lifecycle": self.lifecycle(),
             "touchpoints": [
                 {
                     "id": t.full_id,
-                    "direction": t.direction.get(self.ref, "read+write"),
+                    "ops": [op.to_yaml() for op in t.ops_of(self.ref)],
                     "location": t.location(ws.root),
                 }
                 for t in self.touchpoints
@@ -782,6 +847,40 @@ def _plain(value: object) -> str | None:
     if value is None or isinstance(value, Marker):
         return None
     return value.value if isinstance(value, LegalBasis) else str(value)
+
+
+def _meta(op: OpSpec) -> str:
+    return ", ".join(f"{k} {v}" for k, v in op.payload().items())
+
+
+_LIFECYCLE: list[tuple[Op, str, bool]] = [
+    (Op.CREATE, "created by", False),
+    (Op.READ, "read by", False),
+    (Op.UPDATE, "updated by", False),
+    (Op.RECTIFY, "rectified by", True),
+    (Op.ACCESS, "accessible via", False),
+    (Op.PORTABILITY, "portable via", True),
+    (Op.ERASE, "erased by", True),
+    (Op.RETENTION_PURGE, "purged by", True),
+    (Op.CONSENT_WITHDRAW, "consent withdrawable via", True),
+    (Op.OBJECT, "objection via", False),
+    (Op.RESTRICT, "restriction via", True),
+    (Op.DELETE, "deleted by", False),
+]
+"""Order and wording of the lifecycle sentence; the flag says whether the
+op's metadata is worth printing next to the touchpoint."""
+
+
+def _lifecycle_part(
+    verb: str, items: list[tuple[Touchpoint, OpSpec]], *, detail: bool
+) -> str:
+    if len(items) > 3:
+        return f"{verb} {len(items)} touchpoints"
+    names = [
+        t.full_id + (f" ({_meta(o)})" if detail and o.payload() else "")
+        for t, o in items
+    ]
+    return f"{verb} {', '.join(names)}"
 
 
 def why(ref: str, ws: Workspace) -> Why:
@@ -856,10 +955,14 @@ def render_why(entry: Why, ws: Workspace, *, manifests: bool) -> Text:
         style="red" if row.pii else "dim",
     )
     out.append(f"  store {row.store or '?'}\n", style="dim")
+    if entry.touchpoints:
+        out.append(f"  {entry.lifecycle()}\n", style="italic")
     for tp in entry.touchpoints:
         out.append("  touchpoint ")
         out.append(tp.full_id, style="cyan")
-        out.append(f"  {tp.direction.get(entry.ref, 'read+write')}  ")
+        out.append("  ")
+        out.append(describe(list(tp.ops_of(entry.ref))), style="cyan")
+        out.append("  ")
         out.append(f"{tp.location(ws.root) or ''}\n", style="dim")
     for act in entry.activities:
         out.append("  activity ")

@@ -238,6 +238,20 @@ for (const typeFile of typeFiles) {
         for (const n of matches(text, FORM_DATA_GET)) formFields.add(n);
     }
 
+    // Op hints from what the route exposes: handlers map to HTTP verbs, form
+    // action names say what they do. The reviewer confirms against the code.
+    const hints = [];
+    if (handlers.includes("POST")) hints.push("create: POST handler");
+    if (handlers.includes("PUT") || handlers.includes("PATCH")) hints.push("update|rectify: PUT/PATCH handler");
+    if (handlers.includes("DELETE")) hints.push("delete|erase: DELETE handler");
+    for (const a of actions) {
+        if (/delete|remove|erase|forget|close/i.test(a)) hints.push(`delete|erase: action ${a}`);
+        else if (/update|edit|change|rename|save/i.test(a)) hints.push(`update|rectify: action ${a}`);
+        else if (/export|download/i.test(a)) hints.push(`portability: action ${a}`);
+        else if (/unsubscribe|withdraw|optout|opt_out/i.test(a)) hints.push(`consent_withdraw|object: action ${a}`);
+        else hints.push(`create: action ${a}`);
+    }
+
     const isLayoutOnly = files.every((f) => f.startsWith("+layout"));
     const dataName = isLayoutOnly ? "LayoutData" : "PageData";
     const main =
@@ -258,6 +272,7 @@ for (const typeFile of typeFiles) {
         form_fields: [...formFields].sort(),
         calls: [...calls].sort(),
         fetches: [...fetches].sort(),
+        hints,
         file: path.relative(root, path.join(routeDir, main)).split(path.sep).join("/"),
     });
 }

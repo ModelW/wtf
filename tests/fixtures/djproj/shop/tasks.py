@@ -1,6 +1,11 @@
 """Procrastinate tasks of the fixture."""
 
+from datetime import timedelta
+
+from django.utils import timezone
 from procrastinate.contrib.django import app
+
+from shop.models import Order
 
 
 def setup(app):
@@ -16,3 +21,5 @@ def send_receipt(order_id: int):
 @app.task(name="shop.purge_carts")
 def purge_carts(timestamp: int):
     """Delete abandoned carts."""
+    cutoff = timezone.now() - timedelta(days=30)
+    Order.objects.filter(created_at__lt=cutoff).delete()

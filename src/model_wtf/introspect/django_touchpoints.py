@@ -329,6 +329,7 @@ def _route_touchpoints():
                         "params": facts.get("params", []),
                         "summary": facts.get("summary"),
                         "defers": _defers(fn),
+                        "hints": _method_hints([method]) + _body_hints(fn),
                     }
                 )
             continue
@@ -360,6 +361,7 @@ def _route_touchpoints():
                 "params": params,
                 "summary": None,
                 "defers": _defers(target),
+                "hints": _method_hints(methods) + _body_hints(target),
             }
         )
     return out
@@ -393,6 +395,99 @@ def _defers(func):
                     owner = owner.func.value
                 names.append(ast.unparse(owner))
     return sorted(set(names))
+
+
+# --------------------------------------------------------------------------
+# op hints: what the body looks like it does, for the reviewer to confirm
+# --------------------------------------------------------------------------
+
+TASK_NAME_HINTS = (
+    (re.compile(r"purge|clean|expire|prune|retention", re.I), "retention_purge"),
+    (re.compile(r"anonymi[sz]e|erase|forget|gdpr", re.I), "erase"),
+    (re.compile(r"export|portab|download_data|takeout", re.I), "portability"),
+    (re.compile(r"delete|remove", re.I), "delete"),
+)
+
+
+def _body_hints(func):
+    """Likely ops from the source of ``func``: ``.delete()``, ``timedelta``...
+
+    These are *hints*: the reviewer confirms them against the code. The
+    ``timedelta(days=30)`` value is reported so a ``retention_purge.after``
+    can be pre-filled.
+    """
+    try:
+        src = inspect.getsource(inspect.unwrap(func))
+    except (OSError, TypeError):
+        return []
+    try:
+        tree = ast.parse(inspect.cleandoc(src) if src[:1].isspace() else src)
+    except SyntaxError:
+        return []
+    hints = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        callee = node.func
+        name = (
+            callee.attr
+            if isinstance(callee, ast.Attribute)
+            else callee.id
+            if isinstance(callee, ast.Name)
+            else ""
+        )
+        if name == "delete":
+            hints.append("delete: `.delete()` called")
+        elif name in ("update", "bulk_update"):
+            hints.append("update: `.update()` called")
+        elif name in ("create", "get_or_create", "bulk_create", "save"):
+            hints.append("create: `.create()`/`.save()` called")
+        elif name in ("timedelta", "relativedelta"):
+            hints.append(f"after: `{ast.unparse(node)}`")
+        elif re.search(r"anonymi[sz]e|scrub|redact|forget", name, re.I):
+            hints.append(f"erase: `{name}()` called (anonymise?)")
+    return sorted(set(hints))
+
+
+def _method_hints(methods):
+    out = []
+    if "POST" in methods:
+        out.append("create: POST")
+    if "PUT" in methods or "PATCH" in methods:
+        out.append("update|rectify: PUT/PATCH")
+    if "DELETE" in methods:
+        out.append("delete|erase: DELETE")
+    return out
+
+
+def _task_name_hints(name):
+    return [f"{op}: task name" for rx, op in TASK_NAME_HINTS if rx.search(name)]
+
+
+def _admin_hints(model_admin):
+    """What the admin screen lets staff do: add / change / delete / read only."""
+    hints = []
+    for perm, op in (
+        ("has_add_permission", "create"),
+        ("has_change_permission", "rectify(by=staff)|update"),
+        ("has_delete_permission", "erase(by=staff)|delete"),
+    ):
+        method = getattr(type(model_admin), perm, None)
+        overridden = method is not None and perm in vars(type(model_admin))
+        if overridden:
+            src = ""
+            with contextlib.suppress(OSError, TypeError):
+                src = inspect.getsource(method)
+            if re.search(r"return\s+False", src):
+                hints.append(f"no {op}: {perm} returns False")
+                continue
+        hints.append(f"{op}: {perm} default (allowed)")
+    readonly = list(getattr(model_admin, "readonly_fields", None) or ())
+    if readonly:
+        hints.append("read only: " + ", ".join(str(f) for f in readonly))
+    if getattr(model_admin, "list_display", None):
+        hints.append("read: list_display")
+    return hints
 
 
 def _signature(func):
@@ -443,6 +538,7 @@ def _task_touchpoints():
                 "request": _signature(task.func),
                 "defers": _defers(task.func),
                 "queue": getattr(task, "queue", None),
+                "hints": _task_name_hints(name) + _body_hints(task.func),
             }
         )
     try:
@@ -465,6 +561,7 @@ def _task_touchpoints():
                     "request": _signature(func),
                     "defers": _defers(func),
                     "queue": getattr(task, "queue", None),
+                    "hints": _task_name_hints(name) + _body_hints(func),
                 }
             )
     except Exception:
@@ -506,6 +603,7 @@ def _admin_touchpoints():
                     f"{i.model._meta.app_label}.{i.model.__name__}"
                     for i in getattr(model_admin, "inlines", [])
                 ],
+                "hints": _admin_hints(model_admin),
             }
         )
     return out
