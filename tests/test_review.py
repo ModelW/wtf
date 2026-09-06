@@ -17,7 +17,13 @@ from model_wtf.compliance.check import run_check
 from model_wtf.compliance.data import collect_unit
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.knowledge import load_knowledge
-from model_wtf.compliance.mcp_server import Decision, Tools, field_of, model_of
+from model_wtf.compliance.mcp_server import (
+    ContentDecision,
+    Decision,
+    Tools,
+    field_of,
+    model_of,
+)
 from model_wtf.compliance.report import Unit
 from model_wtf.compliance.review import Lock, ReviewStatus
 from model_wtf.opencode import (
@@ -193,7 +199,7 @@ def test_tools_pending_model_review(repo: Path) -> None:
     )
     assert "avatar@files.content (bytes behind `avatar`" in model
     assert "preferences" in model
-    assert "keys written into JSON fields" in model
+    assert "write sites of JSON-like fields" in model
 
     result = tools.review_model(
         "api:shop.Customer",
@@ -359,3 +365,93 @@ def test_auto_review_dry_run_and_missing_key(
     monkeypatch.setenv("PATH", str(repo))  # no opencode binary here
     run = runner.invoke(cli, ["compliance", "data", "auto-review", *root])
     assert run.exit_code == 4
+
+
+def test_tools_review_json_contents(repo: Path) -> None:
+    tools = Tools(repo)
+
+    shown = tools.model("api:shop.Customer")
+    assert "write sites of JSON-like fields" in shown
+
+    bare = tools.review_model(
+        "api:shop.Customer", [Decision(field="preferences", ok=True)], note="n"
+    )
+    assert "rejected preferences: JSON fields need a contents declaration" in bare
+
+    missing_unknown = tools.review_model(
+        "api:shop.Customer",
+        [
+            Decision(
+                field="preferences",
+                contents={
+                    "theme": ContentDecision(
+                        pii=False, sensitivity="internal", category="technical"
+                    )
+                },
+                reason="x",
+            )
+        ],
+        note="n",
+    )
+    assert "unknown_contents (none|possible|likely) is required" in missing_unknown
+
+    bad_vocab = tools.review_model(
+        "api:shop.Customer",
+        [
+            Decision(
+                field="preferences",
+                contents={
+                    "theme": ContentDecision(pii=False, sensitivity="top", category="x")
+                },
+                unknown_contents="none",
+                reason="x",
+            )
+        ],
+        note="n",
+    )
+    assert "theme: unknown sensitivity 'top'" in bad_vocab
+
+    on_text = tools.review_model(
+        "api:shop.Customer",
+        [
+            Decision(
+                field="email",
+                contents={},
+                unknown_contents="none",
+                reason="x",
+            )
+        ],
+        note="n",
+    )
+    assert "is not a JSON-like column" in on_text
+
+    ok = tools.review_model(
+        "api:shop.Customer",
+        [
+            Decision(
+                field="preferences",
+                contents={
+                    "theme": ContentDecision(
+                        pii=False, sensitivity="internal", category="technical"
+                    ),
+                    "phone": ContentDecision(
+                        pii=True, sensitivity="personal", category="contact"
+                    ),
+                },
+                unknown_contents="possible",
+                reason="shop/views.py:40 copies request data",
+            )
+        ],
+        note="n",
+    )
+    assert "1 overridden" in ok
+    path = repo / "api" / "compliance" / "data" / "shop.Customer.preferences.yaml"
+    assert "unknown_contents: possible" in path.read_text()
+    lock = Lock(_unit(repo))
+    assert lock.data.items["shop.Customer.preferences@json.phone"].by == "agent"
+    after = tools.model("api:shop.Customer")
+    assert (
+        "preferences@json.phone (declared content of `preferences`) | JsonContent | "
+        "pii=yes | personal | contact" in after
+    )
+    assert "preferences | JSONField | pii=yes | personal | contact+technical" in after

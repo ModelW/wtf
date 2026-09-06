@@ -56,6 +56,11 @@ def django_repo(make_repo: MakeRepo, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
+def folder_of(root: Path) -> Path:
+    """The ``api`` unit's data folder."""
+    return root / "api" / "compliance" / "data"
+
+
 def _unit(root: Path) -> Unit:
     return Unit("api", root / "api" / "compliance", "django", root / "api")
 
@@ -756,3 +761,202 @@ def test_cli_stores(django_repo: Path) -> None:
     assert ok.exit_code == 0, ok.output
     path = django_repo / "api" / "compliance" / "data" / "shop.Customer.email.yaml"
     assert path.read_text() == 'store: db-audit\nreason: "mirrored"\n'
+
+
+CONTENTS_FILE = """\
+contents:
+  customer_name: {pii: true, sensitivity: personal, category: identity}
+  iban: {pii: true, sensitivity: confidential, category: financial}
+  utm_campaign: {pii: false, sensitivity: internal, category: technical}
+unknown_contents: none
+reason: written in shop/services.py:12-30
+"""
+
+
+def test_json_contents_declaration(django_repo: Path) -> None:
+    folder = django_repo / "api" / "compliance" / "data"
+    folder.mkdir(parents=True)
+    (folder / "shop.Customer.preferences.yaml").write_text(CONTENTS_FILE)
+
+    data = collect_unit(_unit(django_repo), load_knowledge(None))
+    rows = {r.id: r for r in data.rows}
+
+    column = rows["shop.Customer.preferences"]
+    assert column.source is Source.DERIVED
+    assert (column.pii, column.sensitivity, column.category) == (
+        True,
+        "confidential",
+        "financial+identity+technical",
+    )
+    assert column.dpia is Dpia.LARGE_SCALE  # financial + confidential
+    assert column.contents == ("customer_name", "iban", "utm_campaign")
+    assert column.unknown_contents is not None
+    assert column.unknown_contents.value == "none"
+    assert column.store == "db-default"
+    iban = rows["shop.Customer.preferences@json.iban"]
+    assert (iban.type, iban.pii, iban.sensitivity, iban.category, iban.store) == (
+        "JsonContent",
+        True,
+        "confidential",
+        "financial",
+        "db-default",
+    )
+    assert iban.source is Source.OVERRIDE
+    assert data.diagnostics == []
+    # Fingerprint moves with the declaration.
+    (folder / "shop.Customer.preferences.yaml").write_text(
+        CONTENTS_FILE.replace("unknown_contents: none", "unknown_contents: possible")
+    )
+    again = {
+        r.id: r for r in collect_unit(_unit(django_repo), load_knowledge(None)).rows
+    }
+    assert again["shop.Customer.preferences"].fingerprint != column.fingerprint
+
+
+@pytest.mark.parametrize(
+    ("unknown", "pii", "level", "category", "codes"),
+    [
+        ("none", False, "internal", "technical", []),
+        ("possible", False, "internal", "technical", ["json-unknown-contents"]),
+        ("likely", True, "confidential", "content+technical", []),
+    ],
+)
+def test_json_contents_unknown_semantics(
+    django_repo: Path,
+    unknown: str,
+    pii: bool,
+    level: str,
+    category: str,
+    codes: list[str],
+) -> None:
+    folder = django_repo / "api" / "compliance" / "data"
+    folder.mkdir(parents=True)
+    (folder / "shop.Customer.preferences.yaml").write_text(
+        "contents:\n  theme: {pii: false, sensitivity: internal, category: technical}\n"
+        f"unknown_contents: {unknown}\nreason: settings UI\n"
+    )
+
+    data = collect_unit(_unit(django_repo), load_knowledge(None))
+    column = next(r for r in data.rows if r.id == "shop.Customer.preferences")
+
+    assert (column.pii, column.sensitivity, column.category) == (pii, level, category)
+    assert [d.code for d in data.diagnostics] == codes
+
+
+def test_json_contents_empty_and_likely_keeps_presumption(django_repo: Path) -> None:
+    folder = django_repo / "api" / "compliance" / "data"
+    folder.mkdir(parents=True)
+    (folder / "shop.Customer.preferences.yaml").write_text(
+        "contents: {}\nunknown_contents: likely\nreason: opaque blob\n"
+    )
+    data = collect_unit(_unit(django_repo), load_knowledge(None))
+    column = next(r for r in data.rows if r.id == "shop.Customer.preferences")
+    assert (column.pii, column.sensitivity, column.category) == (
+        True,
+        "confidential",
+        "content",
+    )
+    (folder / "shop.Customer.preferences.yaml").write_text(
+        "contents: {}\nunknown_contents: none\nreason: never written\n"
+    )
+    data = collect_unit(_unit(django_repo), load_knowledge(None))
+    column = next(r for r in data.rows if r.id == "shop.Customer.preferences")
+    assert (column.pii, column.sensitivity, column.category) == (
+        False,
+        "internal",
+        "technical",
+    )
+
+
+@pytest.mark.parametrize(
+    ("filename", "body", "code"),
+    [
+        ("shop.Customer.email.yaml", CONTENTS_FILE, "schema-error"),
+        (
+            "shop.Customer.preferences.yaml",
+            "contents:\n"
+            "  Bad-Name: {pii: true, sensitivity: personal, category: identity}\n"
+            "unknown_contents: none\nreason: x\n",
+            "schema-error",
+        ),
+        (
+            "shop.Customer.preferences.yaml",
+            "contents:\n  a: {pii: true, sensitivity: top, category: identity}\n"
+            "unknown_contents: none\nreason: x\n",
+            "unknown-level",
+        ),
+        (
+            "shop.Customer.preferences.yaml",
+            "contents:\n  a: {pii: true, sensitivity: personal, category: identity}\n"
+            "unknown_contents: maybe\nreason: x\n",
+            "schema-error",
+        ),
+        (
+            "shop.Customer.preferences.yaml",
+            "contents: {}\nunknown_contents: none\npii: false\nreason: x\n",
+            "schema-error",
+        ),
+    ],
+    ids=["not-a-container", "bad-name", "bad-level", "bad-unknown", "mixed-keys"],
+)
+def test_json_contents_errors(
+    django_repo: Path, filename: str, body: str, code: str
+) -> None:
+    folder = django_repo / "api" / "compliance" / "data"
+    folder.mkdir(parents=True)
+    (folder / filename).write_text(body)
+
+    data = collect_unit(_unit(django_repo), load_knowledge(None))
+
+    assert code in [d.code for d in data.diagnostics]
+
+
+def test_cli_contents(django_repo: Path) -> None:
+    runner = CliRunner()
+    root = ["--root", str(django_repo)]
+    base = ["compliance", "data", "contents", "api:shop.Customer.preferences", *root]
+
+    bad = runner.invoke(cli, [*base, "theme=maybe,internal,technical"])
+    assert bad.exit_code == 2
+    assert "pii must be yes/no" in bad.output
+
+    not_json = runner.invoke(
+        cli, ["compliance", "data", "contents", "api:shop.Customer.email", *root]
+    )
+    assert not_json.exit_code == 2
+    assert "JSON-like" in not_json.output
+
+    ok = runner.invoke(
+        cli,
+        [
+            *base,
+            "theme=no,internal,technical",
+            "phone=yes,personal,contact",
+            "--unknown",
+            "none",
+            "--reason",
+            "settings.py:3",
+        ],
+    )
+    assert ok.exit_code == 0, ok.output
+    path = (
+        django_repo / "api" / "compliance" / "data" / "shop.Customer.preferences.yaml"
+    )
+    assert path.read_text() == (
+        "contents:\n"
+        "  theme: {pii: false, sensitivity: internal, category: technical}\n"
+        "  phone: {pii: true, sensitivity: personal, category: contact}\n"
+        "unknown_contents: none\n"
+        'reason: "settings.py:3"\n'
+    )
+    listed = runner.invoke(
+        cli, ["compliance", "data", "list", *root, "--format", "json"]
+    )
+    rows = {r["id"]: r for r in json.loads(listed.output)}
+    assert rows["shop.Customer.preferences"]["contents"] == ["theme", "phone"]
+    assert rows["shop.Customer.preferences"]["review"] == "override"
+    assert rows["shop.Customer.preferences@json.phone"]["review"] == "override"
+    table = runner.invoke(
+        cli, ["compliance", "data", "list", *root], env={"COLUMNS": "250"}
+    )
+    assert "holds theme, phone; unknown: none" in table.output

@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from model_wtf.compliance.data import Row, Source
+from model_wtf.compliance.data import Row, Source, is_container
 from model_wtf.compliance.report import Diagnostic, Severity
 from model_wtf.compliance.yaml_io import dump_yaml, load_yaml
 
@@ -49,13 +49,21 @@ class ReviewStatus(StrEnum):
     PENDING_NEW = "pending:new"
     """Never reviewed."""
 
+    PENDING_CONTENTS = "pending:contents"
+    """A JSON-like column without a ``contents`` declaration: a lock entry
+    alone does not close it, the blob has to be described."""
+
     PENDING_CHANGED = "pending:changed"
     """Reviewed once, but the field's facts changed since."""
 
     @property
     def pending(self) -> bool:
         """Whether a review is still owed."""
-        return self in (ReviewStatus.PENDING_NEW, ReviewStatus.PENDING_CHANGED)
+        return self in (
+            ReviewStatus.PENDING_NEW,
+            ReviewStatus.PENDING_CHANGED,
+            ReviewStatus.PENDING_CONTENTS,
+        )
 
 
 class LockEntry(BaseModel):
@@ -128,10 +136,12 @@ class Lock:
     def status_of(self, row: Row) -> Reviewed:
         """Compute the review status of ``row`` against the lock."""
         entry = self.data.items.get(row.id)
-        if row.source is Source.OVERRIDE:
+        if row.source in (Source.OVERRIDE, Source.DERIVED):
             return Reviewed(row, ReviewStatus.OVERRIDE, entry)
         if row.source is Source.KNOWN:
             return Reviewed(row, ReviewStatus.KNOWN, entry)
+        if row.field is not None and is_container(row.field):
+            return Reviewed(row, ReviewStatus.PENDING_CONTENTS, entry)
         if entry is None:
             return Reviewed(row, ReviewStatus.PENDING_NEW, None)
         if entry.fingerprint != row.fingerprint:

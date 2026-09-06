@@ -20,6 +20,17 @@ bytes are inventoried as their own synthetic model, ``<app.Model.field>@files``
 with a single field ``content``, so they are classified, reviewed and
 overridden on their own.
 
+A JSON-like column (``JSONField``, ``ArrayField``, ``HStoreField``; not
+Wagtail's ``StreamField``, which is CMS content) is a **container**: one
+``pii/sensitivity/category`` triple cannot describe a blob holding a name, an
+address and an IBAN. Its override file may instead declare ``contents``, one
+entry per *kind* of information (not per JSON path), each classified like a
+field; every entry becomes a row ``<app.Model.field>@json.<name>`` and the
+column's own verdict is **derived** (``pii`` = any, ``sensitivity`` = max,
+``category`` = the set). ``unknown_contents`` says whether the list is
+exhaustive: ``none`` replaces the rule's presumption, ``possible`` keeps a
+warning, ``likely`` folds the presumption back into the derivation.
+
 Every row references the **store** holding it by slug (``db-default``,
 ``files-default``; see :mod:`model_wtf.compliance.stores`): ORM columns point
 at the database the router writes the model to, ``@files`` rows at the file
@@ -30,19 +41,21 @@ explicitly; the slug must exist in the unit's stores and not be ignored.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+import json
+import re
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import yaml
-from pydantic import Field, ValidationError
+from pydantic import Field, StringConstraints, ValidationError
 
 from model_wtf.compliance.declarations import format_errors
-from model_wtf.compliance.knowledge import Dpia, Knowledge  # noqa: TC001 - runtime use
+from model_wtf.compliance.knowledge import Dpia, Knowledge
 from model_wtf.compliance.report import Diagnostic, Severity
 from model_wtf.compliance.schemas import NonEmpty, StrictModel
 from model_wtf.compliance.stores import UnitStores, collect_stores
-from model_wtf.compliance.yaml_io import Todo, iter_todo_paths, load_yaml
+from model_wtf.compliance.yaml_io import Todo, iter_todo_paths, load_yaml, todo_text
 from model_wtf.introspect.runner import (
     FieldInfo,
     IntrospectionUnavailable,
@@ -62,6 +75,12 @@ FIELD_ID_PARTS = 3
 FILE_STORE_SUFFIX = "@files"
 FILE_STORE_FIELD = "content"
 FILE_INTERNAL_TYPES = frozenset({"FileField", "ImageField"})
+JSON_SUFFIX = "@json"
+JSON_CONTENT_TYPE = "JsonContent"
+CONTAINER_INTERNAL_TYPES = frozenset({"JSONField", "ArrayField", "HStoreField"})
+NOT_CONTAINER_TYPES = frozenset({"StreamField"})
+CONTENT_NAME = r"^[a-z0-9_]+$"
+CATEGORY_JOIN = "+"
 
 
 class Source(StrEnum):
@@ -72,6 +91,43 @@ class Source(StrEnum):
     """Curated verdict for a well-known third-party field; counts as reviewed."""
     OVERRIDE = "override"
     MANUAL = "manual"
+    DERIVED = "derived"
+    """A container column whose verdict is computed from its declared contents."""
+
+
+class Unknown(StrEnum):
+    """How exhaustive a ``contents`` declaration is."""
+
+    NONE = "none"
+    """Every write site was read; the list is complete."""
+    POSSIBLE = "possible"
+    """Some writes are dynamic; other things may end up in the blob."""
+    LIKELY = "likely"
+    """The blob is mostly opaque; the rule's presumption stays in force."""
+
+
+def is_container(finfo: FieldInfo) -> bool:
+    """Whether a field is a JSON-like blob that can declare ``contents``."""
+    return (
+        finfo.internal_type in CONTAINER_INTERNAL_TYPES
+        and finfo.type not in NOT_CONTAINER_TYPES
+    )
+
+
+class Content(StrictModel):
+    """One kind of information held in a container column."""
+
+    pii: bool | Todo
+    sensitivity: str | Todo
+    category: str | Todo
+
+
+class Contents(StrictModel):
+    """``data/<field id>.yaml`` for a container column: what the blob holds."""
+
+    contents: dict[Annotated[str, StringConstraints(pattern=CONTENT_NAME)], Content]
+    unknown_contents: Unknown
+    reason: NonEmpty | Todo
 
 
 class Override(StrictModel):
@@ -120,6 +176,10 @@ class Row:
     store: str | None = None
     """Slug of the store holding the value (``db-default``, ``files-default``);
     ``None`` when unknown (manual item without ``store``)."""
+    contents: tuple[str, ...] = ()
+    """Names of the declared contents (container columns only)."""
+    unknown_contents: Unknown | None = None
+    """Exhaustiveness of ``contents`` (container columns with a declaration)."""
 
     @property
     def full_id(self) -> str:
@@ -138,6 +198,8 @@ class Row:
         """
         facts = self.field.fingerprint_source() if self.field else f"manual|{self.type}"
         verdict = f"{self.rule}|{self.pii}|{self.sensitivity}|{self.category}"
+        if self.contents:
+            verdict += f"|{','.join(self.contents)}|{self.unknown_contents}"
         return hashlib.sha256(f"{facts}#{verdict}".encode()).hexdigest()[:8]
 
     def to_dict(self) -> dict[str, Any]:
@@ -153,6 +215,10 @@ class Row:
             "source": self.source.value,
             "rule": self.rule,
             "store": self.store,
+            "contents": list(self.contents),
+            "unknown_contents": self.unknown_contents.value
+            if self.unknown_contents
+            else None,
             "fingerprint": self.fingerprint,
         }
 
@@ -223,16 +289,15 @@ def collect_unit(
                 continue
             for item_id, finfo in _model_items(model):
                 known.add(item_id)
-                data.rows.append(
-                    _classify(
-                        unit.id,
+                data.rows.extend(
+                    _rows_for(
+                        unit,
                         item_id,
                         finfo,
                         model,
                         knowledge,
                         overrides.get(item_id),
                         data.diagnostics,
-                        unit,
                     )
                 )
 
@@ -363,6 +428,147 @@ def _classify(
         model_file=model.file,
         store=store,
     )
+
+
+def _rows_for(
+    unit: Unit,
+    item_id: str,
+    finfo: FieldInfo,
+    model: ModelInfo,
+    knowledge: Knowledge,
+    raw: dict[str, Any] | None,
+    diagnostics: list[Diagnostic],
+) -> list[Row]:
+    """Rows for one column: itself, or itself plus its declared contents."""
+    if raw is not None and "contents" in raw:
+        if is_container(finfo):
+            return _container_rows(
+                unit, item_id, finfo, model, knowledge, raw, diagnostics
+            )
+        diagnostics.append(
+            Diagnostic(
+                Severity.ERROR,
+                "schema-error",
+                f"{item_id}.yaml: `contents` is only for JSON-like columns; "
+                f"{item_id} is a {finfo.type}",
+                unit.id,
+                unit.folder / DATA_DIR / f"{item_id}.yaml",
+            )
+        )
+        raw = None
+    return [
+        _classify(unit.id, item_id, finfo, model, knowledge, raw, diagnostics, unit)
+    ]
+
+
+def _container_rows(
+    unit: Unit,
+    item_id: str,
+    finfo: FieldInfo,
+    model: ModelInfo,
+    knowledge: Knowledge,
+    raw: dict[str, Any],
+    diagnostics: list[Diagnostic],
+) -> list[Row]:
+    """A container column with a ``contents`` file: its items plus the derived column.
+
+    The column is first classified by the rules (so ``rule`` and the
+    presumption are known), then replaced by the derivation over the items.
+    """
+    column = _classify(
+        unit.id, item_id, finfo, model, knowledge, None, diagnostics, unit
+    )
+    path = unit.folder / DATA_DIR / f"{item_id}.yaml"
+    declared = _validate(Contents, raw, path, diagnostics)
+    if declared is None:
+        return [column]
+    items: list[Row] = []
+    for name, content in declared.contents.items():
+        level = None if isinstance(content.sensitivity, Todo) else content.sensitivity
+        category = None if isinstance(content.category, Todo) else content.category
+        if level is not None and category is not None:
+            _check_vocabulary(level, category, knowledge, path, diagnostics)
+        items.append(
+            Row(
+                unit=unit.id,
+                id=f"{item_id}{JSON_SUFFIX}.{name}",
+                type=JSON_CONTENT_TYPE,
+                pii=None if isinstance(content.pii, Todo) else content.pii,
+                sensitivity=level,
+                category=category,
+                dpia=_dpia(knowledge, level, category),
+                source=Source.OVERRIDE,
+                rule=column.rule,
+                field=finfo,
+                model_module=model.module,
+                model_file=model.file,
+                store=column.store,
+            )
+        )
+    if declared.unknown_contents is Unknown.POSSIBLE:
+        diagnostics.append(
+            Diagnostic(
+                Severity.WARNING,
+                "json-unknown-contents",
+                f"{path.name}: other things may be written into {item_id} "
+                "(unknown_contents: possible)",
+                unit.id,
+                path,
+            )
+        )
+    return [derive_column(column, items, declared.unknown_contents, knowledge), *items]
+
+
+def derive_column(
+    column: Row, items: list[Row], unknown: Unknown, knowledge: Knowledge
+) -> Row:
+    """The container's verdict from its contents.
+
+    ``pii`` is true if any item is; ``sensitivity`` is the highest rank;
+    ``category`` is the sorted set joined with ``+``; DPIA is the max. With
+    ``unknown_contents: likely`` the rule's own presumption is one more item.
+    """
+    pool = list(items)
+    if unknown is Unknown.LIKELY:
+        pool.append(column)
+    if not pool:
+        # Nothing declared and nothing presumed: an empty, harmless blob.
+        return replace(
+            column,
+            pii=False,
+            sensitivity=knowledge.resolve("internal"),
+            category=knowledge.resolve("technical"),
+            dpia=Dpia.NEVER,
+            source=Source.DERIVED,
+            contents=(),
+            unknown_contents=unknown,
+        )
+    piis = [r.pii for r in pool]
+    pii: bool | None = True if any(piis) else (False if None not in piis else None)
+    levels = [r.sensitivity for r in pool if r.sensitivity in knowledge.sensitivity]
+    level = (
+        max(levels, key=lambda lv: knowledge.sensitivity[lv].rank) if levels else None
+    )
+    categories = sorted({r.category for r in pool if r.category})
+    category = CATEGORY_JOIN.join(categories) if categories else None
+    dpias = [r.dpia for r in pool if r.dpia is not None]
+    dpia = max(dpias, key=lambda d: d.rank) if dpias else None
+    return replace(
+        column,
+        pii=pii,
+        sensitivity=level,
+        category=category,
+        dpia=dpia,
+        source=Source.DERIVED,
+        contents=tuple(r.id.rsplit(".", 1)[1] for r in items),
+        unknown_contents=unknown,
+    )
+
+
+def _dpia(knowledge: Knowledge, level: str | None, category: str | None) -> Dpia | None:
+    if level in knowledge.sensitivity and category in knowledge.categories:
+        return knowledge.dpia_for(level, category)
+    return None
 
 
 def _store_slug(finfo: FieldInfo, model: ModelInfo) -> str | None:
@@ -505,3 +711,61 @@ def _check_vocabulary(
                 path,
             )
         )
+
+
+def parse_content_entry(
+    entry: str, knowledge: Knowledge
+) -> tuple[str, tuple[bool, str, str]]:
+    """``name=yes,personal,contact`` → ``("name", (True, "personal", "contact"))``.
+
+    Raises
+    ------
+    ValueError
+        Malformed entry or vocabulary not in the knowledge.
+    """
+    name, sep, spec = entry.partition("=")
+    parts = [p.strip() for p in spec.split(",")]
+    if not sep or not re.fullmatch(CONTENT_NAME, name) or len(parts) != 3:
+        msg = f"{entry!r}: expected name=pii,sensitivity,category (name: [a-z0-9_]+)"
+        raise ValueError(msg)
+    pii_text, level, category = parts
+    if pii_text.lower() not in ("yes", "no", "true", "false"):
+        msg = f"{entry!r}: pii must be yes/no"
+        raise ValueError(msg)
+    if level not in knowledge.sensitivity:
+        msg = f"{entry!r}: unknown sensitivity {level!r}; levels: " + ", ".join(
+            knowledge.ordered_levels()
+        )
+        raise ValueError(msg)
+    if category not in knowledge.categories:
+        msg = f"{entry!r}: unknown category {category!r}; categories: " + ", ".join(
+            sorted(knowledge.categories)
+        )
+        raise ValueError(msg)
+    return name, (pii_text.lower() in ("yes", "true"), level, category)
+
+
+def write_contents(
+    unit: Unit,
+    local_id: str,
+    contents: dict[str, tuple[bool, str, str]],
+    *,
+    unknown: Unknown,
+    reason: str | None,
+) -> Path | None:
+    """Write a ``contents`` declaration file; ``None`` when it already exists."""
+    path = unit.folder / DATA_DIR / f"{local_id}.yaml"
+    if path.exists():
+        return None
+    lines = ["contents:" if contents else "contents: {}"]
+    for name, (pii, level, category) in contents.items():
+        lines.append(
+            f"  {name}: {{pii: {'true' if pii else 'false'}, "
+            f"sensitivity: {level}, category: {category}}}"
+        )
+    lines.append(f"unknown_contents: {unknown.value}")
+    reason_text = json.dumps(reason, ensure_ascii=False) if reason else todo_text()
+    lines.append(f"reason: {reason_text}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
