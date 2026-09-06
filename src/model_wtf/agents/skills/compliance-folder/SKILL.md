@@ -30,6 +30,10 @@ Element stable ids: `http:POST:/back/api/leads/`, `task:app.tasks.purge`,
 `store:app.Model`, `egress:host:api.stripe.com`, `data_object:<id>`,
 `activity:<id>`, `recipient:<id>`. A checkpoint key is `RULE@stable-id`.
 
+A value a human still has to provide is written as the YAML tag `!open`
+(optionally with a hint: `dpa_reference: !open ask legal`). Never write the
+word "open" as a placeholder string.
+
 Checkpoint statuses: `unknown` (to evaluate), `ok` (with `evidence` and
 `depends_on`), `not_ok` (with a finding), `n_a` (with `reason`),
 `accepted` (human decision on the finding). You never write any of these

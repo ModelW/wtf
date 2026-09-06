@@ -21,12 +21,12 @@ from typing import TYPE_CHECKING, Any
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
-from model_wtf.compliance.blanks import OPEN
 from model_wtf.compliance.discovery import (
     FALLBACK_MANIFEST,
     SNOW_MANIFEST,
     normalise_folder,
 )
+from model_wtf.compliance.yamlio import OPEN_TAG as OPEN
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -37,7 +37,7 @@ SKIP_DIRS = frozenset({".git", "node_modules", ".venv", "venv", "__pycache__", "
 DOCKERFILE_RE = re.compile(r"^Dockerfile(\..+)?$")
 
 CONTROLLER_STUB = f"""\
-# Art. 30(1)(a): who is the controller. Replace every `{OPEN}`.
+# Art. 30(1)(a): who is the controller. Replace every `{OPEN}` tag.
 name: {OPEN}
 contact:
   address: {OPEN}
@@ -87,7 +87,7 @@ The **file name is the id**; there is no `id:` key inside files.
 | `elements/`          | Checkpoint ledgers, one per element                |
 | `findings/`          | Open or accepted findings (`F-NNNN.yaml`)          |
 
-Fill every `open` marker, then run `model-wtf compliance auto`. See the
+Fill every `!open` marker, then run `model-wtf compliance auto`. See the
 model-wtf README ("Declaration files") for field-by-field documentation.
 """
 

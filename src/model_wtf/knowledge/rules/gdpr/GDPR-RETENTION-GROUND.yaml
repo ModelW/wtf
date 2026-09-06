@@ -13,6 +13,6 @@ mitigation: >-
   Add `statutory_basis` ("French Commercial Code Art. L123-22") or shorten
   the `time_limit`.
 condition: >-
-  all(r.statutory_basis or duration_years(r.time_limit) <= 3
+  all(r.statutory_basis or duration_years(r.time_limit or "") <= 3
       for r in data_object.retention)
 references: ["Art. 17(3)(b)", "Art. 5(1)(e)"]

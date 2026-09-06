@@ -16,5 +16,5 @@ condition: >-
   activity.lawful_basis is not None
   and (not items_any(activity, "special_art9")
        or activity.lawful_basis == "consent"
-       or "Art. 9(2)" in activity.purpose)
+       or "Art. 9(2)" in (activity.purpose or ""))
 references: ["Art. 6(1)", "Art. 9(2)", "Art. 13(1)(c)"]

@@ -30,6 +30,7 @@ from model_wtf.auto.run import (
 )
 from model_wtf.auto.stages import parse_answer
 from model_wtf.compliance.check import run_check
+from model_wtf.compliance.yamlio import Open, load_plain
 from model_wtf.knowledge.loader import KnowledgeError
 
 EVAL_TEMPLATE = Path(__file__).parent / "eval" / "template"
@@ -414,24 +415,24 @@ def test_discover_then_classify_drafts_without_touching_humans(
     assert leads_gen["members"] == ["http:POST:/leads/"]
     leads = yaml.safe_load((root / "api/compliance/processing/leads.yaml").read_text())
     assert leads["lawful_basis"] == "legitimate_interest"
-    draft = yaml.safe_load((root / "api/compliance/data/leads.lead.yaml").read_text())
+    draft = load_plain((root / "api/compliance/data/leads.lead.yaml").read_text())
     assert draft["drafted_by"] == "agent"
     assert draft["fields"]["form"]["contents"] == [
         {"name": "iban", "item": "financial"}
     ]
     assert draft["rectification"] == "dpo"
-    assert draft["retention"][0]["time_limit"] == "open"
-    sentry = yaml.safe_load(
-        (root / "api/compliance/recipients/sentry.yaml").read_text()
-    )
-    assert sentry == {
+    raw = (root / "api/compliance/data/leads.lead.yaml").read_text()
+    assert "time_limit: !open" in raw
+    sentry_text = (root / "api/compliance/recipients/sentry.yaml").read_text()
+    assert load_plain(sentry_text) == {
         "drafted_by": "agent",
         "name": "Sentry",
         "kind": "processor",
-        "dpa_reference": "open",
+        "dpa_reference": Open("Art. 28 contract"),
         "third_country": "US",
-        "transfer_safeguards": "open",
+        "transfer_safeguards": Open(),
     }
+    assert "transfer_safeguards: !open\n" in sentry_text
     # Stripe (human, complete) was not re-drafted.
     assert (
         root / "api/compliance/recipients/stripe.yaml"

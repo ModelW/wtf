@@ -12,5 +12,5 @@ mitigation: >-
   Write a purpose of at least a dozen words naming the outcome for the
   subject or the business ("Issue and archive invoices for purchased
   services").
-condition: len(activity.purpose.split()) >= 5
+condition: bool(activity.purpose) and len(activity.purpose.split()) >= 5
 references: ["Art. 5(1)(b)", "Art. 30(1)(b)"]

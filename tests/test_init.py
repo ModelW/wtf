@@ -63,7 +63,7 @@ def test_snow_repo_is_scaffolded(make_repo: MakeRepo) -> None:
     # Several units: the controller is shared at the repo root.
     assert "compliance/controller.yaml" in files
     assert "api/compliance/controller.yaml" not in files
-    assert "open" in (root / "compliance/controller.yaml").read_text()
+    assert "name: !open" in (root / "compliance/controller.yaml").read_text()
     assert report.codeowners_lines == [
         "/api/compliance/ @acme/dpo",
         "/front/compliance/ @acme/dpo",

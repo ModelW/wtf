@@ -39,6 +39,7 @@ from model_wtf.compliance.declarations.schemas import (
     ScalarField,
 )
 from model_wtf.compliance.discovery import load_units, select_manifest
+from model_wtf.compliance.yamlio import filled, filled_list
 from model_wtf.knowledge.loader import load_knowledge
 
 if TYPE_CHECKING:
@@ -50,6 +51,7 @@ TEMPLATES = Path(__file__).resolve().parent / "templates" / "registry"
 
 YES = "yes"
 NO = "no"
+BLANK = "_(to be filled)_"
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +162,7 @@ def build_unit_view(unit_id: str, ds: DeclarationSet, knowledge: Knowledge) -> U
     return UnitView(
         id=unit_id,
         controller=controller,
-        security=security.general_description if security else None,
+        security=filled(security.general_description) if security else None,
         activities=[
             _activity_view(
                 declared.id,
@@ -181,9 +183,9 @@ def build_unit_view(unit_id: str, ds: DeclarationSet, knowledge: Knowledge) -> U
                 id=rid,
                 name=model.name,
                 kind=model.kind.value,
-                dpa_reference=model.dpa_reference,
+                dpa_reference=filled(model.dpa_reference),
                 third_country=model.third_country,
-                transfer_safeguards=model.transfer_safeguards,
+                transfer_safeguards=filled(model.transfer_safeguards),
                 retention=_retention_rows(rid, model.retention),
             )
             for rid, model in sorted(recipients.items())
@@ -193,12 +195,14 @@ def build_unit_view(unit_id: str, ds: DeclarationSet, knowledge: Knowledge) -> U
                 id=oid,
                 name=model.name or oid,
                 description=model.description,
-                subjects=_actor_names(model.subject_categories, ds),
+                subjects=_actor_names(filled_list(model.subject_categories), ds),
                 items=item_labels(_object_items(model), knowledge),
-                identification=model.identification.value
-                if model.identification
-                else "",
-                rectification=model.rectification.value if model.rectification else "",
+                identification=(
+                    ident.value if (ident := filled(model.identification)) else BLANK
+                ),
+                rectification=(
+                    rect.value if (rect := filled(model.rectification)) else BLANK
+                ),
                 multi_subject=model.multi_subject,
             )
             for oid, model in sorted(data_objects.items())
@@ -227,12 +231,13 @@ def _activity_view(
             retention.extend(
                 _retention_rows(f"recipient {rid}", recipients[rid].retention)
             )
+    basis = filled(model.lawful_basis)
     return ActivityView(
         id=activity_id,
-        purpose=model.purpose,
-        lawful_basis=model.lawful_basis.value,
-        dpia_reference=model.dpia_reference,
-        subjects=_actor_names(model.data_subject_categories, ds),
+        purpose=filled(model.purpose) or BLANK,
+        lawful_basis=basis.value if basis else BLANK,
+        dpia_reference=filled(model.dpia_reference),
+        subjects=_actor_names(filled_list(model.data_subject_categories), ds),
         items=item_labels(items, knowledge),
         recipients=[
             _recipient_label(rid, recipients.get(rid))
@@ -240,7 +245,7 @@ def _activity_view(
         ],
         data_objects=linked_ids,
         retention=retention,
-        rights=[rights_row(oid, model.lawful_basis, obj) for oid, obj in linked],
+        rights=[rights_row(oid, basis, obj) for oid, obj in linked] if basis else [],
     )
 
 
@@ -302,8 +307,8 @@ def _retention_rows(source: str, retention: Iterable[Retention]) -> list[Retenti
     return [
         RetentionRow(
             source=source,
-            time_limit=r.time_limit,
-            trigger=r.trigger,
+            time_limit=filled(r.time_limit) or BLANK,
+            trigger=filled(r.trigger) or BLANK,
             expiry_action=r.expiry_action.value,
             statutory_basis=r.statutory_basis,
         )
@@ -317,7 +322,7 @@ def rights_row(object_id: str, basis: LawfulBasis, obj: DataObject) -> RightsRow
     ``identification: none`` means no rights machinery at all (Art. 11(2));
     the object must instead carry tight retention, which the gates check.
     """
-    if obj.identification is Identification.NONE:
+    if filled(obj.identification) is Identification.NONE:
         none = "n/a (Art. 11(2))"
         return RightsRow(object_id, none, none, none, none, none, none, none)
     return RightsRow(

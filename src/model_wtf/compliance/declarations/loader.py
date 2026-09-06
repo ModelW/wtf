@@ -39,8 +39,10 @@ from model_wtf.compliance.declarations.schemas import (
     ScalarField,
     Security,
 )
-from model_wtf.compliance.declarations.yaml_lines import LineDict, line_of, load_yaml
+from model_wtf.compliance.declarations.yaml_lines import LineDict, line_of
 from model_wtf.compliance.report import Diagnostic, Severity
+from model_wtf.compliance.yamlio import filled_list
+from model_wtf.compliance.yamlio import load as load_yaml
 from model_wtf.knowledge.loader import load_knowledge
 
 if TYPE_CHECKING:
@@ -358,7 +360,7 @@ def _check_activities(ds: DeclarationSet, scope_id: str) -> Iterator[Diagnostic]
         yield from _unresolved(
             ds,
             Kind.ACTOR,
-            model.data_subject_categories,
+            filled_list(model.data_subject_categories),
             activity,
             "data_subject_categories",
             scope_id,
@@ -386,7 +388,7 @@ def _check_data_objects(ds: DeclarationSet, scope_id: str) -> Iterator[Diagnosti
         yield from _unresolved(
             ds,
             Kind.ACTOR,
-            model.subject_categories,
+            filled_list(model.subject_categories),
             data_object,
             "subject_categories",
             scope_id,

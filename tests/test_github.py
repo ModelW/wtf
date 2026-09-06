@@ -165,15 +165,15 @@ def test_blank_detection_lines(make_repo: MakeRepo) -> None:
         files={
             **valid_tree(),
             "api/compliance/controller.yaml": (
-                "name: open\ncontact:\n  address: 1 rue\n  email: open\n"
+                "name: !open\ncontact:\n  address: 1 rue\n  email: !open ask legal\n"
             ),
         },
     )
     report = run_check(root, strict=False)
     blanks = [(d.message, d.line) for d in report.diagnostics if d.code == "blank"]
     assert blanks == [
-        ("controller.yaml: name is still 'open'", 1),
-        ("controller.yaml: contact.email is still 'open'", 4),
+        ("controller.yaml: name is still !open", 1),
+        ("controller.yaml: contact.email is still !open (ask legal)", 4),
     ]
 
 

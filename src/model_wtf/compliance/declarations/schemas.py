@@ -18,10 +18,20 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from model_wtf.compliance.yamlio import Open
+
 
 def ref(article: str) -> dict[str, Any]:
     """Build the ``json_schema_extra`` carrying a legal reference."""
     return {"x-reference": article}
+
+
+type Blank[T] = T | Open
+"""A required human field that may still hold the ``!open`` marker.
+
+``init`` and the agent's drafts leave these as ``!open``; the tree stays
+schema-valid, ``check`` warns on every blank, gates see them as absent.
+"""
 
 
 class Strict(BaseModel):
@@ -32,7 +42,9 @@ class Strict(BaseModel):
     extras. Generated files are the exception (see :class:`Generated`).
     """
 
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    model_config = ConfigDict(
+        extra="forbid", populate_by_name=True, arbitrary_types_allowed=True
+    )
 
 
 class Generated(BaseModel):
@@ -59,8 +71,10 @@ class Generated(BaseModel):
 class Contact(Strict):
     """Postal + electronic contact details of a legal person."""
 
-    address: str = Field(title="Postal address", description="Full postal address.")
-    email: str = Field(title="Email", description="Contact email address.")
+    address: Blank[str] = Field(
+        title="Postal address", description="Full postal address."
+    )
+    email: Blank[str] = Field(title="Email", description="Contact email address.")
     phone: str | None = Field(
         default=None, title="Phone", description="Contact phone number."
     )
@@ -69,7 +83,7 @@ class Contact(Strict):
 class ContactBlock(Strict):
     """A named party with contact details (DPO, representative, ...)."""
 
-    name: str = Field(title="Name", description="Legal or personal name.")
+    name: Blank[str] = Field(title="Name", description="Legal or personal name.")
     contact: Contact = Field(title="Contact", description="How to reach them.")
 
 
@@ -83,12 +97,12 @@ class ExpiryAction(StrEnum):
 class Retention(Strict):
     """One erasure time limit attached to a data object or recipient."""
 
-    time_limit: str = Field(
+    time_limit: Blank[str] = Field(
         title="Time limit",
         description=("ISO-8601 duration (P10Y) or the criteria used to determine it."),
         json_schema_extra=ref("Art. 30(1)(f)"),
     )
-    trigger: str = Field(
+    trigger: Blank[str] = Field(
         title="Trigger",
         description="The event that starts the retention clock.",
     )
@@ -125,7 +139,7 @@ class Evaluated(Strict):
 class Controller(Strict):
     """Identity of the controller and its mandatory contacts."""
 
-    name: str = Field(
+    name: Blank[str] = Field(
         title="Controller",
         description="Legal name of the controller.",
         json_schema_extra=ref("Art. 30(1)(a)"),
@@ -158,7 +172,7 @@ class Controller(Strict):
 class Security(Strict):
     """General description of technical and organisational measures."""
 
-    general_description: str = Field(
+    general_description: Blank[str] = Field(
         title="Security measures",
         description="Free-text general description of the TOMs in place.",
         json_schema_extra=ref("Art. 30(1)(g)"),
@@ -240,7 +254,7 @@ class Recipient(Strict):
         description="Processor, independent third party, or internal team.",
         json_schema_extra=ref("Art. 30(1)(d)"),
     )
-    dpa_reference: str | None = Field(
+    dpa_reference: Blank[str] | None = Field(
         default=None,
         title="DPA reference",
         description="Where the data processing agreement lives.",
@@ -252,7 +266,7 @@ class Recipient(Strict):
         description="ISO code of the non-EU country the data is sent to.",
         json_schema_extra=ref("Art. 30(1)(e)"),
     )
-    transfer_safeguards: str | None = Field(
+    transfer_safeguards: Blank[str] | None = Field(
         default=None,
         title="Transfer safeguards",
         description="Adequacy decision, SCCs, DPF certification...",
@@ -310,17 +324,17 @@ class Activity(Strict):
         title="Drafted by",
         description="Set when the agent wrote the first version.",
     )
-    purpose: str = Field(
+    purpose: Blank[str] = Field(
         title="Purpose",
         description="Why the data is processed, in plain language.",
         json_schema_extra=ref("Art. 30(1)(b)"),
     )
-    lawful_basis: LawfulBasis = Field(
+    lawful_basis: Blank[LawfulBasis] = Field(
         title="Lawful basis",
         description="The Art. 6(1) ground the processing relies on.",
         json_schema_extra=ref("Art. 6(1)"),
     )
-    data_subject_categories: list[str] = Field(
+    data_subject_categories: Blank[list[str]] = Field(
         title="Data subject categories",
         description="Ids of actors whose data is processed.",
         json_schema_extra=ref("Art. 30(1)(c)"),
@@ -331,7 +345,7 @@ class Activity(Strict):
         description="Ids of recipients the data is disclosed to.",
         json_schema_extra=ref("Art. 30(1)(d)"),
     )
-    dpia_reference: str | None = Field(
+    dpia_reference: Blank[str] | None = Field(
         default=None,
         title="DPIA reference",
         description="Where the impact assessment lives, when Art. 35 applies.",
@@ -445,19 +459,19 @@ class DataObject(Strict):
         description="Per source field: the data items it holds.",
         json_schema_extra=ref("Art. 30(1)(c)"),
     )
-    subject_categories: list[str] = Field(
+    subject_categories: Blank[list[str]] = Field(
         default_factory=list,
         title="Subject categories",
         description="Ids of actors the object describes.",
         json_schema_extra=ref("Art. 30(1)(c)"),
     )
-    identification: Identification | None = Field(
+    identification: Blank[Identification] | None = Field(
         default=None,
         title="Identification",
         description="Identified, pseudonymous, or not linkable to a person.",
         json_schema_extra=ref("Art. 11"),
     )
-    rectification: Rectification | None = Field(
+    rectification: Blank[Rectification] | None = Field(
         default=None,
         title="Rectification",
         description="Self-service in the product or via the DPO.",

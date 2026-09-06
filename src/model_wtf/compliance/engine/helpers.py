@@ -38,6 +38,8 @@ def duration_years(value: str) -> float:
     limits; they return ``0`` so that gates about *long* retention do not
     fire on them -- a wrong value there is the agent's job to spot.
     """
+    if not isinstance(value, str):
+        return 0.0
     match = _DURATION.match(value.strip())
     if not match or not any(match.groupdict().values()):
         return 0.0

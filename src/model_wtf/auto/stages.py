@@ -29,7 +29,7 @@ from model_wtf.agents.schemas import (
     DiscoverOutput,
     EvaluateOutput,
 )
-from model_wtf.compliance.blanks import OPEN, find_blanks
+from model_wtf.compliance.blanks import find_blanks
 from model_wtf.compliance.declarations.loader import Kind
 from model_wtf.compliance.declarations.schemas import CheckpointStatus, Evaluated
 from model_wtf.compliance.engine import evaluate_unit
@@ -42,6 +42,8 @@ from model_wtf.compliance.ledger import (
     sync_checkpoint_set,
 )
 from model_wtf.compliance.whitelist import Decision, check_write
+from model_wtf.compliance.yamlio import OPEN_TAG, Open
+from model_wtf.compliance.yamlio import dump as yaml_dump
 from model_wtf.extractors.clustering import write_clusters
 from model_wtf.extractors.django import (
     is_django_unit,
@@ -361,7 +363,7 @@ def _classify_item(
         f"Actor ids you may reference: {', '.join(actors) or '(none declared yet)'}\n"
         f"Recipient ids you may reference: {', '.join(recipients) or '(none)'}\n"
         + (
-            f"\nCurrent draft (fill its `{OPEN}` blanks):\n```yaml\n{existing}```\n"
+            f"\nCurrent draft (fill its `{OPEN_TAG}` blanks):\n```yaml\n{existing}```\n"
             if existing
             else ""
         )
@@ -439,7 +441,7 @@ def _write_draft(ctx: UnitContext, state: Path, answer: AgentOutput) -> list[Pat
         return []
     draft = _draft_dict(answer)
     _validate_draft(ctx, state, draft)
-    text = yaml.safe_dump(draft, sort_keys=False, allow_unicode=True)
+    text = yaml_dump(draft)
     state.write_text(
         "# Drafted by the model-wtf agent. Review every line; you own this file.\n"
         + text,
@@ -476,7 +478,7 @@ def _draft_dict(answer: AgentOutput) -> dict[str, Any]:
             "name": answer.name,
             "description": answer.description,
             "fields": fields,
-            "subject_categories": answer.subject_categories or [OPEN],
+            "subject_categories": answer.subject_categories or Open("actor ids"),
             "identification": (
                 answer.identification.value if answer.identification else "identified"
             ),
@@ -485,7 +487,7 @@ def _draft_dict(answer: AgentOutput) -> dict[str, Any]:
             "rectification": "dpo",
             **({"multi_subject": True} if answer.multi_subject else {}),
             "retention": [
-                {"time_limit": OPEN, "trigger": OPEN, "expiry_action": "delete"}
+                {"time_limit": Open(), "trigger": Open(), "expiry_action": "delete"}
             ],
         }
     if isinstance(answer, ClassifyRecipientOutput):
@@ -493,9 +495,13 @@ def _draft_dict(answer: AgentOutput) -> dict[str, Any]:
             "drafted_by": "agent",
             "name": answer.name,
             "kind": answer.kind.value,
-            **({"dpa_reference": OPEN} if answer.kind.value == "processor" else {}),
             **(
-                {"third_country": answer.third_country, "transfer_safeguards": OPEN}
+                {"dpa_reference": Open("Art. 28 contract")}
+                if answer.kind.value == "processor"
+                else {}
+            ),
+            **(
+                {"third_country": answer.third_country, "transfer_safeguards": Open()}
                 if answer.third_country
                 else {}
             ),
@@ -507,7 +513,11 @@ def _draft_dict(answer: AgentOutput) -> dict[str, Any]:
             "lawful_basis": answer.lawful_basis.value,
             "data_subject_categories": answer.data_subject_categories,
             "recipients": answer.recipients,
-            **({"dpia_reference": OPEN} if answer.dpia_needed else {}),
+            **(
+                {"dpia_reference": Open(answer.dpia_reason or "DPIA needed")}
+                if answer.dpia_needed
+                else {}
+            ),
         }
     return answer.model_dump()
 

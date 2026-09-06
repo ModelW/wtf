@@ -12,7 +12,7 @@ uv run model-wtf compliance init [--unit ID]... [--codeowners-team @org/team] [-
 ```
 
 Creates a `compliance/` folder next to each image's Dockerfile (structure +
-`security.yaml`/`controller.yaml` stubs with `open` markers, default actors, a
+`security.yaml`/`controller.yaml` stubs with `!open` markers, default actors, a
 README), adds `compliance: compliance` to each `snow.yml` image (comments and
 ordering preserved), and appends `/<context>/compliance/ @<org>/dpo` to
 CODEOWNERS. Without `snow.yml`, units are detected from Dockerfiles into
@@ -49,9 +49,9 @@ committed, never reused). The lifecycle is deterministic
 
 `check` judges the files: any `unknown` or unaccepted `not_ok` exits 1,
 annotated at the finding's `provenance` under `--format github`
-(`::error ... title=F-NNNN RULE::`). Fields still holding the `open` placeholder
-from `init` are `::warning ... title=blank::`. When `$GITHUB_STEP_SUMMARY` is
-set, a Markdown summary grouped by element is appended to it.
+(`::error ... title=F-NNNN RULE::`). Fields still holding the `!open` tag from
+`init` are `::warning ... title=blank::`. When `$GITHUB_STEP_SUMMARY` is set, a
+Markdown summary grouped by element is appended to it.
 
 ```
 uv run model-wtf compliance gh-sync-comments [--pr N] [--repo owner/name] [--stage-report stage.json] [--budget-used $X]

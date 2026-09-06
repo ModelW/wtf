@@ -1,6 +1,6 @@
-"""Human blanks: declaration fields still holding the ``open`` placeholder.
+"""Human blanks: declaration fields still tagged ``!open``.
 
-``init`` scaffolds ``controller.yaml`` and ``security.yaml`` with ``open``
+``init`` and the agent's drafts leave ``!open`` where a human must decide
 so the tree validates from day one; those markers must not survive to
 production. ``check`` reports each one (a warning: the schema is valid, a
 human just has not finished) at its line, and the GitHub renderer turns
@@ -13,15 +13,13 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from model_wtf.compliance.declarations.yaml_lines import LineDict, LineList, load_yaml
+from model_wtf.compliance.declarations.yaml_lines import LineDict, LineList
 from model_wtf.compliance.report import Diagnostic, Severity
+from model_wtf.compliance.yamlio import OPEN_TAG, Open, load
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
-
-OPEN = "open"
-"""The placeholder ``init`` writes into required human fields."""
 
 SCANNED = ("controller.yaml", "security.yaml")
 SCANNED_DIRS = ("actors", "assumptions", "recipients", "processing", "data")
@@ -42,15 +40,16 @@ def find_blanks(folder: Path, scope_id: str) -> list[Diagnostic]:
     out: list[Diagnostic] = []
     for path in paths:
         try:
-            data = load_yaml(path.read_text(encoding="utf-8"))
+            data = load(path.read_text(encoding="utf-8"))
         except (OSError, yaml.YAMLError):
             continue  # the loader already reported it
-        for key, line in _open_scalars(data, ()):
+        for key, line, hint in _open_scalars(data, ()):
             out.append(
                 Diagnostic(
                     Severity.WARNING,
                     "blank",
-                    f"{path.name}: {key} is still '{OPEN}'",
+                    f"{path.name}: {key} is still {OPEN_TAG}"
+                    + (f" ({hint})" if hint else ""),
                     scope_id,
                     path,
                     line,
@@ -63,7 +62,7 @@ def _open_scalars(
     node: Any,
     trail: tuple[str, ...],
     line: int | None = None,
-) -> Iterator[tuple[str, int | None]]:
+) -> Iterator[tuple[str, int | None, str | None]]:
     if isinstance(node, LineDict):
         for key, value in node.items():
             yield from _open_scalars(
@@ -73,5 +72,5 @@ def _open_scalars(
         for index, value in enumerate(node):
             item_line = node.item_lines[index] if index < len(node.item_lines) else line
             yield from _open_scalars(value, (*trail, str(index)), item_line)
-    elif isinstance(node, str) and node.strip() == OPEN:
-        yield ".".join(trail), line
+    elif isinstance(node, Open):
+        yield ".".join(trail), line, node.hint
