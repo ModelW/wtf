@@ -1,6 +1,6 @@
 """Pydantic schemas of the human-written compliance files.
 
-Every field a human must provide is typed ``T | Todo`` so that a file can
+Every field a human must provide is typed ``T | Marker`` so that a file can
 be committed half-filled and ``check`` can tell "not done" from "wrong".
 Optional fields are plain ``T | None`` and must be omitted, not left open:
 an ``!todo`` there would be noise nobody is required to resolve.
@@ -14,7 +14,7 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from model_wtf.compliance.yaml_io import (
-    Todo,  # noqa: TC001 - used at runtime by pydantic
+    Marker,  # noqa: TC001 - used at runtime by pydantic
 )
 
 ID_PATTERN = r"^[a-z0-9][a-z0-9-]*$"
@@ -34,8 +34,8 @@ class StrictModel(BaseModel):
 class Contact(StrictModel):
     """A named person or office reachable by email (DPO, representative)."""
 
-    name: NonEmpty | Todo
-    email: NonEmpty | Todo
+    name: NonEmpty | Marker = Field(description="Who to name as the contact")
+    email: NonEmpty | Marker = Field(description="Address the contact answers at")
     phone: NonEmpty | None = None
 
 
@@ -47,12 +47,15 @@ class Party(StrictModel):
     are declared where the processing is.
     """
 
-    name: NonEmpty | Todo
-    country: CountryCode | Todo = Field(
-        description="ISO 3166-1 alpha-2, drives third-country transfer logic"
+    name: NonEmpty | Marker = Field(description="Legal name of the organisation")
+    country: CountryCode | Marker = Field(
+        description="Country of establishment (ISO 3166-1 alpha-2); drives the "
+        "third-country transfer logic"
     )
-    address: NonEmpty | Todo
-    email: NonEmpty | Todo
+    address: NonEmpty | Marker = Field(description="Postal address of the seat")
+    email: NonEmpty | Marker = Field(
+        description="Email for privacy matters (the one to put in a notice)"
+    )
     phone: NonEmpty | None = None
     website: NonEmpty | None = None
     registration: NonEmpty | None = Field(
@@ -74,12 +77,12 @@ class App(StrictModel):
     when the controller runs the product itself.
     """
 
-    name: NonEmpty | Todo
-    description: NonEmpty | Todo = Field(
+    name: NonEmpty | Marker = Field(description="Name of the product")
+    description: NonEmpty | Marker = Field(
         description="What the product does, for whom, in a few sentences"
     )
-    controller: Slug | Todo = Field(description="Party id of the controller")
-    processor: Slug | Todo | None = Field(
+    controller: Slug | Marker = Field(description="Party id of the controller")
+    processor: Slug | Marker | None = Field(
         default=None, description="Party id of the processor, if any"
     )
 

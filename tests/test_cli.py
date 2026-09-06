@@ -61,7 +61,14 @@ def test_json_output_is_valid_and_matches_exit_code(
 
     assert result.exit_code == expected_exit
     data = json.loads(result.stdout)
-    assert set(data) == {"root", "manifest", "scopes", "diagnostics", "exit_code"}
+    assert set(data) == {
+        "root",
+        "manifest",
+        "scopes",
+        "diagnostics",
+        "sections",
+        "exit_code",
+    }
     assert data["exit_code"] == expected_exit
     assert data["manifest"] == "snow.yml"
 
@@ -74,7 +81,9 @@ def test_json_output_is_valid_and_matches_exit_code(
 @pytest.mark.parametrize(
     ("extra", "severity", "expected_exit"),
     [
-        pytest.param((), "warning", 0, id="lenient"),
+        # Outside --strict an image without a compliance block is advisory:
+        # a notice, since there is nothing to do from a compliance standpoint.
+        pytest.param((), "notice", 0, id="lenient"),
         pytest.param(("--strict",), "error", 3, id="strict"),
     ],
 )
@@ -120,11 +129,103 @@ def test_strict_turns_exit_zero_into_three(
     strict = invoke("--root", str(root), "--strict")
 
     assert lenient.exit_code == 0
-    assert "warning" in lenient.output
+    assert "Info" in lenient.output
     assert strict.exit_code == 3
-    assert "error" in strict.output
+    assert "Errors" in strict.output
     for result in (lenient, strict):
         assert fragment in result.output
+
+
+# ---------------------------------------------------------------------------
+# The to-do list: sections, folding, --allow-todo, --todo, --verbose
+# ---------------------------------------------------------------------------
+
+
+def _with_open_questions() -> dict[str, str]:
+    files = dict(FILES_ALL_OK)
+    files["compliance/app.yaml"] = files["compliance/app.yaml"].replace(
+        "description: Back-office for the Kerfufoo client portal.",
+        "description: !todo",
+    )
+    files["compliance/parties/acme.yaml"] = (
+        'name: ACME Corp\ncountry: FR\naddress: !todo "ask legal"\nemail: !todo\n'
+    )
+    return files
+
+
+def test_todos_fold_per_file_and_allow_todo_waves_them(
+    make_repo: MakeRepo, invoke: Invoke
+) -> None:
+    root = make_repo(snow=SNOW_TWO_UNITS, files=_with_open_questions())
+
+    result = invoke("--root", str(root))
+    waved = invoke("--root", str(root), "--allow-todo")
+
+    assert result.exit_code == 1
+    assert "Todo" in result.output
+    assert "compliance/app.yaml: description" in result.output
+    # One line per file, notes kept.
+    assert 'compliance/parties/acme.yaml: address "ask legal", email' in result.output
+    assert "3 todo" in result.output
+    assert waved.exit_code == 0
+    assert "compliance/app.yaml: description" in waved.output  # still listed
+
+
+def test_missing_always_fails(make_repo: MakeRepo, invoke: Invoke) -> None:
+    files = dict(FILES_ALL_OK)
+    files["compliance/parties/acme.yaml"] = (
+        "name: ACME Corp\ncountry: FR\naddress: 1 rue\n"
+        'email: !missing "no privacy contact exists"\n'
+    )
+    root = make_repo(snow=SNOW_TWO_UNITS, files=files)
+
+    result = invoke("--root", str(root), "--allow-todo")
+    github = invoke("--root", str(root), "--format", "github")
+
+    assert result.exit_code == 1
+    assert "Missing" in result.output
+    assert 'acme.yaml: email "no privacy contact exists"' in result.output
+    assert "1 missing" in result.output
+    assert any(
+        line.startswith("::error file=compliance/parties/acme.yaml,title=missing::")
+        for line in github.stdout.splitlines()
+    )
+
+
+def test_todo_flag_prints_the_questionnaire(
+    make_repo: MakeRepo, invoke: Invoke
+) -> None:
+    root = make_repo(snow=SNOW_TWO_UNITS, files=_with_open_questions())
+
+    result = invoke("--root", str(root), "--todo")
+
+    lines = result.output.splitlines()
+    assert lines[0].startswith("compliance/app.yaml description: What the product does")
+    assert "compliance/parties/acme.yaml address" in result.output
+    assert "Compliance scopes" not in result.output
+
+
+def test_todo_flag_on_a_clean_repo(make_repo: MakeRepo, invoke: Invoke) -> None:
+    root = make_repo(snow=SNOW_TWO_UNITS, files=FILES_ALL_OK)
+
+    result = invoke("--root", str(root), "--todo")
+
+    assert result.output.strip() == "No open question."
+
+
+def test_json_groups_by_section(make_repo: MakeRepo, invoke: Invoke) -> None:
+    root = make_repo(snow=SNOW_TWO_UNITS, files=_with_open_questions())
+
+    data = json.loads(invoke("--root", str(root), "--format", "json").stdout)
+
+    assert set(data["sections"]) == {"errors", "missing", "todo", "review", "info"}
+    assert [d["subject"] for d in data["sections"]["todo"]] == [
+        "app.yaml#description",
+        "acme.yaml#address",
+        "acme.yaml#email",
+    ]
+    assert data["sections"]["todo"][1]["note"] == "ask legal"
+    assert data["sections"]["errors"] == []
 
 
 # ---------------------------------------------------------------------------

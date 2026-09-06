@@ -39,7 +39,7 @@ from model_wtf.compliance.knowledge import Knowledge, KnowledgeError, load_knowl
 from model_wtf.compliance.mcp_server import serve
 from model_wtf.compliance.options import ROOT_OPTION, resolve_root
 from model_wtf.compliance.report import DeclarationError, Severity, Unit
-from model_wtf.compliance.review import Lock, Reviewed
+from model_wtf.compliance.review import Lock, Reviewed, ReviewStatus
 from model_wtf.compliance.yaml_io import TODO_TAG, todo_text
 from model_wtf.introspect.runner import IntrospectionFailed
 
@@ -80,6 +80,11 @@ def collect_all(
 @click.option("--unit", "only", default=None, help="Restrict to one unit.")
 @click.option("--pending", is_flag=True, help="Only items still to review.")
 @click.option(
+    "--assumed",
+    is_flag=True,
+    help="Only library defaults resting on an assumption (implies --pending).",
+)
+@click.option(
     "--format",
     "output_format",
     type=click.Choice(["table", "json"]),
@@ -94,6 +99,7 @@ def list_cmd(
     *,
     only: str | None,
     pending: bool,
+    assumed: bool,
     output_format: str,
     python: str | None,
     root: Path | None,
@@ -108,7 +114,9 @@ def list_cmd(
         ctx.exit(int(ExitCode.TOOL_ERROR))
 
     reviewed = annotate_all(collected)
-    if pending:
+    if assumed:
+        reviewed = [r for r in reviewed if r.status is ReviewStatus.PENDING_ASSUMED]
+    elif pending:
         reviewed = [r for r in reviewed if r.status.pending]
     if output_format == "json":
         click.echo(json.dumps([r.to_dict() for r in reviewed], indent=2))
@@ -121,7 +129,7 @@ def list_cmd(
             )
         )
     elif not reviewed:
-        what = "nothing pending" if pending else "no data item found"
+        what = "nothing pending" if pending or assumed else "no data item found"
         console.print(Text(f"{what} in unit(s) {', '.join(u.id for u in units)}"))
     else:
         console.print(render_rows(reviewed))

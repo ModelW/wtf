@@ -1,18 +1,26 @@
-"""YAML loading with the ``!todo`` marker for values a human still owes.
+"""YAML loading with the ``!todo`` and ``!missing`` markers.
 
-Compliance files are written by humans over time. A value that nobody has
-filled yet is not "missing" (that would be a schema error) and not an
-empty string (that would silently pass): it is a *todo*, spelled ``!todo``
-in YAML. The loader turns that tag into the :data:`TODO` sentinel, the
-schemas accept it wherever a human value is expected, and ``check``
-reports each occurrence as a todo so the exit code says "not done yet"
-rather than "broken".
+Compliance files are written by humans and agents over time. A value that
+nobody has filled yet is not "absent" (that would be a schema error) and
+not an empty string (that would silently pass): it is a *marker*, and the
+two markers say different things:
+
+* ``!todo`` — the analysis has not been conducted; someone still has to
+  look. Ignorable in a gate (``check --allow-todo``).
+* ``!missing`` — the analysis *was* conducted and the code or process is
+  not there. This is an established non-compliance and always fails the
+  gate.
+
+Both accept an optional note (``retention: !missing "no purge task, see
+FAH-210"``). The loader turns the tags into :class:`Todo` / :class:`Missing`
+instances, the schemas accept a :class:`Marker` wherever a human value is
+expected, and ``check`` lists each occurrence in the matching section.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import yaml
 from pydantic import BaseModel, GetCoreSchemaHandler
@@ -22,61 +30,97 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 TODO_TAG = "!todo"
+MISSING_TAG = "!missing"
 
 
-class Todo:
-    """Singleton marking a value a human still has to provide.
+class Marker:
+    """A value deliberately left open, with an optional note.
 
-    Pydantic validates it by identity, so ``str | Todo`` in a schema means
-    "a string, or explicitly left open" and nothing else.
+    Pydantic validates it by instance check, so ``str | Marker`` in a
+    schema means "a string, or explicitly left open" and nothing else.
+    Subclasses set :attr:`tag`; instances compare by class and note so a
+    bare ``!todo`` is equal to any other bare ``!todo``.
     """
 
-    _instance: Todo | None = None
+    tag: ClassVar[str] = ""
+    __slots__ = ("note",)
 
-    def __new__(cls) -> Self:
-        """Always return the same instance."""
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance  # type: ignore[return-value]
+    def __init__(self, note: str | None = None) -> None:
+        self.note = note or None
 
     def __repr__(self) -> str:
-        return TODO_TAG
+        return self.tag if self.note is None else f'{self.tag} "{self.note}"'
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, Marker)
+            and type(other) is type(self)
+            and other.note == self.note
+        )
+
+    def __hash__(self) -> int:
+        return hash((type(self), self.note))
 
     @classmethod
     def __get_pydantic_core_schema__(
         cls, _source: Any, _handler: GetCoreSchemaHandler
     ) -> core_schema.CoreSchema:
-        """Accept only the sentinel instance."""
+        """Accept any instance of the annotated marker class."""
         return core_schema.is_instance_schema(cls)
 
 
+class Todo(Marker):
+    """The analysis is still owed: nobody looked yet."""
+
+    tag = TODO_TAG
+    __slots__ = ()
+
+
+class Missing(Marker):
+    """The analysis was done and what compliance requires is not there."""
+
+    tag = MISSING_TAG
+    __slots__ = ()
+
+
 TODO = Todo()
+"""The bare ``!todo`` (no note); handy for scaffolds and tests."""
+
+MISSING = Missing()
+"""The bare ``!missing``."""
 
 
 class _Loader(yaml.SafeLoader):
-    """SafeLoader that understands ``!todo``."""
+    """SafeLoader that understands ``!todo`` and ``!missing``."""
 
 
-def _construct_todo(_loader: yaml.Loader, _node: yaml.Node) -> Todo:
-    return TODO
+def _construct_marker(cls: type[Marker]) -> Any:
+    def construct(loader: yaml.Loader, node: yaml.Node) -> Marker:
+        if not isinstance(node, yaml.ScalarNode):
+            msg = f"{cls.tag} takes at most a note, not a collection"
+            raise yaml.constructor.ConstructorError(None, None, msg, node.start_mark)
+        return cls(str(loader.construct_scalar(node)))
+
+    return construct
 
 
-_Loader.add_constructor(TODO_TAG, _construct_todo)
+_Loader.add_constructor(TODO_TAG, _construct_marker(Todo))
+_Loader.add_constructor(MISSING_TAG, _construct_marker(Missing))
 
 
 class _Dumper(yaml.SafeDumper):
-    """SafeDumper that writes the sentinel back as ``!todo``."""
+    """SafeDumper that writes markers back as their tag (+ note)."""
 
 
-def _represent_todo(dumper: yaml.SafeDumper, _data: Todo) -> yaml.Node:
-    return dumper.represent_scalar(TODO_TAG, "")
+def _represent_marker(dumper: yaml.SafeDumper, data: Marker) -> yaml.Node:
+    return dumper.represent_scalar(data.tag, data.note or "")
 
 
-_Dumper.add_representer(Todo, _represent_todo)
+_Dumper.add_multi_representer(Marker, _represent_marker)
 
 
 def load_yaml(path: Path) -> Any:
-    """Parse ``path`` with ``!todo`` support; ``None`` for an empty file."""
+    """Parse ``path`` with marker support; ``None`` for an empty file."""
     return yaml.load(path.read_text(encoding="utf-8"), Loader=_Loader)  # noqa: S506 - SafeLoader subclass
 
 
@@ -97,7 +141,14 @@ def todo_text() -> str:
 
 
 def iter_todo_paths(model: BaseModel, prefix: str = "") -> Iterator[str]:
-    """Yield the dotted path of every :data:`TODO` inside a validated model.
+    """Yield the dotted path of every :class:`Todo` inside a validated model."""
+    for path, marker in iter_markers(model, prefix):
+        if isinstance(marker, Todo):
+            yield path
+
+
+def iter_markers(model: BaseModel, prefix: str = "") -> Iterator[tuple[str, Marker]]:
+    """Yield ``(dotted path, marker)`` for every marker inside a validated model.
 
     Walks nested models and lists; ``prefix`` is used for recursion.
     """
@@ -107,22 +158,52 @@ def iter_todo_paths(model: BaseModel, prefix: str = "") -> Iterator[str]:
         yield from _walk(value, path)
 
 
-def _walk(value: Any, path: str) -> Iterator[str]:
-    if isinstance(value, Todo):
-        yield path
+def field_description(model: BaseModel, dotted: str) -> str | None:
+    """The schema ``description`` of the field at ``dotted``, if any.
+
+    ``dotted`` is a path as yielded by :func:`iter_markers`
+    (``dpo.email``, ``many[1].x``); list indices are skipped since the
+    description lives on the field, not the element.
+    """
+    current: Any = model
+    parts = dotted.split(".")
+    for depth, part in enumerate(parts):
+        if not isinstance(current, BaseModel):
+            return None
+        name, _, index = part.partition("[")
+        info = type(current).model_fields.get(name)
+        if info is None:
+            return None
+        if depth == len(parts) - 1:
+            return info.description
+        current = getattr(current, name)
+        if index:
+            current = current[int(index.rstrip("]"))]
+    return None
+
+
+def _walk(value: Any, path: str) -> Iterator[tuple[str, Marker]]:
+    if isinstance(value, Marker):
+        yield path, value
     elif isinstance(value, BaseModel):
-        yield from iter_todo_paths(value, f"{path}.")
+        yield from iter_markers(value, f"{path}.")
     elif isinstance(value, list):
         for index, item in enumerate(value):
             yield from _walk(item, f"{path}[{index}]")
 
 
 __all__ = [
+    "MISSING",
+    "MISSING_TAG",
     "TODO",
     "TODO_TAG",
+    "Marker",
+    "Missing",
     "Path",
     "Todo",
     "dump_yaml",
+    "field_description",
+    "iter_markers",
     "iter_todo_paths",
     "load_yaml",
     "todo_text",

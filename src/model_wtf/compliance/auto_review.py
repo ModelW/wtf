@@ -71,9 +71,12 @@ __all__ = [
     "sandbox",
 ]
 
-REVIEWER_STEPS = 20
-TP_REVIEWER_STEPS = 30
-GROUPER_STEPS = 60
+# Step caps are a safety net against a looping agent, not a budget: a run
+# costs about a dollar, an agent that stops mid-review with "maximum steps
+# reached" costs a human an hour. Generous by design.
+REVIEWER_STEPS = 80
+TP_REVIEWER_STEPS = 120
+GROUPER_STEPS = 200
 NO_PROGRESS_LIMIT = 2
 ROUND_TIMEOUT = 1800
 
@@ -331,6 +334,29 @@ DATA_TARGET = Target("data")
 TOUCHPOINTS_TARGET = Target("touchpoints")
 
 
+def shard(remaining: list[str], *, batch: int, workers: int) -> list[list[str]]:
+    """Split the pending list so every worker has something to do.
+
+    ``batch`` is the *most* one worker takes in a round; the round covers
+    ``batch * workers`` items at best. With fewer items than that, the list
+    is spread evenly across the workers instead of filling the first shards
+    to ``batch`` and leaving the rest idle (29 pending with 16 workers is 16
+    sessions of 1 or 2 models, not 4 sessions of 8).
+    """
+    take = remaining[: batch * workers]
+    if not take:
+        return []
+    count = min(workers, len(take))
+    size, extra = divmod(len(take), count)
+    out: list[list[str]] = []
+    start = 0
+    for i in range(count):
+        end = start + size + (1 if i < extra else 0)
+        out.append(take[start:end])
+        start = end
+    return out
+
+
 def round_prompt(base: str | None) -> str:
     """The message sent to the dispatcher each round."""
     if base:
@@ -366,10 +392,7 @@ def _run_round(
             timeout=ROUND_TIMEOUT,
             on_event=reporter.on_event,
         )
-    shards = [
-        remaining[i : i + batch]
-        for i in range(0, min(len(remaining), batch * workers), batch)
-    ]
+    shards = shard(remaining, batch=batch, workers=workers)
     with ThreadPoolExecutor(max_workers=len(shards)) as pool:
         results = list(
             pool.map(

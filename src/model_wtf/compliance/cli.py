@@ -19,7 +19,12 @@ from model_wtf.compliance.init_cmd import (
     run_init,
 )
 from model_wtf.compliance.options import ROOT_OPTION, resolve_root
-from model_wtf.compliance.render import render_github, render_json, render_text
+from model_wtf.compliance.render import (
+    render_github,
+    render_json,
+    render_text,
+    render_todo,
+)
 from model_wtf.compliance.stores_cli import stores
 from model_wtf.compliance.touchpoints_cli import activities, touchpoints
 
@@ -49,6 +54,18 @@ compliance.add_command(activities)
     show_default=True,
     help="Output style: human-readable, JSON, or GitHub Actions annotations.",
 )
+@click.option(
+    "--allow-todo",
+    is_flag=True,
+    help="Open !todo questions are listed but do not fail the check.",
+)
+@click.option(
+    "--todo",
+    "todo_only",
+    is_flag=True,
+    help="Print only the open questions, one per line, as a questionnaire.",
+)
+@click.option("--verbose", "-v", is_flag=True, help="Also print the Info section.")
 @ROOT_OPTION
 @click.option("--python", default=None, help="Interpreter to use for introspection.")
 @click.pass_context
@@ -57,26 +74,34 @@ def check(
     *,
     strict: bool,
     output_format: str,
+    allow_todo: bool,
+    todo_only: bool,
+    verbose: bool,
     root: Path | None,
     python: str | None,
 ) -> None:
-    """Discover compliance units and verify something is declared.
+    """The compliance to-do list: what has to happen next, grouped by kind.
 
-    Exit codes: 0 clean, 1 open findings, 2 stale attestation,
-    3 declaration errors, 4 tool error.
+    Errors (fix the files) exit 3. Missing (established non-compliance,
+    never ignorable), Todo (questions for a human; --allow-todo waves them)
+    and Review (run the agents) exit 1. 4 is a crash of model-wtf itself.
     """
     console = Console()
     try:
         resolved_root = resolve_root(root)
-        report = run_check(resolved_root, strict=strict, python=python)
-        if output_format == "json":
+        report = run_check(
+            resolved_root, strict=strict, python=python, allow_todo=allow_todo
+        )
+        if todo_only:
+            render_todo(report, console)
+        elif output_format == "json":
             # Plain write: rich would wrap long lines and break the JSON.
             click.echo(render_json(report))
         elif output_format == "github":
             # No colour/width games: the annotations must stay one per line.
             render_github(report, Console(no_color=True, width=200))
         else:
-            render_text(report, console)
+            render_text(report, console, verbose=verbose)
     except Exception as exc:
         Console(stderr=True).print(Text.assemble(("Tool error: ", "red"), str(exc)))
         ctx.exit(int(ExitCode.TOOL_ERROR))

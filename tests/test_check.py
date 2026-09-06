@@ -186,7 +186,14 @@ def test_to_dict_uses_root_relative_paths(make_repo: MakeRepo) -> None:
 
     data = run_check(root, strict=False).to_dict()
 
-    assert set(data) == {"root", "manifest", "scopes", "diagnostics", "exit_code"}
+    assert set(data) == {
+        "root",
+        "manifest",
+        "scopes",
+        "diagnostics",
+        "sections",
+        "exit_code",
+    }
     assert data["root"] == str(root.resolve())
     assert data["manifest"] == "snow.yml"
     assert data["exit_code"] == 0
@@ -202,6 +209,7 @@ def test_to_dict_uses_root_relative_paths(make_repo: MakeRepo) -> None:
         "exists": True,
         "items": None,
         "errors": 0,
+        "missing": 0,
         "todos": 0,
         "pending": 0,
         "status": "ok",
@@ -224,8 +232,12 @@ def test_display_path_falls_back_to_absolute_outside_root(tmp_path: Path) -> Non
     assert data["scopes"][0]["path"] == str(outside)
     assert data["diagnostics"][0] == {
         "severity": "warning",
+        "section": "info",
         "code": "c",
         "message": "m",
         "scope": None,
         "path": ".",
+        "subject": None,
+        "hint": None,
+        "note": None,
     }

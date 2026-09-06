@@ -28,7 +28,7 @@ from model_wtf.compliance.options import ROOT_OPTION
 from model_wtf.compliance.report import Severity
 from model_wtf.compliance.touchpoints import Export, Kind, write_manifest
 from model_wtf.compliance.workspace import Workspace, load_workspace
-from model_wtf.compliance.yaml_io import Todo
+from model_wtf.compliance.yaml_io import Marker
 from model_wtf.introspect.runner import IntrospectionFailed
 
 if TYPE_CHECKING:
@@ -558,7 +558,7 @@ def act_list(
 
 
 def _text(value: object) -> Text:
-    if value is None or isinstance(value, Todo):
+    if value is None or isinstance(value, Marker):
         return Text("!todo", style="yellow")
     return Text(str(value))
 
@@ -779,7 +779,7 @@ class Why:
 
 
 def _plain(value: object) -> str | None:
-    if value is None or isinstance(value, Todo):
+    if value is None or isinstance(value, Marker):
         return None
     return value.value if isinstance(value, LegalBasis) else str(value)
 

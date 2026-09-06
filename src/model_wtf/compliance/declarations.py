@@ -18,9 +18,9 @@ from typing import TYPE_CHECKING
 import yaml
 from pydantic import BaseModel, ValidationError
 
-from model_wtf.compliance.report import Diagnostic, Severity
+from model_wtf.compliance.report import Diagnostic, Severity, marker_diagnostics
 from model_wtf.compliance.schemas import App, Party, is_valid_id
-from model_wtf.compliance.yaml_io import Todo, iter_todo_paths, load_yaml
+from model_wtf.compliance.yaml_io import Marker, load_yaml
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -116,7 +116,7 @@ def _check_party_refs(decl: Declarations, app_path: Path) -> None:
     assert decl.app is not None  # noqa: S101 - guarded by caller
     for role in ("controller", "processor"):
         ref = getattr(decl.app, role)
-        if ref is None or isinstance(ref, Todo):
+        if ref is None or isinstance(ref, Marker):
             continue
         if ref not in decl.parties and ref not in decl.invalid_parties:
             decl.diagnostics.append(
@@ -133,10 +133,10 @@ def _check_party_refs(decl: Declarations, app_path: Path) -> None:
 def format_errors(exc: ValidationError) -> list[tuple[str, str]]:
     """Flatten a pydantic error into ``(dotted location, message)`` pairs.
 
-    Every human field is a ``T | Todo`` union, so pydantic reports two
+    Every human field is a ``T | Marker`` union, so pydantic reports two
     failures per bad value: one for ``T`` and one "should be an instance of
-    Todo". The second is noise for the reader; it is dropped and the union
-    branch name (``constrained-str``, ``is-instance[Todo]``) is stripped
+    Marker". The second is noise for the reader; it is dropped and the union
+    branch name (``constrained-str``, ``is-instance[Marker]``) is stripped
     from the location.
     """
     out: list[tuple[str, str]] = []
@@ -185,14 +185,5 @@ def _load_file[M: BaseModel](
                 )
             )
         return None
-    for dotted in iter_todo_paths(instance):
-        diagnostics.append(
-            Diagnostic(
-                Severity.WARNING,
-                "todo",
-                f"{path.name}: {dotted} is still !todo",
-                SHARED_SCOPE_ID,
-                path,
-            )
-        )
+    diagnostics.extend(marker_diagnostics(instance, path, SHARED_SCOPE_ID))
     return instance

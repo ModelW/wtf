@@ -52,10 +52,10 @@ from pydantic import Field, StringConstraints, ValidationError
 
 from model_wtf.compliance.declarations import format_errors
 from model_wtf.compliance.knowledge import Dpia, Knowledge
-from model_wtf.compliance.report import Diagnostic, Severity
+from model_wtf.compliance.report import Diagnostic, Severity, marker_diagnostics
 from model_wtf.compliance.schemas import NonEmpty, StrictModel
 from model_wtf.compliance.stores import UnitStores, collect_stores
-from model_wtf.compliance.yaml_io import Todo, iter_todo_paths, load_yaml, todo_text
+from model_wtf.compliance.yaml_io import Marker, load_yaml, todo_text
 from model_wtf.introspect.runner import (
     FieldInfo,
     IntrospectionUnavailable,
@@ -119,9 +119,9 @@ def is_container(finfo: FieldInfo) -> bool:
 class Content(StrictModel):
     """One kind of information held in a container column."""
 
-    pii: bool | Todo
-    sensitivity: str | Todo
-    category: str | Todo
+    pii: bool | Marker
+    sensitivity: str | Marker
+    category: str | Marker
 
 
 class Contents(StrictModel):
@@ -129,7 +129,7 @@ class Contents(StrictModel):
 
     contents: dict[Annotated[str, StringConstraints(pattern=CONTENT_NAME)], Content]
     unknown_contents: Unknown
-    reason: NonEmpty | Todo
+    reason: NonEmpty | Marker
 
 
 class Override(StrictModel):
@@ -140,17 +140,17 @@ class Override(StrictModel):
     category: str | None = None
     store: str | None = None
     """Slug of the store holding the value, when the settings get it wrong."""
-    reason: NonEmpty | Todo
+    reason: NonEmpty | Marker
 
 
 class ManualItem(StrictModel):
     """``data/<id>.yaml`` for something the code does not expose."""
 
-    description: NonEmpty | Todo
-    pii: bool | Todo
-    sensitivity: str | Todo
-    category: str | Todo
-    store: str | Todo | None = None
+    description: NonEmpty | Marker
+    pii: bool | Marker
+    sensitivity: str | Marker
+    category: str | Marker
+    store: str | Marker | None = None
     """Slug of the store holding the item (``stores/`` declares external ones)."""
     reason: NonEmpty | None = Field(default=None, description="Optional rationale")
 
@@ -495,8 +495,8 @@ def _container_rows(
         return [column]
     items: list[Row] = []
     for name, content in declared.contents.items():
-        level = None if isinstance(content.sensitivity, Todo) else content.sensitivity
-        category = None if isinstance(content.category, Todo) else content.category
+        level = None if isinstance(content.sensitivity, Marker) else content.sensitivity
+        category = None if isinstance(content.category, Marker) else content.category
         if level is not None and category is not None:
             _check_vocabulary(level, category, knowledge, path, diagnostics)
         items.append(
@@ -504,7 +504,7 @@ def _container_rows(
                 unit=unit.id,
                 id=f"{item_id}{JSON_SUFFIX}.{name}",
                 type=JSON_CONTENT_TYPE,
-                pii=None if isinstance(content.pii, Todo) else content.pii,
+                pii=None if isinstance(content.pii, Marker) else content.pii,
                 sensitivity=level,
                 category=category,
                 dpia=_dpia(knowledge, level, category),
@@ -617,8 +617,8 @@ def _manual_row(
     item = _validate(ManualItem, raw, path, diagnostics)
     if item is None:
         return None
-    level = None if isinstance(item.sensitivity, Todo) else item.sensitivity
-    category = None if isinstance(item.category, Todo) else item.category
+    level = None if isinstance(item.sensitivity, Marker) else item.sensitivity
+    category = None if isinstance(item.category, Marker) else item.category
     if level is not None and category is not None:
         _check_vocabulary(level, category, knowledge, path, diagnostics)
     dpia = (
@@ -630,12 +630,12 @@ def _manual_row(
         unit=unit.id,
         id=item_id,
         type="manual",
-        pii=None if isinstance(item.pii, Todo) else item.pii,
+        pii=None if isinstance(item.pii, Marker) else item.pii,
         sensitivity=level,
         category=category,
         dpia=dpia,
         source=Source.MANUAL,
-        store=None if isinstance(item.store, Todo) else item.store,
+        store=None if isinstance(item.store, Marker) else item.store,
     )
 
 
@@ -685,16 +685,7 @@ def _validate[M: StrictModel](
             for loc, msg in format_errors(exc)
         )
         return None
-    diagnostics.extend(
-        Diagnostic(
-            Severity.WARNING,
-            "todo",
-            f"{path.name}: {dotted} is still !todo",
-            None,
-            path,
-        )
-        for dotted in iter_todo_paths(instance)
-    )
+    diagnostics.extend(marker_diagnostics(instance, path, None))
     return instance
 
 

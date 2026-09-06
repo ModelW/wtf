@@ -13,7 +13,7 @@ documents such as the GDPR Art. 30 registry or the pytm threat model.
 ```
 uv run model-wtf compliance init  [--name X] [--controller-name X --controller-country CC]
                                   [--processor-name X --processor-country CC | --no-processor]
-uv run model-wtf compliance check [--strict] [--format text|json|github] [--root PATH]
+uv run model-wtf compliance check [--strict] [--allow-todo] [--todo] [-v] [--format text|json|github] [--root PATH]
 ```
 
 `init` scaffolds the repo-root `compliance/` folder (`app.yaml`, one
@@ -25,8 +25,31 @@ are written as the YAML tag `!todo`. The processor defaults to
 `default_processor: {name, country, address, email}` from
 `~/.config/model-wtf/config.yml`.
 
-`check` discovers the units, validates every declaration file against its
-schema (pydantic; unknown keys are errors) and lists the `!todo` values.
+`check` is the to-do list. It discovers the units, validates every
+declaration file against its schema (pydantic; unknown keys are errors) and
+groups what it finds by the kind of work it asks for:
+
+```
+Errors — fix the files                                  exit 3
+Missing — non-compliant code or process, to build       exit 1, never ignorable
+Todo — questions only a human can answer                exit 1 (--allow-todo → 0)
+Review — run the agents, or decide                      exit 1
+Info                                                    (-v for the details)
+```
+
+One line per thing to do, with the command that resolves it after an arrow;
+marker findings are folded per file (`parties/fah.yaml: address, email`).
+`check --todo` prints only the open questions, one per line with the
+question the field asks, so the list can be handed to whoever holds the
+answers. `--format json` groups under `sections` with a stable `subject`
+per entry (`app.yaml#description`, `api:data`) that a gate can diff between
+runs; `--format github` maps Errors/Missing to `error`, Todo/Review to
+`warning`, Info to `notice`.
+
+Two YAML tags mark a value deliberately left open, both with an optional
+note: `!todo` (the analysis has not been conducted) and `!missing "no purge
+task, see FAH-210"` (it has, and the code or process is not there — an
+established non-compliance, which always fails the gate).
 
 ### Files
 
@@ -159,10 +182,12 @@ anything is pending.
   `Session.session_data`, `FormSubmission.form_data` — source `library`,
   status `pending:assumed`). Assumed models carry an `assumption` and a
   `check`: what we take for granted and what to look at in *this* project;
-  `data list` prints the assumption under the row, `data_model` shows it to
-  the agent (which must do the check before confirming), `check` lists every
-  unconfirmed assumption. `fields_default` covers unlisted columns of tables
-  that are technical through and through.
+  `data list` prints the assumption under the row (`--assumed` filters on
+  them), `data_model` shows it to the agent (which must do the check before
+  confirming); `check` only counts them in the pending breakdown
+  (`37 data item(s) pending (12 new, 9 assumed, 16 contents)`).
+  `fields_default` covers unlisted columns of tables that are technical
+  through and through.
 - Every file field also yields `<field>@files.content`: the bytes in the
   storage behind the column, classified on their own.
 
@@ -296,13 +321,13 @@ and which activities justify holding it (`held by N` / `orphan` /
 
 ### Exit codes
 
-| Code | Meaning                                                         |
-| ---- | --------------------------------------------------------------- |
-| 0    | Clean                                                           |
-| 1    | Todo findings / `!todo` values still to fill                    |
-| 2    | Stale attestation                                               |
-| 3    | Declaration errors (schema, missing files, dangling party ids)  |
-| 4    | Tool error                                                      |
+| Code | Meaning                                                              |
+| ---- | -------------------------------------------------------------------- |
+| 0    | Clean (or only `!todo` questions, with `--allow-todo`)               |
+| 1    | Missing (`!missing`, never ignorable), Todo (`!todo`), Review (pending data / touchpoints, orphans) |
+| 2    | Stale attestation                                                    |
+| 3    | Declaration errors (schema, missing files, dangling party ids)       |
+| 4    | Tool error                                                           |
 
 ## Development
 

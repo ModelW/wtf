@@ -30,12 +30,12 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 import yaml
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
 from model_wtf.compliance.declarations import format_errors
-from model_wtf.compliance.report import Diagnostic, Severity
+from model_wtf.compliance.report import Diagnostic, Severity, marker_diagnostics
 from model_wtf.compliance.schemas import NonEmpty, StrictModel
-from model_wtf.compliance.yaml_io import Todo, iter_todo_paths, load_yaml
+from model_wtf.compliance.yaml_io import Marker, load_yaml
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -76,11 +76,21 @@ class StoreFile(StrictModel):
 
     type: StoreType | None = None
     backend: NonEmpty | None = None
-    name: NonEmpty | Todo | None = None
-    provider: NonEmpty | Todo | None = None
-    location: NonEmpty | Todo | None = None
-    retention: NonEmpty | Todo | None = None
-    description: NonEmpty | Todo | None = None
+    name: NonEmpty | Marker | None = Field(
+        default=None, description="Human name of the store"
+    )
+    provider: NonEmpty | Marker | None = Field(
+        default=None, description="Who operates it (party id or vendor name)"
+    )
+    location: NonEmpty | Marker | None = Field(
+        default=None, description="Region the data sits in (country / region id)"
+    )
+    retention: NonEmpty | Marker | None = Field(
+        default=None, description="How long records stay in this store"
+    )
+    description: NonEmpty | Marker | None = Field(
+        default=None, description="What this store holds, in one sentence"
+    )
     ignore: bool = False
 
 
@@ -187,8 +197,8 @@ def collect_stores(unit: Unit, inventory: Inventory | None) -> UnitStores:
 
 
 def _merge(unit: Unit, slug: str, base: Store | None, declared: StoreFile) -> Store:
-    def text(value: str | Todo | None) -> str | None:
-        return None if value is None or isinstance(value, Todo) else value
+    def text(value: str | Marker | None) -> str | None:
+        return None if value is None or isinstance(value, Marker) else value
 
     if base is None:
         assert declared.type is not None  # noqa: S101 - checked by caller
@@ -256,14 +266,5 @@ def _load(path: Path, unit: Unit, diagnostics: list[Diagnostic]) -> StoreFile | 
             for loc, msg in format_errors(exc)
         )
         return None
-    diagnostics.extend(
-        Diagnostic(
-            Severity.WARNING,
-            "todo",
-            f"{path.name}: {field_path} is still !todo",
-            unit.id,
-            path,
-        )
-        for field_path in iter_todo_paths(declared)
-    )
+    diagnostics.extend(marker_diagnostics(declared, path, unit.id))
     return declared
