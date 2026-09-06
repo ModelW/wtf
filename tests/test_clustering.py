@@ -185,7 +185,8 @@ def test_remove_directive_on_twin(make_repo: MakeRepo) -> None:
 def test_split_off_activity_claims_members(make_repo: MakeRepo) -> None:
     folder, surface = _seed(make_repo)
     (folder / "processing" / "auth.yaml").write_text(
-        "purpose: Log users in and out of the platform securely.\nlawful_basis: contract\n"
+        "purpose: Log users in and out of the platform securely.\n"
+        "lawful_basis: contract\n"
         "data_subject_categories: []\n"
         "members: [http:POST:/back/api/auth/login/, http:POST:/back/api/auth/logout/]\n"
     )
@@ -210,7 +211,8 @@ def test_split_off_activity_claims_members(make_repo: MakeRepo) -> None:
 def test_add_directive_moves_member(make_repo: MakeRepo) -> None:
     folder, surface = _seed(make_repo)
     (folder / "processing" / "cms.yaml").write_text(
-        "purpose: Publish and preview marketing pages for everyone.\nlawful_basis: legitimate_interest\n"
+        "purpose: Publish and preview marketing pages for everyone.\n"
+        "lawful_basis: legitimate_interest\n"
         "data_subject_categories: []\nmembers:\n  add: [http:GET:/back/health/]\n"
     )
 

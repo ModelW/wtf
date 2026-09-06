@@ -240,7 +240,7 @@ def strip_members(data: dict[str, Any]) -> dict[str, Any]:
 def write_clusters(
     folder: Path, surface: Surface, *, by: str = "extractor"
 ) -> ClusteringReport:
-    """Write ``processing/<id>.gen.yaml`` for every cluster; report uncovered members."""
+    """Write ``processing/<id>.gen.yaml`` per cluster; report uncovered members."""
     report = ClusteringReport()
     clusters, uncovered = apply_human_members(
         default_clusters(surface), read_human_members(folder), surface
