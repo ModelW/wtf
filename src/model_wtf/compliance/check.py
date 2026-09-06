@@ -149,7 +149,10 @@ def _check_data(
         diagnostics.extend(_with_scope(d, unit.id) for d in unit_data.diagnostics)
         _check_reviews(unit, unit_data.rows, diagnostics)
         unit_tps = ws.touchpoints[unit.id]
-        diagnostics.extend(_with_scope(d, unit.id) for d in unit_tps.diagnostics)
+        diagnostics.extend(
+            _with_scope(d, unit.id)
+            for d in _fold_deprecations(unit, unit_tps.diagnostics)
+        )
         _check_touchpoints(unit, unit_tps.visible(), ws, diagnostics)
     diagnostics.extend(ws.activities.diagnostics)
     return counts
@@ -185,6 +188,36 @@ def _check_reviews(unit: Unit, rows: list[Row], diagnostics: list[Diagnostic]) -
             hint=f"data auto-review --unit {unit.id}",
         )
     )
+
+
+DEPRECATED_FORMS = frozenset({"op-ambiguous", "exporting-deprecated"})
+
+
+def _fold_deprecations(unit: Unit, diagnostics: list[Diagnostic]) -> list[Diagnostic]:
+    """One Review line for all the manifests written in a superseded form.
+
+    ``write`` and ``exporting`` still load, so per-ref warnings would only
+    be noise; what the reader needs is the count and the command that
+    rewrites them (a re-review states the real ops).
+    """
+    kept = [d for d in diagnostics if d.code not in DEPRECATED_FORMS]
+    stale = sorted(
+        {d.subject for d in diagnostics if d.code in DEPRECATED_FORMS if d.subject}
+    )
+    if stale:
+        kept.append(
+            Diagnostic(
+                Severity.WARNING,
+                "touchpoint-stale-form",
+                f"{len(stale)} manifest(s) use `write`/`exporting`; re-review "
+                "to state the operations",
+                unit.id,
+                unit.folder / TOUCHPOINTS_DIR,
+                subject=f"{unit.id}:stale-manifests",
+                hint=f"touchpoints auto-review --unit {unit.id} --stale",
+            )
+        )
+    return kept
 
 
 def _check_touchpoints(

@@ -14,20 +14,29 @@ Procrastinate/Celery registries, the admin site; SvelteKit's generated
 to disk. What humans (or the agent) write is the optional **manifest**
 ``<unit>/compliance/touchpoints/<slug>.yaml``::
 
-    data:                       # data items the touchpoint reads or writes
-      - api:orders.Order.customer_email: write   # `ref: read|write`, or
-      - api:orders.Order.payload@json.iban       # a bare ref = read+write
-    exporting:                  # what leaves the unit, and to whom
+    data:                       # data items and what the code does to them
+      - api:orders.Order.customer_email: create  # `ref: <op>`, `ref: [ops]`,
+      - api:people.User.email: {rectify: {by: subject}}   # or with metadata
+      - api:people.User.*: {erase: {by: subject}}         # globs for whole models
+      - api:orders.Order.payload@json.iban       # a bare ref = read
+    transfers:                  # what leaves to another organisation
       - party: mapbox           # id in compliance/parties/
         data: [api:geo.Address.position]
         purpose: geocoding      # optional, one line
     ignore: false               # health checks, static assets
 
-``exporting`` is where the Art. 30 "recipients" column comes from: every
-call to an external API, every email provider, every analytics beacon is a
-transfer of the listed items to that party. The party must exist in
-``compliance/parties/`` (the agent creates it with ``!todo`` details when it
-meets a new one); its ``country`` drives the third-country logic later.
+The operations vocabulary lives in :mod:`model_wtf.compliance.ops`. Each
+ref carries what this touchpoint *does* to the item (``create``, ``read``,
+``rectify``, ``erase``, ``retention_purge``, ...); the rights derivation
+reads them, the touchpoint only states facts. ``write`` is a deprecated
+alias for ``[create, update]`` and warns.
+
+``transfers`` (GDPR wording, Ch. V / Art. 4(9); ``exporting`` is accepted
+with a deprecation warning) is where the Art. 30 "recipients" column comes
+from: every call to an external API, every email provider, every analytics
+beacon is a transfer of the listed items to that party. The party must exist
+in ``compliance/parties/`` (the agent creates it with ``!todo`` details when
+it meets a new one); its ``country`` drives the third-country logic.
 
 A touchpoint is **pending** until its manifest has a ``data`` key; the list
 names every inventory item the code reads or writes, personal or not (the
@@ -43,13 +52,15 @@ import hashlib
 import re
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
+from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from model_wtf.compliance.declarations import format_errors
+from model_wtf.compliance.ops import OpError, OpSpec, Read, parse_ops, render_ops
 from model_wtf.compliance.report import Diagnostic, Severity
 from model_wtf.compliance.schemas import StrictModel
 from model_wtf.compliance.yaml_io import load_yaml
@@ -62,6 +73,8 @@ from model_wtf.introspect.runner import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
     from model_wtf.compliance.data import Row
     from model_wtf.compliance.report import Unit
 
@@ -96,35 +109,61 @@ class Kind(StrEnum):
     ADMIN = "admin"
 
 
-class Export(StrictModel):
-    """One outbound flow: these items go to that party."""
+class Transfer(StrictModel):
+    """One outbound flow: these items go to that party (another organisation)."""
 
     party: str
     data: list[str] = Field(default_factory=list)
     purpose: str | None = None
 
 
-Direction = Literal["read", "write", "read+write"]
-DataEntry = str | dict[str, Direction]
-"""One ``data`` entry: a bare ref (read+write) or ``{ref: direction}``."""
+Export = Transfer
+"""Former name, kept for callers."""
+
+DataEntry = str | dict[str, Any]
+"""One ``data`` entry: a bare ref (read) or ``{ref: <ops>}``."""
 
 
 class Manifest(StrictModel):
     """``touchpoints/<slug>.yaml``."""
 
     data: list[DataEntry] | None = None
-    exporting: list[Export] = Field(default_factory=list)
+    transfers: list[Transfer] = Field(default_factory=list)
+    exporting: list[Transfer] | None = Field(
+        default=None, description="Deprecated spelling of `transfers`"
+    )
     ignore: bool = False
     note: str | None = None
 
-    def entries(self) -> list[tuple[str, str]]:
-        """``(ref, direction)`` pairs; a one-key mapping carries the direction."""
-        out: list[tuple[str, str]] = []
+    @model_validator(mode="after")
+    def _fold_exporting(self) -> Manifest:
+        if self.exporting:
+            self.transfers = [*self.transfers, *self.exporting]
+        return self
+
+    def entries(self) -> list[tuple[str, list[OpSpec], list[str]]]:
+        """``(ref pattern, ops, warnings)`` per entry.
+
+        Raises
+        ------
+        OpError
+            With the ref in the message, when the ops do not parse.
+        """
+        out: list[tuple[str, list[OpSpec], list[str]]] = []
         for entry in self.data or []:
             if isinstance(entry, str):
-                out.append((entry, "read+write"))
-            else:
-                out.extend((ref, direction) for ref, direction in entry.items())
+                out.append((entry, [Read()], []))
+                continue
+            if len(entry) != 1:
+                msg = f"a data entry is one `ref: ops` mapping, got {entry!r}"
+                raise OpError(msg)
+            ((ref, value),) = entry.items()
+            try:
+                ops, warnings = parse_ops(value)
+            except OpError as exc:
+                msg = f"{ref}: {exc}"
+                raise OpError(msg) from exc
+            out.append((str(ref), ops, warnings))
         return out
 
 
@@ -165,6 +204,9 @@ class Introspected(BaseModel):
     calls: list[str] = Field(default_factory=list)
     fetches: list[str] = Field(default_factory=list)
     layout_only: bool = False
+    hints: list[str] = Field(default_factory=list)
+    """Likely ops seen by the introspection (``create: POST``, ``after:
+    timedelta(days=30)``); the reviewer confirms, never copies blindly."""
 
 
 class Payload(BaseModel):
@@ -184,9 +226,10 @@ class Touchpoint:
     facts: Introspected
     data: tuple[str, ...] | None = None
     """``unit:id`` data references; ``None`` = no manifest yet (pending)."""
-    direction: dict[str, str] = field(default_factory=dict)
-    exporting: tuple[Export, ...] = ()
-    """Outbound flows, refs already resolved to full ids."""
+    ops: dict[str, tuple[OpSpec, ...]] = field(default_factory=dict)
+    """Per full ref, what this touchpoint does to it (globs expanded)."""
+    transfers: tuple[Transfer, ...] = ()
+    """Outbound flows to other organisations, refs resolved to full ids."""
     ignore: bool = False
     note: str | None = None
     calls: tuple[str, ...] = ()
@@ -234,6 +277,15 @@ class Touchpoint:
         )
         return hashlib.sha256(text.encode()).hexdigest()[:8]
 
+    @property
+    def exporting(self) -> tuple[Transfer, ...]:
+        """Former name of :attr:`transfers`."""
+        return self.transfers
+
+    def ops_of(self, ref: str) -> tuple[OpSpec, ...]:
+        """The ops on one full ref (``read`` when the manifest is bare)."""
+        return self.ops.get(ref, (Read(),) if self.data and ref in self.data else ())
+
     def location(self, root: Path) -> str | None:
         """``file:line`` relative to the repository, if known.
 
@@ -276,9 +328,10 @@ class Touchpoint:
             "form_fields": self.facts.form_fields,
             "calls": list(self.calls),
             "fetches": self.facts.fetches,
+            "hints": self.facts.hints,
             "data": list(self.data) if self.data is not None else None,
-            "direction": dict(self.direction),
-            "exporting": [e.model_dump() for e in self.exporting],
+            "ops": {ref: [op.to_yaml() for op in ops] for ref, ops in self.ops.items()},
+            "transfers": [e.model_dump() for e in self.transfers],
             "ignore": self.ignore,
             "pending": self.pending,
             "note": self.note,
@@ -432,34 +485,63 @@ def _resolve_refs(
     """``unit:id`` for every ref (unit defaults to this one); unknown ones dropped."""
     out: list[str] = []
     for ref in refs:
-        full = ref if ":" in ref else f"{unit.id}:{ref}"
-        ref_unit, _, ref_id = full.partition(":")
-        if known_data is not None:
-            if ref_unit not in known_data:
-                diagnostics.append(
-                    Diagnostic(
-                        Severity.ERROR,
-                        "data-ref-unknown-unit",
-                        f"{path.name}: {ref!r} names unknown unit {ref_unit!r}",
-                        unit.id,
-                        path,
-                    )
-                )
-                continue
-            if ref_id not in known_data[ref_unit]:
-                diagnostics.append(
-                    Diagnostic(
-                        Severity.ERROR,
-                        "data-ref-unknown",
-                        f"{path.name}: no data item {full!r} "
-                        "(`data list` shows the ids)",
-                        unit.id,
-                        path,
-                    )
-                )
-                continue
-        out.append(full)
+        out.extend(_resolve_one(ref, unit, path, known_data, diagnostics))
     return out
+
+
+def _resolve_one(
+    ref: str,
+    unit: Unit,
+    path: Path,
+    known_data: dict[str, set[str]] | None,
+    diagnostics: list[Diagnostic],
+) -> list[str]:
+    """One ref or glob → the full ids it names (validated when possible).
+
+    A glob (``api:people.User.*``) expands against the inventory of its
+    unit and must match at least one item; without an inventory to check
+    against it is kept verbatim.
+    """
+    full = ref if ":" in ref else f"{unit.id}:{ref}"
+    ref_unit, _, ref_id = full.partition(":")
+    if known_data is None:
+        return [full]
+    if ref_unit not in known_data:
+        diagnostics.append(
+            Diagnostic(
+                Severity.ERROR,
+                "data-ref-unknown-unit",
+                f"{path.name}: {ref!r} names unknown unit {ref_unit!r}",
+                unit.id,
+                path,
+            )
+        )
+        return []
+    if any(c in ref_id for c in "*?["):
+        matched = sorted(i for i in known_data[ref_unit] if fnmatchcase(i, ref_id))
+        if not matched:
+            diagnostics.append(
+                Diagnostic(
+                    Severity.ERROR,
+                    "data-ref-unknown",
+                    f"{path.name}: {full!r} matches no data item",
+                    unit.id,
+                    path,
+                )
+            )
+        return [f"{ref_unit}:{i}" for i in matched]
+    if ref_id not in known_data[ref_unit]:
+        diagnostics.append(
+            Diagnostic(
+                Severity.ERROR,
+                "data-ref-unknown",
+                f"{path.name}: no data item {full!r} (`data list` shows the ids)",
+                unit.id,
+                path,
+            )
+        )
+        return []
+    return [full]
 
 
 def _apply(
@@ -480,46 +562,65 @@ def _apply(
         )
     path = unit.folder / TOUCHPOINTS_DIR / f"{slugify(facts.id)}.yaml"
     data: tuple[str, ...] | None = None
-    direction: dict[str, str] = {}
+    ops: dict[str, list[OpSpec]] = {}
     if manifest.data is not None:
-        pairs = manifest.entries()
-        resolved = _resolve_refs(
-            [ref for ref, _ in pairs], unit, path, known_data, diagnostics
-        )
+        resolved: list[str] = []
+        for ref, entry_ops, warnings in manifest.entries():
+            diagnostics.extend(
+                Diagnostic(
+                    Severity.WARNING,
+                    "op-ambiguous",
+                    f"{path.name}: {ref}: {w}",
+                    unit.id,
+                    path,
+                    subject=f"{unit.id}:{facts.id}",
+                )
+                for w in warnings
+            )
+            for full in _resolve_one(ref, unit, path, known_data, diagnostics):
+                if full not in resolved:
+                    resolved.append(full)
+                bucket = ops.setdefault(full, [])
+                bucket.extend(o for o in entry_ops if o not in bucket)
         data = tuple(resolved)
-        wanted = {
-            (ref if ":" in ref else f"{unit.id}:{ref}"): d
-            for ref, d in pairs
-            if d != "read+write"
-        }
-        direction = {full: wanted[full] for full in resolved if full in wanted}
-    exporting = tuple(
-        Export(
-            party=export.party,
-            data=_resolve_refs(export.data, unit, path, known_data, diagnostics),
-            purpose=export.purpose,
+    if manifest.exporting is not None:
+        diagnostics.append(
+            Diagnostic(
+                Severity.WARNING,
+                "exporting-deprecated",
+                f"{path.name}: `exporting` is now `transfers` (GDPR wording)",
+                unit.id,
+                path,
+                subject=f"{unit.id}:{facts.id}",
+            )
         )
-        for export in manifest.exporting
+    transfers = tuple(
+        Transfer(
+            party=transfer.party,
+            data=_resolve_refs(transfer.data, unit, path, known_data, diagnostics),
+            purpose=transfer.purpose,
+        )
+        for transfer in manifest.transfers
     )
     if known_parties is not None:
         diagnostics.extend(
             Diagnostic(
                 Severity.ERROR,
                 "party-unknown",
-                f"{path.name}: exporting to {export.party!r}, which is not in "
+                f"{path.name}: transfers to {transfer.party!r}, which is not in "
                 "compliance/parties/",
                 unit.id,
                 path,
             )
-            for export in exporting
-            if export.party not in known_parties
+            for transfer in transfers
+            if transfer.party not in known_parties
         )
     return Touchpoint(
         unit=unit.id,
         facts=facts,
         data=data,
-        direction=direction,
-        exporting=exporting,
+        ops={ref: tuple(o) for ref, o in ops.items()},
+        transfers=transfers,
         ignore=manifest.ignore,
         note=manifest.note,
         calls=tuple(facts.calls),
@@ -554,7 +655,8 @@ def _load_manifests(unit: Unit, diagnostics: list[Diagnostic]) -> dict[str, Mani
             )
             continue
         try:
-            out[path.stem] = Manifest.model_validate(raw)
+            manifest = Manifest.model_validate(raw)
+            manifest.entries()  # ops vocabulary check, with the ref in the error
         except ValidationError as exc:
             diagnostics.extend(
                 Diagnostic(
@@ -566,6 +668,18 @@ def _load_manifests(unit: Unit, diagnostics: list[Diagnostic]) -> dict[str, Mani
                 )
                 for loc, msg in format_errors(exc)
             )
+        except OpError as exc:
+            diagnostics.append(
+                Diagnostic(
+                    Severity.ERROR,
+                    "schema-error",
+                    f"{path.name}: data: {exc}",
+                    unit.id,
+                    path,
+                )
+            )
+        else:
+            out[path.stem] = manifest
     return out
 
 
@@ -574,33 +688,96 @@ def write_manifest(
     touchpoint: Touchpoint,
     data: list[str],
     *,
-    direction: dict[str, str] | None = None,
-    exporting: list[Export] | None = None,
+    ops: Mapping[str, Sequence[OpSpec]] | None = None,
+    transfers: list[Transfer] | None = None,
     note: str | None = None,
     ignore: bool = False,
 ) -> Path:
-    """Create or replace the manifest of ``touchpoint``; return its path."""
+    """Create or replace the manifest of ``touchpoint``; return its path.
+
+    ``ops`` maps a ref (or glob) to its ops; refs absent from it are bare
+    reads. Entries are written in the order of ``data``, one per line, the
+    ops in the compact manifest form (``ref: create``,
+    ``ref: {erase: {by: subject}}``, ``ref: [create, read]``).
+    """
     path = unit.folder / TOUCHPOINTS_DIR / f"{touchpoint.slug}.yaml"
+    ops = ops or {}
     lines: list[str] = []
     if ignore:
         lines.append("ignore: true")
     lines.append("data:" if data else "data: []")
-    direction = direction or {}
     for ref in data:
-        d = direction.get(ref)
-        lines.append(f"  - {ref}: {d}" if d and d != "read+write" else f"  - {ref}")
-    if exporting:
-        lines.append("exporting:")
-        for export in exporting:
-            lines.append(f"  - party: {export.party}")
-            lines.append("    data: [" + ", ".join(export.data) + "]")
-            if export.purpose:
-                lines.append(f"    purpose: {_scalar(export.purpose)}")
+        lines.extend(_entry_lines(ref, list(ops.get(ref, ()))))
+    if transfers:
+        lines.append("transfers:")
+        for transfer in transfers:
+            lines.append(f"  - party: {transfer.party}")
+            lines.append("    data: [" + ", ".join(transfer.data) + "]")
+            if transfer.purpose:
+                lines.append(f"    purpose: {_scalar(transfer.purpose)}")
     if note:
         lines.append(f"note: {_scalar(note)}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+class _FlowDumper(yaml.SafeDumper):
+    """Block mappings, flow style for the leaf mappings (``{by: subject}``)."""
+
+    def increase_indent(self, flow: bool = False, indentless: bool = False) -> None:
+        """Indent list items under their key."""
+        super().increase_indent(flow, False)
+
+
+def _flow_yaml(value: Any, *, flow: bool | None = None) -> str:
+    """Op metadata (a mapping or a list of verbs/mappings) as YAML text.
+
+    ``flow=None`` lets PyYAML pick (block for nested, flow for leaves);
+    ``flow=True`` forces the whole value on one line.
+    """
+    return yaml.dump(
+        value,
+        Dumper=_FlowDumper,
+        sort_keys=False,
+        allow_unicode=True,
+        default_flow_style=flow,
+        width=10**6,
+    ).rstrip("\n")
+
+
+def _entry_lines(ref: str, ops: Sequence[OpSpec]) -> list[str]:
+    """The manifest lines for one ``data`` entry, as compact as the ops allow."""
+    value = render_ops(list(ops))
+    if value is None:
+        return [f"  - {ref}"]
+    if isinstance(value, str):
+        return [f"  - {ref}: {value}"]
+    if isinstance(value, list) and _shallow(value):
+        # ``[read, create, {rectify: {by: staff}}]`` on one line reads better
+        # than a block list of three.
+        return [f"  - {ref}: {_flow_yaml(value, flow=True)}"]
+    return [f"  - {ref}:", *_indent(_flow_yaml(value), 6)]
+
+
+def _shallow(value: list[Any]) -> bool:
+    """Whether every element is a verb or a mapping of plain scalars."""
+    return all(
+        isinstance(v, str)
+        or (
+            isinstance(v, dict)
+            and all(
+                isinstance(m, dict)
+                and all(not isinstance(x, dict | list) for x in m.values())
+                for m in v.values()
+            )
+        )
+        for v in value
+    )
+
+
+def _indent(text: str, spaces: int) -> list[str]:
+    return [" " * spaces + line for line in text.splitlines()]
 
 
 def _scalar(value: str) -> str:

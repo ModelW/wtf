@@ -88,6 +88,11 @@ class ActivityFile(StrictModel):
     description: NonEmpty | None = None
 
 
+def list_dict() -> dict[str, list[str]]:
+    """Default factory (a plain ``dict`` annotated for mypy)."""
+    return {}
+
+
 @dataclass
 class Derived:
     """What an activity's touchpoints imply."""
@@ -102,8 +107,11 @@ class Derived:
     max_sensitivity: str | None = None
     dpia: Dpia | None = None
     recipients: dict[str, list[str]] = field(default_factory=dict)
-    """Party id → data items exported to it by the touchpoints (derived, on
-    top of the declared ``recipients`` list)."""
+    """Party id → data items transferred to it by the touchpoints (derived,
+    on top of the declared ``recipients`` list)."""
+    ops: dict[str, list[str]] = field(default_factory=list_dict)
+    """Full ref → union of the op verbs its touchpoints declare (``create``,
+    ``erase``...). The rights derivation works from this."""
 
 
 @dataclass
@@ -140,6 +148,7 @@ class Activity:
                 "max_sensitivity": self.derived.max_sensitivity,
                 "dpia": self.derived.dpia.value if self.derived.dpia else None,
                 "recipients": self.derived.recipients,
+                "ops": self.derived.ops,
             },
         }
 
@@ -233,9 +242,12 @@ def derive(
     """Union of the touchpoints' data, then the register-level aggregates."""
     refs: set[str] = set()
     recipients: dict[str, set[str]] = {}
+    ops: dict[str, set[str]] = {}
     for tp in touchpoints:
         refs.update(tp.data or ())
-        for export in tp.exporting:
+        for ref in tp.data or ():
+            ops.setdefault(ref, set()).update(o.op.value for o in tp.ops_of(ref))
+        for export in tp.transfers:
             recipients.setdefault(export.party, set()).update(export.data)
             refs.update(export.data)
     items = [rows[r] for r in sorted(refs) if r in rows]
@@ -259,6 +271,7 @@ def derive(
         max_sensitivity=level,
         dpia=dpia,
         recipients={k: sorted(v) for k, v in sorted(recipients.items())},
+        ops={k: sorted(v) for k, v in sorted(ops.items())},
     )
 
 

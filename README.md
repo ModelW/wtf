@@ -262,18 +262,39 @@ to the Django touchpoints by operation id (`calls`). Plumbing (health checks,
 OpenAPI documents, the admin's own URL patterns) is ignored by default.
 
 The optional manifest `<unit>/compliance/touchpoints/<slug>.yaml` declares
-what the touchpoint handles: `data:` entries are refs (`@json`/`@files` rows
-allowed), a bare `- unit:app.Model.field` meaning read+write and
-`- unit:app.Model.field: write` (or `read`) when it is one-way; `exporting:`
-lists what leaves the unit — `- {party: mapbox, data: [...], purpose: ...}`,
-the party being a `compliance/parties/` id, which is where the register's
-recipients come from; plus `ignore`, `note`. Every inventory item the code
-reads or writes is listed, personal or not: the register filters on `pii`
-downstream, the data-flow model needs all of it. A touchpoint
-is **pending** until it has a `data` key — an explicit `[]` means "touches
-no inventory item, checked". `check` reports `touchpoint-pending` and
+what the touchpoint **does** to data, with a closed vocabulary of operations
+(`src/model_wtf/compliance/ops.py`): each `data:` entry is a ref (`@json`/
+`@files` rows allowed, `unit:app.Model.*` for a whole model) and its ops —
+a bare `- unit:app.Model.field` is a `read`, `- ref: create`, `- ref: [create,
+read]`, `- ref: {erase: {by: subject, mode: anonymise}}`, `- ref:
+{retention_purge: {after: {days: 30}, from: unit:app.Model.created_at}}`.
+Verbs: `create[{consent_for}]`, `read`, `update`, `rectify{by}`, `access`,
+`portability{format}`, `erase{by?, mode, on?}`, `retention_purge{after, from}`,
+`delete`, `consent_withdraw{for}`, `object`, `restrict{by}`; each verb takes
+only its own metadata, anything else is a schema error. `write` is a
+deprecated alias for `[create, update]` (`op-ambiguous` warning). Touchpoints
+state facts about the code; the rights derivation reads them. `transfers:`
+lists what leaves to another organisation — `- {party: mapbox, data: [...],
+purpose: ...}`, the party being a `compliance/parties/` id, which is where
+the register's recipients come from (`exporting:` still loads, with a
+deprecation warning); plus `ignore`, `note`. Every inventory item the code
+touches is listed, personal or not: the register filters on `pii`
+downstream, the data-flow model needs all of it. A touchpoint is
+**pending** until it has a `data` key — an explicit `[]` means "touches no
+inventory item, checked". `check` reports `touchpoint-pending` and
 `touchpoint-orphan` (handles personal data, belongs to no activity), both
 exit 1, and `data-unreferenced` as information.
+
+Introspection pre-fills **likely ops** (`touchpoints show` → "likely ops"):
+HTTP method (`POST` → create, `PUT/PATCH` → update|rectify, `DELETE` →
+delete|erase), Django admin permissions (`has_*_permission` overrides,
+`readonly_fields`, `list_display`), task names (`purge|clean|expire`,
+`anonymi[sz]e|erase|gdpr`, `export`) and task bodies (`.delete()`,
+`.update()`, `timedelta(days=30)` as an `after` hint), SvelteKit handlers and
+action names. The reviewer confirms them against the code. `data why`
+prints each item's lifecycle from the ops: *created by api:signup, read by
+6, rectified by admin:people.User (by staff), never erased, purged by
+api:task:cart.purge (after days 30, ...), sent to mapbox*.
 
 ```
 uv run model-wtf compliance touchpoints auto-review [--unit ID] [--batch 8] [--workers 16] [--max-rounds 20] [--group/--no-group] [--group-only] [--model ...] [--max-tokens N]

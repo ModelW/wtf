@@ -257,21 +257,37 @@ def pending_models(
 
 
 def pending_touchpoints(
-    root: Path, units: list[Unit], knowledge: Knowledge, *, python: str | None
+    root: Path,
+    units: list[Unit],
+    knowledge: Knowledge,
+    *,
+    python: str | None,
+    stale: bool = False,
 ) -> tuple[list[str], list[Path]]:
-    """Pending touchpoint full ids and the import roots to make readable."""
+    """Pending touchpoint full ids and the import roots to make readable.
+
+    With ``stale``, manifests written in a superseded form (``write``,
+    ``exporting``) count as pending too: a re-review restates the real ops.
+    """
     ws = load_workspace(root, units, knowledge, python=python)
-    out = sorted(
+    wanted = {
         t.full_id for t in ws.all_touchpoints.values() if t.pending and not t.ignore
-    )
+    }
+    if stale:
+        wanted.update(
+            d.subject
+            for unit_tps in ws.touchpoints.values()
+            for d in unit_tps.diagnostics
+            if d.code in ("op-ambiguous", "exporting-deprecated") and d.subject
+        )
     roots = [Path(p) for d in ws.data.values() for p in d.sys_path]
-    return out, roots
+    return sorted(wanted), roots
 
 
 def orphan_touchpoints(
     root: Path, units: list[Unit], knowledge: Knowledge, *, python: str | None
 ) -> list[str]:
-    """Touchpoints handling or exporting data that belong to no activity.
+    """Touchpoints handling or transferring data that belong to no activity.
 
     Every touchpoint that touches inventory data is grouped, personal or
     not: the pii flag is a classification that can be corrected later, and
@@ -283,7 +299,7 @@ def orphan_touchpoints(
         t.full_id
         for t in ws.all_touchpoints.values()
         if not t.ignore
-        and (t.data or t.exporting)
+        and (t.data or t.transfers)
         and not ws.activities.of_touchpoint(t.full_id)
     )
 
@@ -293,6 +309,8 @@ class Target:
     """What a run reviews: data models or touchpoints."""
 
     kind: Literal["data", "touchpoints"]
+    stale: bool = False
+    """Touchpoints only: also re-review manifests in a superseded form."""
 
     @property
     def dispatcher(self) -> str:
@@ -327,7 +345,9 @@ class Target:
         """Pending ids and readable roots."""
         if self.kind == "data":
             return pending_models(units, knowledge, python=python)
-        return pending_touchpoints(root, units, knowledge, python=python)
+        return pending_touchpoints(
+            root, units, knowledge, python=python, stale=self.stale
+        )
 
 
 DATA_TARGET = Target("data")
@@ -489,7 +509,7 @@ def narrate(  # noqa: C901 - one branch per tool, flat on purpose
         tp = str(event.args.get("touchpoint") or "")
         n = len(event.args.get("data") or [])
         what = "touches no data" if n == 0 else f"{n} data item(s) declared"
-        exports = event.args.get("exporting") or []
+        exports = event.args.get("transfers") or event.args.get("exporting") or []
         if exports:
             parties = ", ".join(str(e.get("party", "?")) for e in exports)
             what += f", sends data to {parties}"
