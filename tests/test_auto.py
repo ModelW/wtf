@@ -378,7 +378,7 @@ def test_discover_then_classify_drafts_without_touching_humans(
         (root / "api/compliance/elements/unit.gen.yaml").read_text()
     )
     assert unit_gen["by"] == "agent"
-    assert unit_gen["routes"][0]["path"] == "/leads/"
+    assert unit_gen["entrypoints"][0]["id"] == "http:POST:/leads/"
     lead_gen = yaml.safe_load(
         (root / "api/compliance/data/leads.lead.gen.yaml").read_text()
     )

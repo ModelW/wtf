@@ -203,6 +203,24 @@ finish, results are on disk), 5 tool error. Models per stage come from
 `knowledge/routing.yaml`, overridable per repo in `.model-wtf.yml#routing` and
 per run with `--model-override`.
 
+## Extractors
+
+Where a deterministic extractor exists, it replaces the agent's `discover`
+stage. A unit whose `pyproject.toml` depends on Django is run through
+`manage.py export_compliance_surface --json` (preset-django) with the detected
+runner (`uv run` if `uv.lock`, else `poetry run`, else `python`);
+`--surface unit=file.json` hands over a pre-computed output instead (CI images
+built elsewhere). The output must match **Surface JSON v1**
+(`src/model_wtf/extractors/surface.py`, `schema: modelw.surface/1`), which
+model-wtf owns. One writer (`extractors/writer.py`) turns any Surface — or the
+agent's discovery — into deterministic `.gen.yaml` files:
+`elements/unit.gen.yaml` (entrypoints, tasks, config, controls),
+`data/<app>.<model>.gen.yaml` (fields with suggested item/confidence, opaque
+flag, `candidate_contents`, lifecycle, `pii_suspected`), and
+`recipients/<slug>.gen.yaml` (detection, plus the suggested kind/country from
+the egress catalogue). Human twins, ledgers and findings are never touched;
+re-running on unchanged input is a no-op.
+
 ## Agents
 
 `src/model_wtf/agents/` is the only configuration the OpenCode instance booted

@@ -1,0 +1,46 @@
+{
+  "schema": "modelw.surface/1",
+  "unit": "api",
+  "stack": ["django", "ninja", "wagtail"],
+  "entrypoints": [
+    {"id": "http:POST:/back/api/auth/login/", "path": "/back/api/auth/login/", "methods": ["POST"], "view": "apps.people.api.login", "auth": {"scheme": "none"}, "tags": [], "models_read": ["store:people.User"], "provenance": "apps/people/api.py:21"},
+    {"id": "http:POST:/back/api/auth/logout/", "path": "/back/api/auth/logout/", "methods": ["POST"], "view": "apps.people.api.logout", "auth": {"scheme": "session"}, "provenance": "apps/people/api.py:40"},
+    {"id": "http:GET:/back/api/me/", "path": "/back/api/me/", "methods": ["GET"], "view": "apps.people.api.me", "auth": {"scheme": "session"}, "models_read": ["store:people.User"], "provenance": "apps/people/api.py:52"},
+    {"id": "http:GET:/back/api/pages/", "path": "/back/api/pages/", "methods": ["GET"], "view": "apps.cms.api.pages", "auth": {"scheme": "none"}, "models_read": ["store:cms.HomePage"], "provenance": "apps/cms/api.py:10"},
+    {"id": "http:GET:/back/api/preview/", "path": "/back/api/preview/", "methods": ["GET"], "view": "apps.cms.api.preview", "auth": {"scheme": "admin"}, "tags": ["cms-preview"], "provenance": "apps/cms/api.py:30"},
+    {"id": "http:GET:/back/health/", "path": "/back/health/", "methods": ["GET"], "view": "health.views.ping", "auth": {"scheme": "none"}, "tags": ["health"], "provenance": "health/views.py:3"}
+  ],
+  "storage": [
+    {"id": "store:people.User", "app_label": "people", "model": "User", "database": "default",
+     "lifecycle": {"soft_delete": false, "history": false},
+     "fields": [
+       {"name": "email", "type": "EmailField", "unique": true, "pii_hints": [{"item": "email", "confidence": "high"}]},
+       {"name": "first_name", "type": "CharField", "pii_hints": [{"item": "name", "confidence": "high"}]},
+       {"name": "password", "type": "CharField", "pii_hints": [{"item": "credential", "confidence": "high"}]},
+       {"name": "preferences", "type": "JSONField", "opaque": true, "candidate_contents": [{"name": "newsletter", "provenance": "apps/people/serializers.py:12"}, {"name": "locale", "provenance": "apps/people/serializers.py:13"}]}
+     ],
+     "provenance": "apps/people/models.py:8"},
+    {"id": "store:cms.CustomImage", "app_label": "cms", "model": "CustomImage",
+     "lifecycle": {"blob": true},
+     "fields": [
+       {"name": "file", "type": "ImageField", "pii_hints": [{"item": "free_text", "confidence": "low"}]},
+       {"name": "title", "type": "CharField"}
+     ],
+     "provenance": "apps/cms/models.py:30"},
+    {"id": "store:cms.HomePage", "app_label": "cms", "model": "HomePage", "fields": [{"name": "body", "type": "StreamField", "opaque": true}], "provenance": "apps/cms/models.py:60"},
+    {"id": "store:sessions.Session", "app_label": "sessions", "model": "Session", "shadow_store": true, "fields": [{"name": "session_data", "type": "TextField", "opaque": true}]}
+  ],
+  "config": [
+    {"key": "SENTRY_DSN", "required": false, "is_yaml": false, "sink": "sentry"},
+    {"key": "DATABASE_URL", "required": true, "is_yaml": false}
+  ],
+  "egress": [
+    {"id": "egress:sdk:sentry_sdk", "credential_keys": ["SENTRY_DSN"], "facts": {"send_default_pii": false}, "provenance": ["settings.py:88"]},
+    {"id": "egress:host:fra1.digitaloceanspaces.com", "credential_keys": ["AWS_S3_ENDPOINT_URL"], "provenance": ["settings.py:120"]},
+    {"id": "egress:host:api.unknown-vendor.example", "provenance": ["apps/cms/hooks.py:4"]}
+  ],
+  "tasks": [
+    {"id": "task:people.tasks.purge_inactive", "schedule": "0 3 * * *", "kind": "procrastinate", "models_written": ["store:people.User"], "provenance": "apps/people/tasks.py:9"}
+  ],
+  "controls": {"csrf_middleware": true, "DEBUG": false, "SESSION_COOKIE_SECURE": true}
+}

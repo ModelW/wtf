@@ -451,6 +451,12 @@ def render(
 )
 @click.option("--opencode-bin", default=None, help="Path to the opencode binary.")
 @click.option(
+    "--surface",
+    "surfaces",
+    multiple=True,
+    help="unit=path/to/surface.json: use a pre-computed extractor output.",
+)
+@click.option(
     "--format",
     "output_format",
     type=click.Choice(["text", "json"]),
@@ -473,6 +479,7 @@ def auto(
     concurrency: int,
     model_overrides: tuple[str, ...],
     opencode_bin: str | None,
+    surfaces: tuple[str, ...],
     output_format: str,
     root: Path | None,
 ) -> None:
@@ -489,8 +496,13 @@ def auto(
     try:
         routing = load_routing(resolved_root, model_overrides)
         wanted = stage_names(stages)
+        surface_files = _parse_surfaces(surfaces)
         options = AutoOptions(
-            base=base, stages=wanted, budget_usd=budget, concurrency=concurrency
+            base=base,
+            stages=wanted,
+            budget_usd=budget,
+            concurrency=concurrency,
+            surface=surface_files,
         )
 
         def progress(stage: str, key: str, status: str) -> None:
@@ -542,6 +554,18 @@ def auto(
             console.print(f"[yellow]note[/yellow]: {escape(note)}")
         console.print(f"check exit code: {report.check_exit_code}")
     ctx.exit(int(report.exit_code))
+
+
+def _parse_surfaces(raw_values: tuple[str, ...]) -> dict[str, Path]:
+    """``unit=path`` pairs for ``--surface``."""
+    out: dict[str, Path] = {}
+    for raw in raw_values:
+        unit_id, sep, file = raw.partition("=")
+        if not sep or not unit_id or not file:
+            msg = f"--surface expects unit=path, got {raw!r}"
+            raise ValueError(msg)
+        out[unit_id] = Path(file)
+    return out
 
 
 @compliance.command("eval")

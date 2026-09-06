@@ -26,11 +26,14 @@ from model_wtf.auto.stages import (
     discover_items,
     evaluate_items,
     parse_answer,
+    run_extractor_discovery,
 )
 from model_wtf.compliance.check import SHARED_FOLDER, run_check
 from model_wtf.compliance.declarations.loader import load_declarations
 from model_wtf.compliance.discovery import git_sha, load_units, select_manifest
 from model_wtf.compliance.stage import StageOptions, run_stage
+from model_wtf.extractors.django import is_django_unit
+from model_wtf.extractors.surface import SurfaceError
 from model_wtf.knowledge.loader import load_knowledge
 
 if TYPE_CHECKING:
@@ -151,6 +154,8 @@ class AutoOptions:
     stages: tuple[str, ...] = STAGE_ORDER
     budget_usd: float | None = None
     concurrency: int = 4
+    surface: dict[str, Path] = field(default_factory=dict)
+    """Pre-computed Surface JSON per unit id (``--surface unit=file``)."""
 
 
 def run_auto(
@@ -202,6 +207,8 @@ def run_auto(
     for stage in STAGE_ORDER:
         if stage not in options.stages:
             continue
+        if stage == "discover":
+            _extractor_discovery(contexts(), options, report, notify)
         if stage == "evaluate" and options.base:
             # Mechanical pre-pass: what the diff and knowledge invalidated.
             staged = run_stage(root, StageOptions(base=options.base))
@@ -224,6 +231,36 @@ def run_auto(
     report.check_exit_code = int(check.exit_code)
     report.usage = worker.usage_dict()
     return report
+
+
+def _extractor_discovery(
+    contexts: list[UnitContext],
+    options: AutoOptions,
+    report: RunReport,
+    notify: Callable[[str, str, str], None],
+) -> None:
+    """Deterministic discovery for units that have an extractor."""
+    stats = report.stages.setdefault("extract", StageStats())
+    for ctx in contexts:
+        surface_file = options.surface.get(ctx.unit_id)
+        if surface_file is None and not is_django_unit(ctx.context_dir):
+            continue
+        stats.items += 1
+        notify("extract", ctx.unit_id, "started")
+        try:
+            written = run_extractor_discovery(ctx, surface_file)
+        except SurfaceError as exc:
+            stats.failed += 1
+            stats.failures[ctx.unit_id] = str(exc)
+            notify("extract", ctx.unit_id, f"failed: {exc}")
+            continue
+        if written:
+            stats.done += 1
+            report.written.extend(str(p) for p in written)
+            notify("extract", ctx.unit_id, "done")
+        else:
+            stats.skipped += 1
+            notify("extract", ctx.unit_id, "unchanged")
 
 
 def _run_items(
