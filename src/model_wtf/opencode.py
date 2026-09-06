@@ -26,6 +26,7 @@ The instance is stateless between tasks (each ``run_task`` is one
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -62,6 +63,37 @@ class OpenCodeUnavailable(Exception):
 
 class BudgetExceeded(Exception):
     """A task was refused because the instance's budget is spent."""
+
+
+@dataclass(frozen=True)
+class ProviderError:
+    """An error the model provider returned during a task."""
+
+    status: int | None
+    message: str
+    body: str = ""
+
+    @property
+    def fatal(self) -> bool:
+        """Retrying the same call cannot help (auth, permissions, billing)."""
+        return self.status in (401, 402, 403)
+
+    def explain(self, api_key_env: str) -> str:
+        """One sentence a human can act on."""
+        if self.status == 401:
+            return (
+                f"OpenRouter rejected the API key (401 {self.message}). "
+                f"Check {api_key_env}: it must be a valid OpenRouter key."
+            )
+        if self.status == 402:
+            return f"OpenRouter refused for billing reasons (402 {self.message})."
+        if self.status == 403:
+            return (
+                f"OpenRouter refused access (403 {self.message}); the key may not be "
+                "allowed to use this model."
+            )
+        status = f"{self.status} " if self.status else ""
+        return f"provider error: {status}{self.message}"
 
 
 @dataclass(frozen=True)
@@ -222,11 +254,17 @@ class TaskResult:
     tool_calls: int = 0
     models: set[str] = field(default_factory=set)
     stderr_tail: str = ""
+    provider_errors: list[ProviderError] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         """Process exit 0."""
         return self.returncode == 0
+
+    @property
+    def fatal_error(self) -> ProviderError | None:
+        """The first provider error that makes further rounds pointless."""
+        return next((e for e in self.provider_errors if e.fatal), None)
 
 
 class OpenCode:
@@ -323,7 +361,23 @@ class OpenCode:
             returncode = proc.wait()
         result = parse_events("".join(lines))
         result.returncode = 124 if timed_out else returncode
-        tail = "\n".join(stderr.strip().splitlines()[-20:])
+        # OpenCode reports some failures (bad config, provider errors) as
+        # plain text on stdout even in JSON mode: fold those in so a failed
+        # round explains itself instead of showing an empty tail.
+        noise = [
+            ln.rstrip()
+            for ln in lines
+            if ln.strip() and not ln.lstrip().startswith("{")
+        ]
+        result.provider_errors = [
+            err for ln in lines if (err := _event_error(ln)) is not None
+        ]
+        errors = [
+            f"{e.status or ''} {e.message}".strip() for e in result.provider_errors
+        ]
+        tail = "\n".join((stderr.strip().splitlines() + noise + errors)[-20:])
+        if not tail and result.returncode not in (0, None):
+            tail = "no output; run with --keep-scratch and check the config"
         result.stderr_tail = (
             f"timed out after {timeout}s\n{tail}" if timed_out else tail
         )
@@ -372,8 +426,16 @@ def get_opencode(sandbox: Sandbox, *, keep_scratch: bool = False) -> Iterator[Op
             shutil.rmtree(scratch, ignore_errors=True)
 
 
-def preflight(env: dict[str, str] | None = None) -> str:
-    """Check the binary and the API key; return the binary's path."""
+def preflight(
+    env: dict[str, str] | None = None,
+    *,
+    key_check: Callable[[str], None] | None = None,
+) -> str:
+    """Check the binary and the API key; return the binary's path.
+
+    ``key_check`` defaults to :func:`check_api_key` (one HTTPS call); tests
+    pass a stub.
+    """
     env = env if env is not None else dict(os.environ)
     binary = shutil.which("opencode", path=env.get("PATH"))
     if binary is None:
@@ -385,10 +447,45 @@ def preflight(env: dict[str, str] | None = None) -> str:
         wanted = ".".join(map(str, MIN_VERSION))
         msg = f"opencode {found} is too old; {wanted} or newer is required"
         raise OpenCodeUnavailable(msg)
-    if not env.get(API_KEY_ENV):
+    key = env.get(API_KEY_ENV)
+    if not key:
         msg = f"{API_KEY_ENV} is not set; model-wtf talks to OpenRouter only"
         raise OpenCodeUnavailable(msg)
+    (key_check or check_api_key)(key)
     return binary
+
+
+KEY_CHECK_URL = "https://openrouter.ai/api/v1/auth/key"
+
+
+def check_api_key(key: str, *, timeout: float = 10.0) -> None:
+    """Ask OpenRouter whether ``key`` is valid before any round is spent.
+
+    Network trouble is not a verdict: only an explicit 401/403 raises.
+
+    Raises
+    ------
+    OpenCodeUnavailable
+        The key is rejected.
+    """
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(
+        KEY_CHECK_URL, headers={"Authorization": f"Bearer {key}"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout):  # noqa: S310
+            return
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            msg = (
+                f"OpenRouter rejected {API_KEY_ENV} ({exc.code}); "
+                "check the key at https://openrouter.ai/settings/keys"
+            )
+            raise OpenCodeUnavailable(msg) from exc
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return
 
 
 def opencode_version(binary: str) -> tuple[int, ...] | None:
@@ -408,6 +505,43 @@ def opencode_version(binary: str) -> tuple[int, ...] | None:
         return tuple(int(part) for part in digits.split(".")[:3])
     except ValueError:
         return None
+
+
+def _event_error(line: str) -> ProviderError | None:
+    """Provider error carried by a JSON event line, if any.
+
+    OpenCode nests them as ``{"error": {"name": "APIError", "data":
+    {"message", "statusCode", "responseBody", ...}}}`` on the part or the
+    event itself.
+    """
+    line = line.strip()
+    if not line.startswith("{") or '"error"' not in line:
+        return None
+    try:
+        raw = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    part = raw.get("part") or {}
+    err = part.get("error") or raw.get("error")
+    if not err:
+        return None
+    if not isinstance(err, dict):
+        return ProviderError(None, str(err))
+    data_raw = err.get("data")
+    data: dict[str, Any] = data_raw if isinstance(data_raw, dict) else {}
+    status = data.get("statusCode")
+    raw_body = data.get("responseBody")
+    body: str = raw_body if isinstance(raw_body, str) else ""
+    message = data.get("message") or err.get("message") or err.get("name") or "error"
+    if body:
+        with contextlib.suppress(json.JSONDecodeError, AttributeError, TypeError):
+            inner = json.loads(body).get("error")
+            if isinstance(inner, dict) and inner.get("message"):
+                message = inner["message"]
+                status = status or inner.get("code")
+    return ProviderError(
+        int(status) if isinstance(status, int) else None, str(message), body[:300]
+    )
 
 
 def parse_event(line: str) -> Event | None:

@@ -296,22 +296,33 @@ def test_sandbox_config_is_airtight(tmp_path: Path) -> None:
 
 
 def test_preflight_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    accept = lambda _key: None  # noqa: E731
     with pytest.raises(OpenCodeUnavailable, match="not on PATH"):
-        preflight({"PATH": str(tmp_path)})
+        preflight({"PATH": str(tmp_path)}, key_check=accept)
 
     fake = tmp_path / "opencode"
     fake.write_text("#!/bin/sh\necho 1.18.29\n")
     fake.chmod(0o755)
     with pytest.raises(OpenCodeUnavailable, match="OPENROUTER_API_KEY"):
-        preflight({"PATH": str(tmp_path)})
-    assert preflight({"PATH": str(tmp_path), "OPENROUTER_API_KEY": "k"}) == str(fake)
+        preflight({"PATH": str(tmp_path)}, key_check=accept)
+    env = {"PATH": str(tmp_path), "OPENROUTER_API_KEY": "k"}
+    assert preflight(env, key_check=accept) == str(fake)
+
+    def reject(_key: str) -> None:
+        msg = "OpenRouter rejected OPENROUTER_API_KEY (401)"
+        raise OpenCodeUnavailable(msg)
+
+    with pytest.raises(OpenCodeUnavailable, match="rejected"):
+        preflight(env, key_check=reject)
 
     old = tmp_path / "old" / "opencode"
     old.parent.mkdir()
     old.write_text("#!/bin/sh\necho 0.9.0\n")
     old.chmod(0o755)
     with pytest.raises(OpenCodeUnavailable, match="too old"):
-        preflight({"PATH": str(old.parent), "OPENROUTER_API_KEY": "k"})
+        preflight(
+            {"PATH": str(old.parent), "OPENROUTER_API_KEY": "k"}, key_check=accept
+        )
 
 
 def test_parse_events_digest() -> None:
@@ -452,3 +463,43 @@ def test_tools_review_json_contents(repo: Path) -> None:
         "pii=yes | personal | contact" in after
     )
     assert "preferences | JSONField | pii=yes | personal | contact+technical" in after
+
+
+def test_provider_errors_are_parsed_and_explained() -> None:
+    from model_wtf.opencode import API_KEY_ENV, _event_error, parse_events
+
+    line = json.dumps(
+        {
+            "type": "error",
+            "error": {
+                "name": "APIError",
+                "data": {
+                    "message": "Missing Authentication header",
+                    "statusCode": 401,
+                    "responseBody": (
+                        '{"error":{"message":"Missing Authentication header",'
+                        '"code":401}}'
+                    ),
+                },
+            },
+        }
+    )
+    err = _event_error(line)
+    assert err is not None
+    assert (err.status, err.fatal) == (401, True)
+    assert API_KEY_ENV in err.explain(API_KEY_ENV)
+    assert "401" in err.explain(API_KEY_ENV)
+    assert _event_error('{"type": "text", "part": {"text": "no error here"}}') is None
+    soft = _event_error(
+        json.dumps(
+            {
+                "error": {
+                    "name": "APIError",
+                    "data": {"statusCode": 429, "message": "slow down"},
+                }
+            }
+        )
+    )
+    assert soft is not None
+    assert soft.fatal is False
+    assert parse_events(line).tokens == 0

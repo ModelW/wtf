@@ -521,6 +521,11 @@ def auto_review_cmd(
         Console(stderr=True).print(Text.assemble(("Tool error: ", "red"), str(exc)))
         ctx.exit(int(ExitCode.TOOL_ERROR))
 
+    if result.aborted:
+        Console(stderr=True).print(
+            Text.assemble(("Tool error: ", "red"), result.aborted)
+        )
+        ctx.exit(int(ExitCode.TOOL_ERROR))
     summary = Text.assemble(
         (
             "complete" if result.complete else "incomplete",

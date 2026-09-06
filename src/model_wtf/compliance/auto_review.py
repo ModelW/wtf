@@ -38,6 +38,7 @@ from model_wtf.compliance.data import collect_unit
 from model_wtf.compliance.mcp_server import MODEL_ENV, model_of
 from model_wtf.compliance.review import Lock
 from model_wtf.opencode import (
+    API_KEY_ENV,
     DEFAULT_MODEL,
     Agent,
     Event,
@@ -78,6 +79,8 @@ class LoopResult:
     models: set[str] = field(default_factory=set)
     tokens: int = 0
     cost: float = 0.0
+    aborted: str | None = None
+    """Why the loop gave up early (a fatal provider error), if it did."""
 
     @property
     def complete(self) -> bool:
@@ -317,6 +320,21 @@ def auto_review(
                 on_event=reporter.on_event,
             )
             last_message = result.final_text or result.stderr_tail
+            fatal = result.fatal_error
+            if fatal is not None:
+                aborted = fatal.explain(API_KEY_ENV)
+                reporter.log(Text(aborted, style="bold red"))
+                return LoopResult(
+                    rounds,
+                    len(before),
+                    len(remaining),
+                    remaining,
+                    last_message,
+                    oc.models(),
+                    oc.tokens(),
+                    oc.cost(),
+                    aborted=aborted,
+                )
             if not result.ok:
                 reporter.log(
                     Text(
