@@ -47,7 +47,7 @@ def test_full_repo_is_clean(make_repo: MakeRepo) -> None:
         ("front", ScopeKind.UNIT),
     ]
     assert all(s.status is ScopeStatus.OK for s in report.scopes)
-    assert [s.file_count for s in report.scopes] == [1, 1, 1]
+    assert [s.file_count for s in report.scopes] == [3, 1, 1]
     assert report.scopes[2].path == (root / "front" / "compliance").resolve()
 
 
@@ -114,7 +114,8 @@ def test_hidden_files_do_not_rescue_an_otherwise_declared_repo(
 
     report = run_check(root, strict=True)
 
-    assert report.exit_code is ExitCode.CLEAN
+    # Declared (so no ``nothing-declared``), but not initialised.
+    assert _codes(report) == ["app-missing"]
     assert report.scopes[0].file_count == 1
 
 
@@ -211,7 +212,7 @@ def test_to_dict_uses_root_relative_paths(make_repo: MakeRepo) -> None:
         "kind": "shared",
         "path": "compliance",
         "exists": True,
-        "file_count": 1,
+        "file_count": 3,
         "status": "ok",
     }
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from model_wtf.compliance.declarations import load_declarations
 from model_wtf.compliance.discovery import load_units, select_manifest
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.report import (
@@ -50,7 +51,8 @@ def run_check(root: Path, *, strict: bool) -> Report:
             exit_code=ExitCode.DECLARATION_ERROR,
         )
 
-    scopes = [_inspect(SHARED_SCOPE_ID, ScopeKind.SHARED, root / SHARED_FOLDER)]
+    shared = root / SHARED_FOLDER
+    scopes = [_inspect(SHARED_SCOPE_ID, ScopeKind.SHARED, shared)]
     scopes.extend(_inspect(unit.id, ScopeKind.UNIT, unit.folder) for unit in units)
 
     if all(scope.file_count == 0 for scope in scopes):
@@ -62,15 +64,30 @@ def run_check(root: Path, *, strict: bool) -> Report:
                 path=root,
             )
         )
+    else:
+        diagnostics.extend(load_declarations(shared).diagnostics)
 
-    has_error = any(d.severity is Severity.ERROR for d in diagnostics)
     return Report(
         root=root,
         manifest=manifest,
         scopes=tuple(scopes),
         diagnostics=tuple(diagnostics),
-        exit_code=ExitCode.DECLARATION_ERROR if has_error else ExitCode.CLEAN,
+        exit_code=exit_code_for(diagnostics),
     )
+
+
+def exit_code_for(diagnostics: list[Diagnostic]) -> ExitCode:
+    """Worst outcome wins: errors → 3, blanks → 1, otherwise clean.
+
+    A blank is emitted as a warning (it does not mean the declarations are
+    wrong) but still fails the check, because an unfinished registry is not
+    a compliant one.
+    """
+    if any(d.severity is Severity.ERROR for d in diagnostics):
+        return ExitCode.DECLARATION_ERROR
+    if any(d.code == "blank" for d in diagnostics):
+        return ExitCode.FINDINGS
+    return ExitCode.CLEAN
 
 
 def _inspect(scope_id: str, kind: ScopeKind, folder: Path) -> Scope:

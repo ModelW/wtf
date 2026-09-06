@@ -36,9 +36,36 @@ images:
     context: front
 """
 
-# Files that make every scope of ``SNOW_TWO_UNITS`` status ``ok``.
+APP_OK = """
+name: Kerfufoo
+description: Back-office for the Kerfufoo client portal.
+controller: acme
+processor: with-madrid
+"""
+
+PARTY_ACME = """
+name: ACME Corp
+country: FR
+address: 1 rue de la Paix, Paris
+email: privacy@acme.example
+"""
+
+PARTY_WITH = """
+name: WITH Madrid SL
+country: ES
+address: Calle Mayor 1, Madrid
+email: dpo@with-madrid.com
+dpo:
+  name: Jane Doe
+  email: dpo@with-madrid.com
+"""
+
+# Files that make every scope of ``SNOW_TWO_UNITS`` status ``ok`` and the
+# declarations fully valid and filled.
 FILES_ALL_OK: dict[str, str] = {
-    "compliance/controller.md": "controller",
+    "compliance/app.yaml": APP_OK,
+    "compliance/parties/acme.yaml": PARTY_ACME,
+    "compliance/parties/with-madrid.yaml": PARTY_WITH,
     "api/compliance/dpa.md": "dpa",
     "front/compliance/cookies.md": "cookies",
 }

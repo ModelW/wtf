@@ -6,11 +6,30 @@ compliance of a given Git repo.
 ## Compliance
 
 ```
+uv run model-wtf compliance init  [--name X] [--controller-name X --controller-country CC]
+                                  [--processor-name X --processor-country CC | --no-processor]
 uv run model-wtf compliance check [--strict] [--format text|json|github] [--root PATH]
 ```
 
-Discovers the repository's compliance _units_ and verifies that something is
-declared for each of them.
+`init` scaffolds the repo-root `compliance/` folder (`app.yaml`, one
+`parties/<id>.yaml` per organisation, a README), adds `compliance: compliance`
+to every image of `snow.yml` and creates the per-unit folders. It never
+overwrites anything; re-run it to add what is missing. Values left for a human
+are written as the YAML tag `!open`. The processor defaults to
+`default_processor: {name, country, address, email}` from
+`~/.config/model-wtf/config.yml`.
+
+`check` discovers the units, validates every declaration file against its
+schema (pydantic; unknown keys are errors) and lists the `!open` values.
+
+### Files
+
+- `compliance/app.yaml` — `name`, `description`, `controller` (party id, the
+  client) and optional `processor` (party id, the agency).
+- `compliance/parties/<id>.yaml` — `name`, `country` (ISO alpha-2),
+  `address`, `email`; optional `phone`, `website`, `registration`, `dpo` and
+  `representative` contact blocks. A party is role-less: controller, processor
+  or recipient is decided per processing activity.
 
 ### Unit discovery
 
@@ -40,9 +59,9 @@ The repo-root `compliance/` folder is always loaded as the _shared_ scope
 | Code | Meaning                                                         |
 | ---- | --------------------------------------------------------------- |
 | 0    | Clean                                                           |
-| 1    | Open findings / gate failures                                   |
+| 1    | Open findings / `!open` values still to fill                    |
 | 2    | Stale attestation                                               |
-| 3    | Declaration errors (missing/invalid manifest, `--strict` hits)  |
+| 3    | Declaration errors (schema, missing files, dangling party ids)  |
 | 4    | Tool error                                                      |
 
 ## Development
