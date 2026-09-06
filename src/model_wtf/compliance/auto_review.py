@@ -460,7 +460,7 @@ def narrate(  # noqa: C901 - one branch per tool, flat on purpose
     if name == "touchpoint_set_data":
         tp = str(event.args.get("touchpoint") or "")
         n = len(event.args.get("data") or [])
-        what = "touches nothing personal" if n == 0 else f"{n} data item(s) declared"
+        what = "touches no data" if n == 0 else f"{n} data item(s) declared"
         exports = event.args.get("exporting") or []
         if exports:
             parties = ", ".join(str(e.get("party", "?")) for e in exports)
@@ -508,7 +508,7 @@ def narrate_write(  # noqa: C901 - one branch per kind
     ident = str(entry.get("id", ""))
     if kind == "touchpoint":
         n = int(entry.get("items", 0))
-        what = "touches nothing personal" if n == 0 else f"{n} data item(s)"
+        what = "touches no data" if n == 0 else f"{n} data item(s)"
         parties = entry.get("parties") or []
         if parties:
             what += f", sends data to {', '.join(map(str, parties))}"

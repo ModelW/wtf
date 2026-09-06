@@ -196,7 +196,7 @@ manual store file without `type`. `data override … --store <slug>` moves a
 row to another store.
 
 ```
-uv run model-wtf compliance data auto-review [--unit ID] [--base REF] [--batch 8] [--max-rounds 20] [--max-tokens N] [--model provider/model] [--dry-run]
+uv run model-wtf compliance data auto-review [--unit ID] [--base REF] [--batch 8] [--workers 16] [--max-rounds 20] [--max-tokens N] [--model provider/model] [--dry-run]
 ```
 
 Runs an OpenCode agent on OpenRouter (`openrouter/openrouter/auto` by default;
@@ -242,17 +242,20 @@ allowed), a bare `- unit:app.Model.field` meaning read+write and
 `- unit:app.Model.field: write` (or `read`) when it is one-way; `exporting:`
 lists what leaves the unit — `- {party: mapbox, data: [...], purpose: ...}`,
 the party being a `compliance/parties/` id, which is where the register's
-recipients come from; plus `ignore`, `note`. A touchpoint
+recipients come from; plus `ignore`, `note`. Every inventory item the code
+reads or writes is listed, personal or not: the register filters on `pii`
+downstream, the data-flow model needs all of it. A touchpoint
 is **pending** until it has a `data` key — an explicit `[]` means "touches
-nothing personal, checked". `check` reports `touchpoint-pending` and
+no inventory item, checked". `check` reports `touchpoint-pending` and
 `touchpoint-orphan` (handles personal data, belongs to no activity), both
 exit 1, and `data-unreferenced` as information.
 
 ```
-uv run model-wtf compliance touchpoints auto-review [--unit ID] [--batch 8] [--max-rounds 20] [--group/--no-group] [--group-only] [--model ...] [--max-tokens N]
+uv run model-wtf compliance touchpoints auto-review [--unit ID] [--batch 8] [--workers 16] [--max-rounds 20] [--group/--no-group] [--group-only] [--model ...] [--max-tokens N]
 ```
 
-Same sandboxed OpenCode loop as `data auto-review`, two passes. **Pass 1**,
+Same sandboxed OpenCode loop as `data auto-review` (`--workers` sessions run in
+parallel each round, each on its own shard of the pending list), two passes. **Pass 1**,
 one touchpoint per subagent session: `touchpoint_show` gives the code
 location, the schemas and what the API operations it calls already declare;
 the reviewer reads the view/task/route, resolves items with `data_search`

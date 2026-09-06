@@ -254,7 +254,7 @@ def render_touchpoint(tp: Touchpoint, ws: Workspace) -> Text:
         out.append(export.party, style="bold red")
         if export.purpose:
             out.append(f" ({export.purpose})", style="dim")
-        out.append(": " + (", ".join(export.data) or "nothing personal") + "\n")
+        out.append(": " + (", ".join(export.data) or "no inventory item") + "\n")
     if tp.note:
         line("note", tp.note)
     acts = ws.activities.of_touchpoint(tp.full_id)
@@ -267,7 +267,7 @@ def _render_declared_data(out: Text, tp: Touchpoint, ws: Workspace) -> None:
     if tp.data is None:
         out.append("  data: not declared yet (pending)\n", style="yellow")
     elif not tp.data:
-        out.append("  data: [] — touches nothing personal\n", style="green")
+        out.append("  data: [] — touches no inventory item\n", style="green")
     else:
         out.append("  data:\n", style="dim")
         for ref in tp.data:
@@ -327,7 +327,7 @@ def tp_set_data(
     REFS are ``<unit>:<app.Model.field>`` data ids (``@json``/``@files`` rows
     allowed; a ref without unit means the touchpoint's unit). ``ref=write``
     or ``ref=read`` sets the direction. No REF at all declares an empty list:
-    "touches nothing personal, checked".
+    "touches no inventory item, checked".
     """
     console = Console()
     ws = workspace_or_exit(ctx, root, python=python)
@@ -406,9 +406,9 @@ def tp_set_data(
 )
 @click.option(
     "--workers",
-    default=4,
+    default=16,
     show_default=True,
-    type=click.IntRange(1, 16),
+    type=click.IntRange(1, 32),
     help="Parallel OpenCode sessions per round, each reviewing --batch touchpoints.",
 )
 @click.option("--keep-scratch", is_flag=True, hidden=True)

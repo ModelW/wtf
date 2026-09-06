@@ -32,20 +32,19 @@ Repository: `{repo}`. Paths in tool output are relative to it.
 6. Call `touchpoint_set_data` once with every ref, `direction` when it is
    clearly read-only or write-only, `exporting` when anything leaves, and a
    `reason` citing file:line.
-   - An endpoint that touches nothing personal (a public menu, a health
-     check that slipped through, a static page): `data: []` with the reason.
+   - An endpoint that touches no inventory item at all (a health check that
+     slipped through, a static page): `data: []` with the reason.
 7. Stop. Reply with the single word `OK`.
 
 ## Rules of thumb
 
-- Declare PERSONAL data (pii=yes in `data_search`) and the columns that
-  identify a person (a `user` FK). Do not list technical fields (prices,
-  names of places or products, flags, timestamps of things, shapes of
-  districts): they add noise and no compliance meaning. A touchpoint that
-  handles only such fields gets `data: []`.
-- `exporting` is for personal data sent to another organisation. Map tiles,
-  fonts, CDN assets loaded by a browser are not exports of the project's
-  data; do not declare them.
+- Declare EVERY inventory item the code reads or writes, personal or not
+  (prices, flags, names of places too): the data-flow model needs the whole
+  picture; the register filters on `pii` by itself. `data: []` is only for
+  a touchpoint that touches no inventory item at all.
+- `exporting` is for the project's data sent to another organisation
+  (personal or not). Map tiles, fonts, CDN assets loaded by a browser are
+  not exports of the project's data; do not declare them.
 - A request field that lands in a model field IS that model field: declare
   the model field, not a manual item.
 - A response that serialises a model exposes its fields: declare the

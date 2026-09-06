@@ -29,9 +29,11 @@ transfer of the listed items to that party. The party must exist in
 ``compliance/parties/`` (the agent creates it with ``!todo`` details when it
 meets a new one); its ``country`` drives the third-country logic later.
 
-A touchpoint is **pending** until its manifest has a ``data`` key; an
-explicit empty list means "touches nothing personal, checked" and is a
-valid review. Data references must exist in the inventory of the named
+A touchpoint is **pending** until its manifest has a ``data`` key; the list
+names every inventory item the code reads or writes, personal or not (the
+register filters on ``pii`` downstream; the data-flow model needs all of
+it). An explicit empty list means "touches no inventory item, checked" and
+is a valid review. Data references must exist in the inventory of the named
 unit; unknown ones are declaration errors.
 """
 

@@ -458,9 +458,9 @@ def reviewed_cmd(
 )
 @click.option(
     "--workers",
-    default=1,
+    default=16,
     show_default=True,
-    type=click.IntRange(1, 16),
+    type=click.IntRange(1, 32),
     help="Parallel OpenCode sessions per round, each reviewing --batch items.",
 )
 @click.option(
