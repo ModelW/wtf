@@ -282,9 +282,29 @@ class LawfulBasis(StrEnum):
     LEGITIMATE_INTEREST = "legitimate_interest"
 
 
-class Activity(Strict):
-    """A processing activity: purpose, basis, subjects, recipients."""
+class MembersDirective(Strict):
+    """Reassign members of a generated cluster (``members: {add, remove}``)."""
 
+    add: list[str] = Field(default_factory=list, title="Add", description="Member ids.")
+    remove: list[str] = Field(
+        default_factory=list, title="Remove", description="Member ids."
+    )
+
+
+class Activity(Strict):
+    """A processing activity: purpose, basis, subjects, recipients.
+
+    ``members`` lets humans reshape the machine-proposed cluster: a
+    ``{add, remove}`` mapping on the twin of a generated activity, or a
+    plain list on a new activity that splits members off. The clustering
+    step reads it; the registry does not.
+    """
+
+    members: MembersDirective | list[str] | None = Field(
+        default=None,
+        title="Members",
+        description="Membership overrides for the clustering step.",
+    )
     drafted_by: Literal["agent"] | None = Field(
         default=None,
         title="Drafted by",

@@ -260,10 +260,14 @@ def sync_checkpoint_set(
     file_id: str,
     applicable: Iterable[Rule],
     result: ReconcileResult,
+    *,
+    declared: bool = True,
 ) -> dict[str, Checkpoint]:
     """Make the ledger's key set equal to ``applicable`` and honour versions.
 
-    * Missing rule → ``unknown`` entry.
+    * Missing rule → ``unknown`` entry (``staged_because`` says whether the
+      element is simply not declared yet -- a ``.gen``-only entity waiting
+      for ``classify`` -- or the checkpoint is genuinely new).
     * Rule removed / no longer applicable → entry dropped, finding deleted.
     * Rule version differs from ``rule_version`` → back to ``unknown`` with
       ``staged_because``; the finding is kept until re-evaluation decides.
@@ -288,7 +292,9 @@ def sync_checkpoint_set(
         if entry is None:
             ledger[rule_id] = Checkpoint(
                 status=CheckpointStatus.UNKNOWN,
-                staged_because="new checkpoint",
+                staged_because=(
+                    "new checkpoint" if declared else "declaration missing"
+                ),
                 rule_version=rule.version,
             )
             result.staged.append(f"{rule_id}@{file_id}")

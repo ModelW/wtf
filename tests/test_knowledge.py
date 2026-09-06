@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 MW_SEC = [f"MW-SEC-{n:03d}" for n in range(1, 11)]
 GDPR_GATES = [
+    "GDPR-ACTIVITY-COVERAGE",
     "GDPR-LAWFUL-BASIS",
     "GDPR-PURPOSE",
     "GDPR-RETENTION-DECLARED",
@@ -103,6 +104,7 @@ def test_applicability_by_kind_and_stack() -> None:
         "GDPR-TRANSFER",
     }
     assert {r.id for r in knowledge.rules_for("activity")} == {
+        "GDPR-ACTIVITY-COVERAGE",
         "GDPR-LAWFUL-BASIS",
         "GDPR-PURPOSE",
         "GDPR-RECIPIENT-DECLARED",

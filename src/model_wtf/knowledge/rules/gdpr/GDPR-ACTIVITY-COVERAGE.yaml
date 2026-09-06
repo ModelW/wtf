@@ -1,0 +1,18 @@
+id: GDPR-ACTIVITY-COVERAGE
+title: Every entrypoint and task belongs to a processing activity
+frameworks: [gdpr]
+applies_to: {kind: activity}
+kind: gate
+severity: medium
+version: 1
+description: >-
+  The registry is only complete when every route and background task is a
+  member of some activity. After humans reshape the machine-proposed
+  clusters (`members: {add, remove}`, split-off activities), a member
+  nobody claims silently disappears from the Art. 30 record.
+mitigation: >-
+  Add the member to an activity's `members: {add: [...]}` in
+  `processing/<id>.yaml`, or create a new `processing/<new>.yaml` listing
+  it, then regenerate.
+condition: not unit_fact("uncovered_members")
+references: ["Art. 30(1)(b)", "Art. 5(2)"]

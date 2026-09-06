@@ -42,6 +42,7 @@ from model_wtf.compliance.ledger import (
     sync_checkpoint_set,
 )
 from model_wtf.compliance.whitelist import Decision, check_write
+from model_wtf.extractors.clustering import write_clusters
 from model_wtf.extractors.django import (
     is_django_unit,
     load_surface_file,
@@ -189,13 +190,11 @@ def discover_items(ctx: UnitContext) -> list[WorkItem]:
 
     def write(answer: AgentOutput, _model: str | None) -> list[Path]:
         assert isinstance(answer, DiscoverOutput)  # noqa: S101
-        report = write_surface(
-            ctx.folder,
-            discover_to_surface(ctx.unit_id, answer),
-            by="agent",
-            source_sha=current,
-        )
-        return report.written
+        surface = discover_to_surface(ctx.unit_id, answer)
+        report = write_surface(ctx.folder, surface, by="agent", source_sha=current)
+        clusters = write_clusters(ctx.folder, surface, by="agent")
+        _write_coverage(ctx.folder, clusters.uncovered)
+        return report.written + clusters.written
 
     return [
         WorkItem(
@@ -207,6 +206,17 @@ def discover_items(ctx: UnitContext) -> list[WorkItem]:
             write=write,
         )
     ]
+
+
+def _write_coverage(folder: Path, uncovered: list[str]) -> None:
+    """Record members no activity claims, for the GDPR-ACTIVITY-COVERAGE gate."""
+    path = folder / "elements" / "coverage.gen.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = gen_header("(no twin: coverage facts)") + yaml.safe_dump(
+        {"by": "extractor", "uncovered_members": sorted(uncovered)}, sort_keys=True
+    )
+    if not path.is_file() or path.read_text(encoding="utf-8") != text:
+        path.write_text(text, encoding="utf-8")
 
 
 def _discovered_sha(folder: Path) -> str | None:
@@ -235,7 +245,9 @@ def run_extractor_discovery(
         else run_extractor(ctx.context_dir)
     )
     report = write_surface(ctx.folder, surface, by="extractor", source_sha=current)
-    return report.written
+    clusters = write_clusters(ctx.folder, surface, by="extractor")
+    _write_coverage(ctx.folder, clusters.uncovered)
+    return report.written + clusters.written
 
 
 def discover_to_surface(unit_id: str, answer: DiscoverOutput) -> Surface:

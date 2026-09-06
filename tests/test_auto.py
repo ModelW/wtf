@@ -361,11 +361,22 @@ def test_discover_then_classify_drafts_without_touching_humans(
             "rationale": "sdk",
         }
     )
+    classify_act = json.dumps(
+        {
+            "purpose": "Collect and follow up on leads from the public marketing form.",
+            "lawful_basis": "legitimate_interest",
+            "data_subject_categories": ["customers"],
+            "recipients": [],
+            "dpia_needed": False,
+            "rationale": "one public POST creating leads",
+        }
+    )
     worker = FakeWorker(
         {
             "wtf-discover": discover,
             "wtf-classify-data-object": classify_obj,
             "wtf-classify-recipient": classify_rec,
+            "wtf-classify-activity": classify_act,
         }
     )
 
@@ -391,7 +402,18 @@ def test_discover_then_classify_drafts_without_touching_humans(
 
     # classify drafted the two new entities, not the existing ones.
     classified = {a for a, _ in worker.calls if a.startswith("wtf-classify")}
-    assert classified == {"wtf-classify-data-object", "wtf-classify-recipient"}
+    assert classified == {
+        "wtf-classify-data-object",
+        "wtf-classify-recipient",
+        "wtf-classify-activity",
+    }
+    # The discovered route was clustered into a `leads` activity and drafted.
+    leads_gen = yaml.safe_load(
+        (root / "api/compliance/processing/leads.gen.yaml").read_text()
+    )
+    assert leads_gen["members"] == ["http:POST:/leads/"]
+    leads = yaml.safe_load((root / "api/compliance/processing/leads.yaml").read_text())
+    assert leads["lawful_basis"] == "legitimate_interest"
     draft = yaml.safe_load((root / "api/compliance/data/leads.lead.yaml").read_text())
     assert draft["drafted_by"] == "agent"
     assert draft["fields"]["form"]["contents"] == [

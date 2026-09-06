@@ -107,11 +107,38 @@ def has_gen(element: Element) -> bool:
     return element.gen is not None
 
 
+def unit_facts(ds: DeclarationSet) -> dict[str, Any]:
+    """Unit-level generated facts (``elements/unit.gen.yaml`` + ``coverage.gen.yaml``).
+
+    Some gates are about the unit rather than one declaration (is every
+    route in an activity?). Those facts live in twin-less ``.gen`` files
+    under ``elements/``; this merges them for conditions.
+    """
+    import yaml
+
+    facts: dict[str, Any] = {}
+    for name in ("unit", "coverage"):
+        path = ds.unit.path / "elements" / f"{name}.gen.yaml"
+        if path.is_file():
+            try:
+                data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            except yaml.YAMLError:
+                continue
+            if isinstance(data, dict):
+                facts.update(data)
+    return facts
+
+
 def build_namespace(
     element: Element, ds: DeclarationSet, knowledge: Knowledge
 ) -> dict[str, Any]:
     """Everything a condition may reference for ``element``."""
     vocabulary = knowledge.data_items
+    facts = unit_facts(ds)
+
+    def unit_fact(key: str) -> Any:
+        """A unit-level generated fact (``uncovered_members``, ``controls``...)."""
+        return facts.get(key)
 
     def items_any(target: Element, attribute: str) -> bool:
         """Whether any item of ``target`` has ``attribute`` (``special_art9``...)."""
@@ -131,6 +158,7 @@ def build_namespace(
         "gen_keys": gen_keys,
         "has_gen": has_gen,
         "duration_years": duration_years,
+        "unit_fact": unit_fact,
     }
     # The element proxies attribute access to its model, so conditions can
     # write ``recipient.kind`` while helpers still reach the ``.gen`` facts.

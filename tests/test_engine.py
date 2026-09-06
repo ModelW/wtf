@@ -111,6 +111,7 @@ def test_applicability_written_to_gen(make_repo: MakeRepo) -> None:
     )
     activity = _gen(root, "activity.billing")
     assert activity["applicable_rules"] == [
+        "GDPR-ACTIVITY-COVERAGE",
         "GDPR-DPIA",
         "GDPR-LAWFUL-BASIS",
         "GDPR-PURPOSE",
@@ -161,6 +162,7 @@ def test_all_shipped_gates_evaluate_on_valid_tree(make_repo: MakeRepo) -> None:
     evaluation = evaluate_unit(ds, load_knowledge())
 
     assert {g.rule.id for g in evaluation.gates} == {
+        "GDPR-ACTIVITY-COVERAGE",
         "GDPR-CLASSIFICATION-STALE",
         "GDPR-DPIA",
         "GDPR-LAWFUL-BASIS",

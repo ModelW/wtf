@@ -221,7 +221,13 @@ def apply_to_folder(
         file_id = _file_id(element)
         _write_gen(store.elements_dir / f"{file_id}.gen.yaml", element)
 
-        ledger = sync_checkpoint_set(store, file_id, element.applicable, result)
+        ledger = sync_checkpoint_set(
+            store,
+            file_id,
+            element.applicable,
+            result,
+            declared=element.model is not None,
+        )
         verdicts = [
             _verdict(gate, file_id, sha, now, root)
             for gate in gates_by_element.get(element.id, [])
