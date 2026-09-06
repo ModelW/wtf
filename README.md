@@ -163,6 +163,33 @@ erasure time limits, derived rights matrix), recipients, data objects, and the
 byte-identical output. Templates are one Jinja file per kind under
 `src/model_wtf/compliance/templates/registry/`.
 
+## `compliance auto`
+
+```
+uv run model-wtf compliance auto [--base REF] [--stage discover|classify|evaluate]...
+                                 [--budget USD] [--concurrency N]
+                                 [--model-override stage=provider/model]... [--format json]
+```
+
+The labour engine. model-wtf boots **one isolated `opencode serve`** for the
+run: throwaway `HOME`/`XDG_*`, `OPENCODE_CONFIG` pointing at the config
+generated from `src/model_wtf/agents/`, `--pure`, scrubbed environment; after
+boot it asserts that no MCP server and no foreign agent leaked in. Only
+OpenRouter is supported: `OPENROUTER_API_KEY`, else a read-only peek at the
+user's OpenCode `auth.json`; without a credential nothing runs.
+
+Stages run in order
+`discover → classify → (mechanical stage with --base) → evaluate → reconcile`.
+Every stage recomputes its work items from disk, so a re-run only asks what is
+still missing (unchanged source → no discover; complete state files → no
+classify; no `unknown` → no evaluate). Each item is one sub-agent session; the
+answer is validated against the stage's schema, retried once with the errors,
+then written (drafts only into new state files, verdicts through the ledger).
+Exit codes: 0 complete, 1 some items failed, 4 budget exhausted (in-flight items
+finish, results are on disk), 5 tool error. Models per stage come from
+`knowledge/routing.yaml`, overridable per repo in `.model-wtf.yml#routing` and
+per run with `--model-override`.
+
 ## Agents
 
 `src/model_wtf/agents/` is the only configuration the OpenCode instance booted

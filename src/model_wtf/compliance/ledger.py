@@ -143,9 +143,7 @@ class LedgerStore:
         _write_yaml(
             path,
             {
-                rule_id: cp.model_dump(
-                    mode="json", exclude_none=True, exclude_defaults=True
-                )
+                rule_id: _dump_checkpoint(cp)
                 for rule_id, cp in sorted(checkpoints.items())
             },
         )
@@ -242,6 +240,19 @@ class LedgerStore:
 # ---------------------------------------------------------------------------
 # Reconcile
 # ---------------------------------------------------------------------------
+
+
+def _dump_checkpoint(checkpoint: Checkpoint) -> dict[str, Any]:
+    """Compact YAML form: defaults dropped, except the evaluator (``by``).
+
+    ``by`` defaults to ``agent`` for backwards compatibility with
+    hand-written ledgers, but a machine-written entry must always say who
+    evaluated it -- readers should not have to know the default.
+    """
+    data = checkpoint.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
+    if checkpoint.evaluated is not None:
+        data["evaluated"] = checkpoint.evaluated.model_dump(mode="json")
+    return data
 
 
 def sync_checkpoint_set(

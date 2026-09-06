@@ -1,0 +1,8 @@
+# Model per `auto` stage. OpenRouter ids (provider/model). Repos override in
+# `.model-wtf.yml#routing`, the CLI with `--model-override stage=model`.
+default: openrouter/openrouter/auto
+stages:
+  discover: openrouter/anthropic/claude-sonnet-4
+  classify: openrouter/openai/gpt-4o-mini
+  evaluate: openrouter/anthropic/claude-sonnet-4
+  stage: openrouter/anthropic/claude-sonnet-4

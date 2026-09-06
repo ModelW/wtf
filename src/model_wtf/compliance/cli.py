@@ -11,6 +11,10 @@ import rich_click as click
 from rich.console import Console
 from rich.markup import escape
 
+from model_wtf.auto.opencode import OpenCodeError, OpenCodeServer, find_credential
+from model_wtf.auto.routing import load_routing
+from model_wtf.auto.run import AutoExitCode, AutoOptions, run_auto, stage_names
+from model_wtf.auto.run import render_json as render_auto_json
 from model_wtf.compliance.check import run_check
 from model_wtf.compliance.discovery import find_repo_root, git_sha
 from model_wtf.compliance.exit_codes import ExitCode
@@ -28,6 +32,7 @@ from model_wtf.compliance.render import render_github, render_json, render_text
 from model_wtf.compliance.report import DeclarationError
 from model_wtf.compliance.stage import Aggressiveness, StageOptions, run_stage
 from model_wtf.compliance.whitelist import check_write
+from model_wtf.knowledge.loader import KnowledgeError
 
 
 @click.group()
@@ -421,3 +426,191 @@ def render(
         return
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(text, encoding="utf-8")
+
+
+@compliance.command()
+@click.option(
+    "--base", default=None, help="Git ref: re-stage what the diff invalidates."
+)
+@click.option(
+    "--stage",
+    "stages",
+    multiple=True,
+    type=click.Choice(["discover", "classify", "stage", "evaluate", "reconcile"]),
+    help="Only run these stages (canonical order kept). Default: all.",
+)
+@click.option(
+    "--budget", type=float, default=None, help="Max spend in USD; exit 4 when hit."
+)
+@click.option("--concurrency", type=int, default=4, show_default=True)
+@click.option(
+    "--model-override",
+    "model_overrides",
+    multiple=True,
+    help="stage=provider/model (stages: discover, classify, evaluate, stage, default).",
+)
+@click.option("--opencode-bin", default=None, help="Path to the opencode binary.")
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    show_default=True,
+)
+@click.option(
+    "--root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Repository root. Defaults to the enclosing Git checkout, else the cwd.",
+)
+@click.pass_context
+def auto(
+    ctx: click.Context,
+    *,
+    base: str | None,
+    stages: tuple[str, ...],
+    budget: float | None,
+    concurrency: int,
+    model_overrides: tuple[str, ...],
+    opencode_bin: str | None,
+    output_format: str,
+    root: Path | None,
+) -> None:
+    """Let the agent do the labour: discover, classify, evaluate, reconcile.
+
+    Boots one isolated OpenCode server (no user config, no MCP, read-only
+    agents), fans one sub-agent session out per work item, validates every
+    answer against its schema and writes results as they complete. Exit
+    codes: 0 complete, 1 some items failed, 4 budget exhausted, 5 tool
+    error.
+    """
+    resolved_root = root.resolve() if root else find_repo_root(Path.cwd())
+    console = Console(stderr=output_format == "json")
+    try:
+        routing = load_routing(resolved_root, model_overrides)
+        wanted = stage_names(stages)
+        options = AutoOptions(
+            base=base, stages=wanted, budget_usd=budget, concurrency=concurrency
+        )
+
+        def progress(stage: str, key: str, status: str) -> None:
+            style = (
+                "green" if status == "done" else "red" if "failed" in status else "dim"
+            )
+            console.print(
+                f"[{style}]{stage:9}[/{style}] {escape(key)}  {escape(status)}"
+            )
+
+        with OpenCodeServer(
+            resolved_root,
+            default_model=routing.default,
+            agent_models=routing.agent_models(),
+            credential=find_credential(),
+            binary=opencode_bin,
+        ) as server:
+            console.print(
+                f"[dim]opencode {server.base_url} · default model "
+                f"{routing.default}[/dim]"
+            )
+            report = run_auto(
+                resolved_root, server, routing, options, progress=progress
+            )
+    except (OpenCodeError, KnowledgeError, ValueError) as exc:
+        Console(stderr=True).print(f"[red]{exc}[/red]")
+        ctx.exit(int(AutoExitCode.TOOL_ERROR))
+    except DeclarationError as exc:
+        Console(stderr=True).print(f"[red]{exc.diagnostic.message}[/red]")
+        ctx.exit(int(AutoExitCode.TOOL_ERROR))
+
+    if output_format == "json":
+        click.echo(render_auto_json(report))
+    else:
+        for name, stats in report.stages.items():
+            console.print(
+                f"{name:9} {stats.done} done, {stats.failed} failed, "
+                f"{stats.skipped} skipped of {stats.items}"
+            )
+        usage = report.usage
+        if usage:
+            console.print(
+                f"spend ${usage.get('cost_usd', 0):.4f} over "
+                f"{usage.get('sessions', 0)} sessions"
+            )
+        if report.budget_exhausted:
+            console.print("[red]budget exhausted; completed items are on disk[/red]")
+        for note in report.notes:
+            console.print(f"[yellow]note[/yellow]: {escape(note)}")
+        console.print(f"check exit code: {report.check_exit_code}")
+    ctx.exit(int(report.exit_code))
+
+
+@compliance.command("eval")
+@click.option(
+    "--template",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    required=True,
+)
+@click.option(
+    "--variants",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    required=True,
+)
+@click.option(
+    "--workdir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Where to materialise variants (default: a temp dir).",
+)
+@click.option("--budget", type=float, default=None, help="Max spend per variant (USD).")
+@click.pass_context
+def eval_(
+    ctx: click.Context,
+    *,
+    template: Path,
+    variants: Path,
+    workdir: Path | None,
+    budget: float | None,
+) -> None:
+    """Run `auto` on every eval variant and diff against the golden sets."""
+    import tempfile
+
+    from model_wtf.agents.evalharness import run_all
+
+    console = Console()
+    credential = find_credential()
+    if credential is None:
+        console.print("[red]OPENROUTER_API_KEY is required for eval[/red]")
+        ctx.exit(int(AutoExitCode.TOOL_ERROR))
+    routing = load_routing()
+
+    def runner(root: Path) -> dict[str, Any]:
+        import subprocess
+
+        subprocess.run(  # noqa: S603 - fixed argv
+            ["git", "-C", str(root), "init", "-q"],  # noqa: S607
+            check=False,
+        )
+        with OpenCodeServer(
+            root,
+            default_model=routing.default,
+            agent_models=routing.agent_models(),
+            credential=credential,
+        ) as server:
+            report = run_auto(root, server, routing, AutoOptions(budget_usd=budget))
+        return {
+            "agent_calls": server.usage.sessions,
+            "restaged": 0,
+            "items": {},
+            "report": report.to_dict(),
+        }
+
+    work = workdir or Path(tempfile.mkdtemp(prefix="model-wtf-eval-"))
+    results = run_all(template, variants, work, runner)
+    failed = 0
+    for result in results:
+        colour = "green" if result.passed else "red"
+        console.print(f"[{colour}]{result.name}[/{colour}]")
+        for mismatch in result.mismatches:
+            console.print(f"  - {escape(mismatch)}")
+        failed += not result.passed
+    ctx.exit(1 if failed else 0)
