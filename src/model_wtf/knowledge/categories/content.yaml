@@ -1,0 +1,5 @@
+description: Free-form material authored by or about the person
+examples: [comments, messages, uploaded documents, notes, JSON blobs]
+register_label: User content
+legal: none
+dpia: false

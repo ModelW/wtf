@@ -1,0 +1,5 @@
+rank: 3
+description: Disclosure causes significant harm to the person or the business.
+criteria: Financial data, identity documents, precise location, behavioural profiles, credentials and secrets, opaque blobs whose contents are unverified.
+handling: Encrypted at rest where feasible, never in logs or error reports, access audited, short retention, explicit justification for every recipient.
+dpia: large_scale

@@ -1,0 +1,7 @@
+description: Date of birth, age
+priority: 100
+match:
+  - name: '(^|_)(birth|birthday|dob|born|age)(_|$)'
+pii: true
+sensitivity: personal
+category: identity

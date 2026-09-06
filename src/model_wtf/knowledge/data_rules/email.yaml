@@ -1,0 +1,8 @@
+description: Email addresses
+priority: 100
+match:
+  - type: [EmailField]
+  - name: '(^|_)e?mail(_|$)'
+pii: true
+sensitivity: personal
+category: contact

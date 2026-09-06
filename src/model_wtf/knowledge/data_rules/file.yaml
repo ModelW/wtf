@@ -1,0 +1,9 @@
+description: Uploaded files and images (contents unknown, authored by users)
+priority: 32
+match:
+  - type: [FileField, ImageField]
+  - internal_type: [FileField]
+pii: true
+sensitivity: personal
+category: content
+assumed: true

@@ -1,0 +1,5 @@
+description: Civil identity of the person
+examples: [full name, birth date, national id, passport number, photo]
+register_label: Identity data
+legal: none
+dpia: false

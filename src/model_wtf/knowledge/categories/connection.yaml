@@ -1,0 +1,5 @@
+description: Traces of the person's use of the service
+examples: [IP address, user agent, logs, session id, device id]
+register_label: Connection data
+legal: none
+dpia: false

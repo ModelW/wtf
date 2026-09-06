@@ -1,0 +1,7 @@
+description: Other special categories (Art. 9) and criminal data (Art. 10)
+priority: 50
+match:
+  - name: '(^|_)(ethnic|race|racial|religio|political|union|sexual|orientation|gender_identity|genetic|biometric|fingerprint|criminal|conviction|offen[cs]e)'
+pii: true
+sensitivity: special
+category: special_other

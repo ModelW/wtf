@@ -11,6 +11,7 @@ import json
 from typing import TYPE_CHECKING
 
 from rich.table import Table
+from rich.text import Text
 
 from model_wtf.compliance.report import ScopeStatus, Severity
 
@@ -42,7 +43,7 @@ def render_text(report: Report, console: Console) -> None:
         # Todos are warnings severity-wise but fail the check; name them.
         label = "todo" if diag.code == "todo" else diag.severity.value
         where = f" ({diag.scope_id})" if diag.scope_id else ""
-        console.print(f"[{style}]{label}[/{style}]{where}: {diag.message}")
+        console.print(Text.assemble((label, style), f"{where}: ", diag.message))
 
 
 def render_json(report: Report) -> str:
@@ -85,7 +86,7 @@ def _summary_table(report: Report) -> Table:
             scope.kind.value,
             report.display_path(scope.path),
             str(scope.file_count),
-            f"[{_STATUS_STYLE[status]}]{status.value}[/]",
+            Text(status.value, style=_STATUS_STYLE[status]),
         )
     return table
 

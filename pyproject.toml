@@ -28,6 +28,7 @@ dev = [
     "types-pyyaml",
 ]
 test = [
+    "django>=6.1.1",
     "pytest",
 ]
 
@@ -41,6 +42,9 @@ build-backend = "uv_build"
 [tool.mypy]
 strict = true
 files = ["src"]
+# Runs inside the audited project's interpreter (stdlib only, any Python);
+# Django is intentionally not importable here.
+exclude = ["src/model_wtf/introspect/django_models.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -96,6 +100,9 @@ ignore = ["D104", "D105"]
 [tool.ruff.lint.per-file-ignores]
 # Tests: fixtures shadow args, asserts are the point, docstrings are noise.
 "tests/*" = ["ARG001", "S101", "D", "INP001"]
+# Stdlib-only script piped into another interpreter: prints are its stderr
+# protocol, untyped helpers keep it runnable on old Pythons.
+"src/model_wtf/introspect/django_models.py" = ["T201", "ANN"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["model_wtf"]

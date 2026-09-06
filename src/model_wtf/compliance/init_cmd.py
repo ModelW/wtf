@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ from model_wtf.compliance.discovery import (
     SNOW_MANIFEST,
     normalise_folder,
 )
+from model_wtf.compliance.knowledge import CATEGORIES_DIR, SENSITIVITY_DIR
 from model_wtf.compliance.yaml_io import load_yaml, todo_text
 
 SHARED_FOLDER = "compliance"
@@ -139,6 +141,8 @@ def run_init(
     controller: PartySpec,
     processor: PartySpec | None,
     manifest_units: list[tuple[str, str]] | None = None,
+    custom_sensitivity: bool = False,
+    custom_categories: bool = False,
 ) -> InitResult:
     """Scaffold ``root``; see module docstring for the exact file set.
 
@@ -147,6 +151,9 @@ def run_init(
     manifest_units
         ``(id, context)`` pairs to write into ``.model-wtf.yml`` when the
         repo has no ``snow.yml``. Ignored otherwise.
+    custom_sensitivity, custom_categories
+        Copy the built-in knowledge folder into ``compliance/`` so the repo
+        can edit, rename or extend it (see ``replaces`` in the README).
     """
     result = InitResult()
     shared = root / SHARED_FOLDER
@@ -158,6 +165,11 @@ def run_init(
     if processor is not None and processor.slug != controller.slug:
         _write(parties / f"{processor.slug}.yaml", processor.to_yaml(), result)
 
+    if custom_sensitivity:
+        _copy_knowledge(SENSITIVITY_DIR, shared, result)
+    if custom_categories:
+        _copy_knowledge(CATEGORIES_DIR, shared, result)
+
     for folder in _ensure_manifest(root, result, manifest_units or []):
         if folder == shared.resolve():
             # Image built from the repo root with no Dockerfile subfolder: its
@@ -168,6 +180,13 @@ def run_init(
             (folder / ".gitkeep").write_text("", encoding="utf-8")
             result.created.append(folder)
     return result
+
+
+def _copy_knowledge(name: str, shared: Path, result: InitResult) -> None:
+    """Copy every built-in file of ``name`` into ``shared/name`` (no overwrite)."""
+    source = Path(str(resources.files("model_wtf.knowledge").joinpath(name)))
+    for path in sorted(source.glob("*.yaml")):
+        _write(shared / name / path.name, path.read_text(encoding="utf-8"), result)
 
 
 def guess_discovery(code_root: Path) -> str:

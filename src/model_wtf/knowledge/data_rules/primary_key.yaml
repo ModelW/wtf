@@ -1,0 +1,8 @@
+description: Primary keys and auto-generated ids
+priority: 10
+match:
+  - primary_key: true
+  - type: [AutoField, BigAutoField, SmallAutoField, UUIDField]
+pii: false
+sensitivity: internal
+category: technical

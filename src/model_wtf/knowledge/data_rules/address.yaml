@@ -1,0 +1,7 @@
+description: Postal address components
+priority: 100
+match:
+  - name: '(^|_)(address|street|zip|zipcode|postal|postcode|city|town|province|region|country)(_|$)'
+pii: true
+sensitivity: personal
+category: contact

@@ -1,0 +1,5 @@
+rank: 2
+description: Ordinary personal data (Art. 4(1) GDPR).
+criteria: Identifies or relates to a natural person without exposing them to significant harm if disclosed (name, email, phone, address, IP).
+handling: Lawful basis, purpose and retention declared; access limited to the processing that needs it; included in access/erasure requests.
+dpia: never

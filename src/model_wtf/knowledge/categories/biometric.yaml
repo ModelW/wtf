@@ -1,0 +1,5 @@
+description: Data allowing unique identification of a body
+examples: [fingerprint template, face template, voice print]
+register_label: Biometric data
+legal: art9
+dpia: true

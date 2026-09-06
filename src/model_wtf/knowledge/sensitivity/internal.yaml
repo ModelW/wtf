@@ -1,0 +1,5 @@
+rank: 1
+description: Business data not about a person; disclosure is an inconvenience, not a harm.
+criteria: Technical identifiers, configuration, prices, timestamps, relations between records.
+handling: Standard access control; no personal-data obligations.
+dpia: never

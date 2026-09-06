@@ -1,0 +1,8 @@
+description: Anything no other rule understood — assumed personal, review required
+priority: 1000
+match:
+  - {}
+pii: true
+sensitivity: personal
+category: content
+assumed: true
