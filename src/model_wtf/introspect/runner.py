@@ -16,11 +16,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import tomllib
 from dataclasses import dataclass
 from importlib import resources
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -225,7 +226,7 @@ def is_django_unit(context: Path) -> bool:
 
 
 def introspect(context: Path, *, python: str | None = None) -> Inventory:
-    """Run the script in ``context``'s interpreter and parse its output.
+    """Run the models script in ``context``'s interpreter and parse its output.
 
     Raises
     ------
@@ -234,16 +235,83 @@ def introspect(context: Path, *, python: str | None = None) -> Inventory:
     IntrospectionFailed
         The subprocess failed or its stdout is not a valid payload.
     """
+    payload = run_django_script(context, "django_models.py", python=python)
+    try:
+        inventory = Inventory.model_validate(payload)
+    except ValidationError as exc:
+        msg = f"introspection of {context} produced an invalid payload: {exc}"
+        raise IntrospectionFailed(msg) from exc
+    if inventory.schema_version != SCHEMA:
+        msg = (
+            f"unsupported introspection schema {inventory.schema_version} "
+            f"(expected {SCHEMA})"
+        )
+        raise IntrospectionFailed(msg)
+    return inventory
+
+
+def run_django_script(
+    context: Path, script_name: str, *, python: str | None = None
+) -> dict[str, Any]:
+    """Pipe one of our stdlib-only scripts into the unit's Python; return its JSON.
+
+    Raises
+    ------
+    IntrospectionUnavailable
+        No runner or settings could be found.
+    IntrospectionFailed
+        The subprocess failed or printed something that is not JSON.
+    """
     runner = detect_runner(context, python)
     settings = detect_settings(context)
-    script = (
-        resources.files("model_wtf.introspect").joinpath("django_models.py").read_text()
-    )
+    script = resources.files("model_wtf.introspect").joinpath(script_name).read_text()
     env = {**os.environ, "DJANGO_SETTINGS_MODULE": settings, "PYTHONUNBUFFERED": "1"}
+    return _run_json([*runner.argv, "-"], script, context, env, runner.kind)
+
+
+def run_node_script(context: Path, script_name: str) -> dict[str, Any]:
+    """Pipe one of our Node scripts into the unit's ``node``; return its JSON.
+
+    The unit must have ``node_modules`` (the script uses the project's own
+    TypeScript). ``svelte-kit sync`` is run first when its binary exists, so
+    the generated types are current.
+
+    Raises
+    ------
+    IntrospectionUnavailable
+        ``node`` or ``node_modules`` is missing.
+    IntrospectionFailed
+        The subprocess failed or printed something that is not JSON.
+    """
+    if not (context / "node_modules").is_dir():
+        msg = f"no node_modules in {context}: install the unit's dependencies first"
+        raise IntrospectionUnavailable(msg)
+    node = shutil.which("node")
+    if node is None:
+        msg = "node is not on PATH"
+        raise IntrospectionUnavailable(msg)
+    sync = context / "node_modules" / ".bin" / "svelte-kit"
+    if sync.is_file():
+        subprocess.run(  # noqa: S603 - the unit's own binary
+            [str(sync), "sync"],
+            cwd=context,
+            capture_output=True,
+            check=False,
+            timeout=TIMEOUT_SECONDS,
+        )
+    script = resources.files("model_wtf.introspect").joinpath(script_name).read_text()
+    return _run_json(
+        [node, "--input-type=module", "-"], script, context, dict(os.environ), "node"
+    )
+
+
+def _run_json(
+    argv: list[str], stdin: str, context: Path, env: dict[str, str], kind: str
+) -> dict[str, Any]:
     try:
         proc = subprocess.run(  # noqa: S603 - argv built from our own detection
-            [*runner.argv, "-"],
-            input=script,
+            argv,
+            input=stdin,
             capture_output=True,
             text=True,
             cwd=context,
@@ -252,7 +320,7 @@ def introspect(context: Path, *, python: str | None = None) -> Inventory:
             check=False,
         )
     except FileNotFoundError as exc:
-        msg = f"{runner.kind} runner not available: {exc}"
+        msg = f"{kind} runner not available: {exc}"
         raise IntrospectionFailed(msg) from exc
     except subprocess.TimeoutExpired as exc:
         msg = f"introspection of {context} timed out after {TIMEOUT_SECONDS}s"
@@ -265,20 +333,16 @@ def introspect(context: Path, *, python: str | None = None) -> Inventory:
         raise IntrospectionFailed(msg)
     try:
         payload = json.loads(proc.stdout)
-        inventory = Inventory.model_validate(payload)
-    except (json.JSONDecodeError, ValidationError) as exc:
+    except json.JSONDecodeError as exc:
         msg = (
             f"introspection of {context} produced an invalid payload: {exc}\n"
             f"{_tail(proc.stderr)}"
         )
         raise IntrospectionFailed(msg) from exc
-    if inventory.schema_version != SCHEMA:
-        msg = (
-            f"unsupported introspection schema {inventory.schema_version} "
-            f"(expected {SCHEMA})"
-        )
+    if not isinstance(payload, dict):
+        msg = f"introspection of {context} produced a non-object payload"
         raise IntrospectionFailed(msg)
-    return inventory
+    return payload
 
 
 def _tool_tables(pyproject: Path) -> dict[str, dict[str, object]]:

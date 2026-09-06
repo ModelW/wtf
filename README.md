@@ -211,6 +211,60 @@ table + class source + JSON write sites) → `data_review_model` (all decisions
 in one call), which keeps each subagent session small enough for flash-class
 models. `--base REF` also re-dispatches models whose file changed since `REF`.
 
+### Touchpoints
+
+```
+uv run model-wtf compliance touchpoints list [--unit ID] [--pending] [--all] [--format json]
+uv run model-wtf compliance touchpoints show <unit>:<id>
+uv run model-wtf compliance touchpoints set-data <unit>:<id> [<unit>:<item>[=read|write]...] [--add|--remove] [--ignore] [--note ...]
+```
+
+Vocabulary, kept clear of pytm's: a **unit** is a running component (pytm
+*Process*); a **touchpoint** is one of its entry points through which data
+flows (pytm *Dataflows*); an **activity** is a GDPR processing activity. The
+word "process" is not used.
+
+Touchpoints are introspected, never written: Django URL patterns (id = route
+name, or `METHOD /path`; Ninja endpoints by operation id with their
+request/response schemas flattened from the API's own OpenAPI document, DRF
+serializers, `FormView` fields, auth classes), Procrastinate/Celery tasks
+(`task:<name>`, signature, periodic flag, tasks they defer) and admin screens
+(`admin:<app.Model>`, the fields staff see). SvelteKit units run `svelte-kit
+sync` and read the generated `$types.d.ts` with the project's own TypeScript:
+id = route ID, `RouteParams`, `PageData`/`ActionData` shapes, form field
+names, and the generated-API-client operations the route calls — which link
+to the Django touchpoints by operation id (`calls`). Plumbing (health checks,
+OpenAPI documents, the admin's own URL patterns) is ignored by default.
+
+The optional manifest `<unit>/compliance/touchpoints/<slug>.yaml` declares
+what the touchpoint handles: `data: [unit:app.Model.field, ...]` (`@json` and
+`@files` rows allowed), optional `direction`, `ignore`, `note`. A touchpoint
+is **pending** until it has a `data` key — an explicit `[]` means "touches
+nothing personal, checked". `check` reports `touchpoint-pending` and
+`touchpoint-orphan` (handles personal data, belongs to no activity), both
+exit 1, and `data-unreferenced` as information.
+
+### Activities
+
+```
+uv run model-wtf compliance activities list [--format json]
+uv run model-wtf compliance activities explain <slug>
+uv run model-wtf compliance activities create <slug> [--name] [--purpose] [--legal-basis] [--touchpoint unit:id]... [--subject]... [--recipient]... [--retention]
+uv run model-wtf compliance activities add <slug> <unit:id>...
+uv run model-wtf compliance data why <unit:id>... [--model unit:app.Model] [--manifests] [--format json]
+```
+
+`compliance/activities/<slug>.yaml` (repository root, activities span units)
+is the Art. 30 row: `name`, `purpose`, `legal_basis` (`consent | contract |
+legal_obligation | vital_interests | public_task | legitimate_interests`),
+`data_subjects`, `touchpoints`, `recipients` (party ids), `retention`,
+`controller`/`processor` (default: `app.yaml`'s). Any of them may be `!todo`.
+Everything else is **derived** from the touchpoints: the data items, hence
+categories, stores, maximum sensitivity, DPIA trigger and units involved.
+`data why` answers the reverse question — which touchpoints handle an item
+and which activities justify holding it (`held by N` / `orphan` /
+`unreferenced`), with `--manifests` printing the activity files.
+
 ### Exit codes
 
 | Code | Meaning                                                         |

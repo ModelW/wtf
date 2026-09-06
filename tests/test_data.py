@@ -422,7 +422,7 @@ def test_check_reports_pending_reviews(django_repo: Path) -> None:
     report = run_check(django_repo, strict=False)
 
     codes = {d.code for d in report.diagnostics}
-    assert codes == {"pending-review", "assumption"}
+    assert codes == {"pending-review", "assumption", "touchpoint-pending"}
     # sessions.Session.session_data rests on a library assumption.
     assumed = [d for d in report.diagnostics if d.code == "assumption"]
     assert any(d.message.startswith("sessions.Session:") for d in assumed)

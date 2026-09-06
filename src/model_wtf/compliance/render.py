@@ -25,7 +25,11 @@ _STATUS_STYLE = {
     ScopeStatus.PENDING: "yellow",
     ScopeStatus.ERROR: "red",
 }
-_SEVERITY_STYLE = {Severity.WARNING: "yellow", Severity.ERROR: "red"}
+_SEVERITY_STYLE = {
+    Severity.INFO: "dim",
+    Severity.WARNING: "yellow",
+    Severity.ERROR: "red",
+}
 
 
 def render_text(report: Report, console: Console) -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from model_wtf.compliance.data import Source, collect_unit
+from model_wtf.compliance.data import DATA_DIR, Source
 from model_wtf.compliance.declarations import load_declarations
 from model_wtf.compliance.discovery import load_units, select_manifest
 from model_wtf.compliance.exit_codes import ExitCode
@@ -19,9 +19,15 @@ from model_wtf.compliance.report import (
     Unit,
 )
 from model_wtf.compliance.review import LOCK_FILE, Lock
+from model_wtf.compliance.touchpoints import TOUCHPOINTS_DIR
+from model_wtf.compliance.workspace import load_workspace
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from model_wtf.compliance.data import Row
+    from model_wtf.compliance.touchpoints import Touchpoint
+    from model_wtf.compliance.workspace import Workspace
 
 SHARED_FOLDER = "compliance"
 SHARED_SCOPE_ID = "shared"
@@ -115,7 +121,7 @@ def _check_data(
     *,
     python: str | None,
 ) -> dict[str, int]:
-    """Validate knowledge and every unit's data files; return items per unit.
+    """Validate knowledge, data files, touchpoints and activities; items per unit.
 
     Introspection *failures* are tool errors and propagate; a unit that
     simply cannot be introspected yields a warning and no rows.
@@ -126,44 +132,109 @@ def _check_data(
         diagnostics.extend(exc.diagnostics)
         return {}
     diagnostics.extend(knowledge.todos)
+    ws = load_workspace(shared.parent, units, knowledge, python=python)
     counts: dict[str, int] = {}
     for unit in units:
-        unit_data = collect_unit(unit, knowledge, python=python)
+        unit_data = ws.data[unit.id]
         counts[unit.id] = len(unit_data.rows)
         diagnostics.extend(_with_scope(d, unit.id) for d in unit_data.diagnostics)
-        lock = Lock(unit)
-        diagnostics.extend(lock.diagnostics)
-        annotated = lock.annotate(unit_data.rows)
-        pending = [r for r in annotated if r.status.pending]
-        if pending:
-            diagnostics.append(
-                Diagnostic(
-                    Severity.WARNING,
-                    "pending-review",
-                    f"{len(pending)} data item(s) still to review "
-                    "(`model-wtf compliance data list --pending`)",
-                    unit.id,
-                    unit.folder / LOCK_FILE,
-                )
-            )
-        # Every unconfirmed library assumption is spelled out once per model:
-        # this is the "here is what we took for granted" list a reader needs.
-        assumed: dict[str, str] = {}
-        for item in pending:
-            if item.row.source is Source.LIBRARY and item.row.assumption:
-                label = item.row.id.rsplit(".", 1)[0].split("@", 1)[0]
-                assumed.setdefault(label, item.row.assumption.strip())
-        diagnostics.extend(
+        _check_reviews(unit, unit_data.rows, diagnostics)
+        unit_tps = ws.touchpoints[unit.id]
+        diagnostics.extend(_with_scope(d, unit.id) for d in unit_tps.diagnostics)
+        _check_touchpoints(unit, unit_tps.visible(), ws, diagnostics)
+    diagnostics.extend(ws.activities.diagnostics)
+    return counts
+
+
+def _check_reviews(unit: Unit, rows: list[Row], diagnostics: list[Diagnostic]) -> None:
+    lock = Lock(unit)
+    diagnostics.extend(lock.diagnostics)
+    pending = [r for r in lock.annotate(rows) if r.status.pending]
+    if pending:
+        diagnostics.append(
             Diagnostic(
                 Severity.WARNING,
-                "assumption",
-                f"{label}: {text} (confirm with `data reviewed` after checking)",
+                "pending-review",
+                f"{len(pending)} data item(s) still to review "
+                "(`model-wtf compliance data list --pending`)",
                 unit.id,
                 unit.folder / LOCK_FILE,
             )
-            for label, text in sorted(assumed.items())
         )
-    return counts
+    # Every unconfirmed library assumption is spelled out once per model:
+    # this is the "here is what we took for granted" list a reader needs.
+    assumed: dict[str, str] = {}
+    for item in pending:
+        if item.row.source is Source.LIBRARY and item.row.assumption:
+            label = item.row.id.rsplit(".", 1)[0].split("@", 1)[0]
+            assumed.setdefault(label, item.row.assumption.strip())
+    diagnostics.extend(
+        Diagnostic(
+            Severity.WARNING,
+            "assumption",
+            f"{label}: {text} (confirm with `data reviewed` after checking)",
+            unit.id,
+            unit.folder / LOCK_FILE,
+        )
+        for label, text in sorted(assumed.items())
+    )
+
+
+def _check_touchpoints(
+    unit: Unit,
+    touchpoints: list[Touchpoint],
+    ws: Workspace,
+    diagnostics: list[Diagnostic],
+) -> None:
+    """Pending manifests and PII-touching touchpoints in no activity."""
+    folder = unit.folder / TOUCHPOINTS_DIR
+    pending = [t for t in touchpoints if t.pending]
+    if pending:
+        diagnostics.append(
+            Diagnostic(
+                Severity.WARNING,
+                "touchpoint-pending",
+                f"{len(pending)} touchpoint(s) without a data declaration "
+                "(`model-wtf compliance touchpoints list --pending`)",
+                unit.id,
+                folder,
+            )
+        )
+    orphans = [
+        t
+        for t in touchpoints
+        if t.data
+        and any(ws.rows[r].pii for r in t.data if r in ws.rows)
+        and not ws.activities.of_touchpoint(t.full_id)
+    ]
+    diagnostics.extend(
+        Diagnostic(
+            Severity.WARNING,
+            "touchpoint-orphan",
+            f"{t.full_id} handles personal data but belongs to no activity "
+            "(`activities add <slug> ...` or `activities create`)",
+            unit.id,
+            folder / f"{t.slug}.yaml",
+        )
+        for t in orphans
+    )
+    # Personal items nobody declares handling: informational, it usually
+    # means a manifest is missing rather than data nobody uses.
+    referenced = {r for t in ws.all_touchpoints.values() for r in (t.data or ())}
+    unreferenced = [
+        r for r in ws.data[unit.id].rows if r.pii and r.full_id not in referenced
+    ]
+    if unreferenced and not pending:
+        diagnostics.append(
+            Diagnostic(
+                Severity.INFO,
+                "data-unreferenced",
+                f"{len(unreferenced)} personal data item(s) handled by no "
+                "touchpoint (`data why <unit:id>` to investigate)",
+                unit.id,
+                unit.folder / DATA_DIR,
+            )
+        )
 
 
 def _with_scope(diag: Diagnostic, scope_id: str) -> Diagnostic:
@@ -182,6 +253,7 @@ def exit_code_for(diagnostics: list[Diagnostic]) -> ExitCode:
     """
     if any(d.severity is Severity.ERROR for d in diagnostics):
         return ExitCode.DECLARATION_ERROR
-    if any(d.code in ("todo", "pending-review") for d in diagnostics):
+    findings = ("todo", "pending-review", "touchpoint-pending", "touchpoint-orphan")
+    if any(d.code in findings for d in diagnostics):
         return ExitCode.FINDINGS
     return ExitCode.CLEAN
