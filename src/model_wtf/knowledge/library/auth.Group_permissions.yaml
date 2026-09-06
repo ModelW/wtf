@@ -1,0 +1,2 @@
+package: django
+fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}

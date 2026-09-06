@@ -24,6 +24,10 @@ Repository: `{repo}`. Paths in tool output are relative to it.
    Fields marked `(inherited)` or models from third-party packages: judge by
    what THIS project stores there (task payloads, user tables, audit logs
    hold the project's data), not by who wrote the model.
+   - Fields with status `assumed` carry a library default that rests on the
+     ASSUMPTION printed above the table. Do the CHECK it names in this
+     project's code; `ok: true` only if the assumption holds here, otherwise
+     override (or declare contents) with what you found, citing file:line.
 5. Stop. Reply with the single word `OK`.
 
 ## JSON-like fields: declare the contents

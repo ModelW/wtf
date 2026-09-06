@@ -178,6 +178,8 @@ def render_rows(rows: list[Reviewed]) -> Table:
             names = ", ".join(row.contents) or "nothing"
             unknown = row.unknown_contents.value if row.unknown_contents else "?"
             full_id.append(f"\n  holds {names}; unknown: {unknown}", style="dim")
+        if row.source is Source.LIBRARY and item.status.pending and row.assumption:
+            full_id.append(f"\n  assumes: {row.assumption.strip()}", style="dim")
         source = f"rule:{row.rule}" if row.source is Source.RULE else row.source.value
         review_style = "yellow" if item.status.pending else "green"
         table.add_row(

@@ -19,6 +19,7 @@ from model_wtf.compliance.data import Source, collect_unit, parse_full_id
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.knowledge import Dpia, KnowledgeError, load_knowledge
 from model_wtf.compliance.report import Unit
+from model_wtf.compliance.review import Lock, ReviewStatus
 from model_wtf.introspect.runner import (
     FieldInfo,
     IntrospectionUnavailable,
@@ -321,7 +322,7 @@ def test_collect_unit_classifies_every_field(django_repo: Path) -> None:
     # Curated framework fields are known; other third-party fields are
     # rule-classified and reviewed like the project's own.
     assert rows["auth.User.password"].source is Source.KNOWN
-    assert rows["auth.Group.permissions"].source is Source.RULE
+    assert rows["sites.Site.domain"].source is Source.RULE
     # The bytes behind an upload column are their own item, with their store.
     avatar_store = rows["shop.Customer.avatar@files.content"]
     assert (avatar_store.pii, avatar_store.category, avatar_store.rule) == (
@@ -421,7 +422,10 @@ def test_check_reports_pending_reviews(django_repo: Path) -> None:
     report = run_check(django_repo, strict=False)
 
     codes = {d.code for d in report.diagnostics}
-    assert codes == {"pending-review"}
+    assert codes == {"pending-review", "assumption"}
+    # sessions.Session.session_data rests on a library assumption.
+    assumed = [d for d in report.diagnostics if d.code == "assumption"]
+    assert any(d.message.startswith("sessions.Session:") for d in assumed)
     assert report.exit_code is ExitCode.FINDINGS
 
 
@@ -960,3 +964,53 @@ def test_cli_contents(django_repo: Path) -> None:
         cli, ["compliance", "data", "list", *root], env={"COLUMNS": "250"}
     )
     assert "holds theme, phone; unknown: none" in table.output
+
+
+def test_library_knowledge(django_repo: Path) -> None:
+    """Fixed library verdicts are known; assumed ones are applied but pending."""
+    knowledge = load_knowledge(None)
+    assert knowledge.library["auth.User"].package == "django"
+    assert knowledge.known_field("auth.Group", "anything") is not None  # default
+    assert knowledge.known_field("sites.Site", "domain") is None
+
+    data = collect_unit(_unit(django_repo), load_knowledge(None))
+    rows = {r.id: r for r in data.rows}
+    password = rows["auth.User.password"]
+    assert (password.source, password.category, password.assumption) == (
+        Source.KNOWN,
+        "credentials",
+        None,
+    )
+    session = rows["sessions.Session.session_data"]
+    assert (session.source, session.pii, session.category) == (
+        Source.LIBRARY,
+        True,
+        "connection",
+    )
+    assert session.assumption is not None
+    assert "request.session" in (session.check or "")
+    assert rows["sessions.Session.session_key"].source is Source.KNOWN
+
+    lock = Lock(_unit(django_repo))
+    assert lock.status_of(session).status is ReviewStatus.PENDING_ASSUMED
+    assert lock.status_of(password).status is ReviewStatus.KNOWN
+    lock.mark([session], by="human", note="only auth backend and pk")
+    assert lock.status_of(session).status is ReviewStatus.REVIEWED
+
+
+def test_every_library_file_is_consistent() -> None:
+    """Shipped library files validate and use the built-in vocabulary."""
+    knowledge = load_knowledge(None)
+    assert len(knowledge.library) > 40
+    for label, model in knowledge.library.items():
+        assert "." in label, label
+        verdicts = list(model.fields.values())
+        if model.fields_default:
+            verdicts.append(model.fields_default)
+        assert verdicts, f"{label}: no verdict at all"
+        for verdict in verdicts:
+            assert verdict.sensitivity in knowledge.sensitivity, label
+            assert verdict.category in knowledge.categories, label
+        if any(not v.fixed for v in verdicts):
+            assert model.assumption, f"{label}: assumed without text"
+            assert model.check, f"{label}: assumed without a check"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from model_wtf.compliance.data import collect_unit
+from model_wtf.compliance.data import Source, collect_unit
 from model_wtf.compliance.declarations import load_declarations
 from model_wtf.compliance.discovery import load_units, select_manifest
 from model_wtf.compliance.exit_codes import ExitCode
@@ -133,7 +133,8 @@ def _check_data(
         diagnostics.extend(_with_scope(d, unit.id) for d in unit_data.diagnostics)
         lock = Lock(unit)
         diagnostics.extend(lock.diagnostics)
-        pending = [r for r in lock.annotate(unit_data.rows) if r.status.pending]
+        annotated = lock.annotate(unit_data.rows)
+        pending = [r for r in annotated if r.status.pending]
         if pending:
             diagnostics.append(
                 Diagnostic(
@@ -145,6 +146,23 @@ def _check_data(
                     unit.folder / LOCK_FILE,
                 )
             )
+        # Every unconfirmed library assumption is spelled out once per model:
+        # this is the "here is what we took for granted" list a reader needs.
+        assumed: dict[str, str] = {}
+        for item in pending:
+            if item.row.source is Source.LIBRARY and item.row.assumption:
+                label = item.row.id.rsplit(".", 1)[0].split("@", 1)[0]
+                assumed.setdefault(label, item.row.assumption.strip())
+        diagnostics.extend(
+            Diagnostic(
+                Severity.WARNING,
+                "assumption",
+                f"{label}: {text} (confirm with `data reviewed` after checking)",
+                unit.id,
+                unit.folder / LOCK_FILE,
+            )
+            for label, text in sorted(assumed.items())
+        )
     return counts
 
 

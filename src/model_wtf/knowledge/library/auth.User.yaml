@@ -1,0 +1,14 @@
+package: django
+fields:
+  password: {pii: false, sensitivity: confidential, category: credentials, fixed: true}
+  username: {pii: true, sensitivity: personal, category: identity, fixed: true}
+  first_name: {pii: true, sensitivity: personal, category: identity, fixed: true}
+  last_name: {pii: true, sensitivity: personal, category: identity, fixed: true}
+  email: {pii: true, sensitivity: personal, category: contact, fixed: true}
+  last_login: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+  date_joined: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+  is_active: {pii: false, sensitivity: internal, category: technical, fixed: true}
+  is_staff: {pii: false, sensitivity: internal, category: technical, fixed: true}
+  is_superuser: {pii: false, sensitivity: internal, category: technical, fixed: true}
+  groups: {pii: false, sensitivity: internal, category: technical, fixed: true}
+  user_permissions: {pii: false, sensitivity: internal, category: technical, fixed: true}

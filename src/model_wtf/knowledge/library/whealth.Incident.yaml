@@ -1,0 +1,6 @@
+package: whealth
+assumption: Incident `context` is the failing control's diagnostic payload; assumed free of personal data.
+check: Read the failure payloads of the project's health controls.
+fields:
+  context: {pii: false, sensitivity: internal, category: technical, fixed: false}
+fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}

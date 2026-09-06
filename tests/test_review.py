@@ -75,10 +75,7 @@ def test_lock_lifecycle(repo: Path) -> None:
     email = rows["shop.Customer.email"]
     assert lock.status_of(email).status is ReviewStatus.PENDING_NEW
     assert lock.status_of(rows["auth.User.password"]).status is ReviewStatus.KNOWN
-    assert (
-        lock.status_of(rows["auth.Group.permissions"]).status
-        is ReviewStatus.PENDING_NEW
-    )
+    assert lock.status_of(rows["sites.Site.domain"]).status is ReviewStatus.PENDING_NEW
 
     lock.mark([email], by="human", note="plain email")
     lock.save()
@@ -159,7 +156,7 @@ def test_override_and_reviewed_commands_write_the_lock(repo: Path) -> None:
     assert "shop.Customer.email" not in ids
     assert "shop.Customer.iban" in ids
     assert "auth.User.password" not in ids  # known
-    assert "auth.Group.permissions" in ids  # third-party, still reviewed
+    assert "sites.Site.domain" in ids  # third-party, still reviewed
 
     bad = runner.invoke(
         cli, ["compliance", "data", "reviewed", "api:shop.Nope.x", *root]

@@ -1,0 +1,15 @@
+package: wagtail
+assumption: >
+  Editor uploads for the site's content (dish photos, brochures). Personal
+  only when the library is used for pictures of people or documents about
+  them (ID scans, contracts, portraits).
+check: >
+  Look at the collections and at the models referencing this one (a
+  `Person.photo`, a `Contract.document`); if people appear, the bytes are
+  personal identity or content data.
+fields:
+  file@files.content: {pii: false, sensitivity: internal, category: content, fixed: false}
+  title: {pii: false, sensitivity: internal, category: technical, fixed: false}
+  description: {pii: false, sensitivity: internal, category: technical, fixed: false}
+  uploaded_by_user: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}

@@ -1,0 +1,17 @@
+package: wailer
+assumption: >
+  Every message sent is logged with its recipient, the rendered `data`
+  (subject, body) and the template `context`. Recipient and body are
+  personal by design; what else is in `context` depends on the project's
+  message types.
+check: >
+  Read the project's email/SMS type classes and their `get_context()`;
+  declare the contents of `context` and `data` from what they return.
+fields:
+  for_user: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+  recipient: {pii: true, sensitivity: personal, category: contact, fixed: true}
+  date_created: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+  date_sent: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+  data: {pii: true, sensitivity: personal, category: content, fixed: false}
+  context: {pii: true, sensitivity: personal, category: content, fixed: false}
+fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}

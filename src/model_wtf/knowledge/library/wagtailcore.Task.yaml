@@ -1,0 +1,2 @@
+package: wagtail
+fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}

@@ -1,0 +1,15 @@
+package: wagtail
+fields:
+  submitted_notifications: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+  approved_notifications: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+  rejected_notifications: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+  updated_comments_notifications: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+  preferred_language: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+  current_time_zone: {pii: true, sensitivity: personal, category: location, fixed: true}
+  avatar@files.content: {pii: true, sensitivity: personal, category: identity, fixed: true}
+  dismissibles: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+  theme: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+  contrast: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+  density: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+  keyboard_shortcuts: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}

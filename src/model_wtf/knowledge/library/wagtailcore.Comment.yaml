@@ -1,0 +1,6 @@
+package: wagtail
+fields:
+  text: {pii: true, sensitivity: personal, category: content, fixed: true}
+  user: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+  resolved_by: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}

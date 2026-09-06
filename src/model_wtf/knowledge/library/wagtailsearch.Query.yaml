@@ -1,0 +1,4 @@
+package: wagtail
+fields:
+  query_string: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}
