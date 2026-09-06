@@ -21,10 +21,15 @@ from model_wtf.compliance.auto_review import (
 )
 from model_wtf.compliance.data import (
     DATA_DIR,
+    Row,
     Source,
     UnitData,
+    Unknown,
     collect_unit,
+    is_container,
+    parse_content_entry,
     parse_full_id,
+    write_contents,
 )
 from model_wtf.compliance.discovery import load_units, select_manifest
 from model_wtf.compliance.exit_codes import ExitCode
@@ -169,6 +174,10 @@ def render_rows(rows: list[Reviewed]) -> Table:
             row.unit, _UNIT_STYLES[len(unit_style) % len(_UNIT_STYLES)]
         )
         full_id = Text.assemble((row.unit, f"bold {style}"), (":", "dim"), row.id)
+        if row.source is Source.DERIVED:
+            names = ", ".join(row.contents) or "nothing"
+            unknown = row.unknown_contents.value if row.unknown_contents else "?"
+            full_id.append(f"\n  holds {names}; unknown: {unknown}", style="dim")
         source = f"rule:{row.rule}" if row.source is Source.RULE else row.source.value
         review_style = "yellow" if item.status.pending else "green"
         table.add_row(
@@ -183,6 +192,11 @@ def render_rows(rows: list[Reviewed]) -> Table:
             Text(item.status.value, style=review_style),
         )
     return table
+
+
+def _is_blob(row: Row) -> bool:
+    """Whether a row is a JSON-like column (closed by ``contents``, not ``ok``)."""
+    return row.field is not None and is_container(row.field)
 
 
 def _tri(value: bool | None) -> Text:
@@ -307,6 +321,73 @@ def override_cmd(
     ctx.exit(0)
 
 
+@data.command("contents")
+@click.argument("item_id")
+@click.argument("entries", nargs=-1)
+@click.option(
+    "--unknown",
+    type=click.Choice([u.value for u in Unknown]),
+    default=Unknown.POSSIBLE.value,
+    show_default=True,
+    help="Is the list exhaustive? none = every write site was read.",
+)
+@click.option("--reason", default=None, help="Where the writes are (else !todo).")
+@ROOT_OPTION
+@click.pass_context
+def contents_cmd(
+    ctx: click.Context,
+    *,
+    item_id: str,
+    entries: tuple[str, ...],
+    unknown: str,
+    reason: str | None,
+    root: Path | None,
+) -> None:
+    """Declare what a JSON-like column holds, one ENTRY per kind of information.
+
+    ITEM_ID is ``<unit>:<app.Model.field>`` of a JSONField/ArrayField/HStoreField.
+    Each ENTRY is ``name=pii,sensitivity,category`` (``name=yes,personal,contact``);
+    the names are identifiers, not JSON paths. ``--unknown none`` with no entry
+    declares an empty, harmless blob.
+    """
+    _, units, knowledge = load_context(root)
+    try:
+        unit_id, local_id = parse_full_id(item_id, units)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+    unit = next(u for u in units if u.id == unit_id)
+    unit_data = collect_unit(unit, knowledge)
+    row = next((r for r in unit_data.rows if r.id == local_id and r.field), None)
+    if row is None:
+        msg = f"{local_id!r} is not a field of unit {unit_id!r}"
+        raise click.UsageError(msg)
+    if not _is_blob(row):
+        msg = f"{local_id} is a {row.type}; `contents` is for JSON-like columns"
+        raise click.UsageError(msg)
+    parsed: dict[str, tuple[bool, str, str]] = {}
+    for entry in entries:
+        try:
+            parsed.update([parse_content_entry(entry, knowledge)])
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
+    path = write_contents(
+        unit, local_id, parsed, unknown=Unknown(unknown), reason=reason
+    )
+    if path is None:
+        msg = f"{unit.folder / DATA_DIR / (local_id + '.yaml')} already exists"
+        raise click.ClickException(msg)
+    lock = Lock(unit)
+    fresh = collect_unit(unit, knowledge).rows
+    lock.mark(
+        [r for r in fresh if r.id == local_id or r.id.startswith(f"{local_id}@json.")],
+        by="human",
+        note=reason or "contents declared",
+    )
+    lock.save()
+    Console().print(Text.assemble(("created", "green"), "  ", str(path)))
+    ctx.exit(0)
+
+
 @data.command("reviewed")
 @click.argument("item_ids", nargs=-1, required=True)
 @click.option("--note", default="", help="One line on what was checked.")
@@ -336,6 +417,13 @@ def reviewed_cmd(
         unknown = [i for i in local_ids if i not in rows]
         if unknown:
             msg = f"unknown items in unit {unit_id!r}: {', '.join(unknown)}"
+            raise click.UsageError(msg)
+        blobs = [i for i in local_ids if _is_blob(rows[i])]
+        if blobs:
+            msg = (
+                f"JSON-like columns are closed with `data contents`, not `reviewed`: "
+                f"{', '.join(blobs)}"
+            )
             raise click.UsageError(msg)
         lock = Lock(unit)
         lock.mark([rows[i] for i in local_ids], by="human", note=note)

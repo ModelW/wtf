@@ -100,6 +100,33 @@ Each field gets three classifications from the built-in rules
 until a review says otherwise; unrecognised plain fields default to
 `technical` and rely on the review to be promoted.
 
+### JSON-like columns hold *contents*
+
+A `JSONField` / `ArrayField` / `HStoreField` (not Wagtail's `StreamField`,
+which is CMS content) is a container: one triple cannot describe a blob
+holding a name, an address and an IBAN. Its file declares what it holds,
+one entry per **kind** of information (identifiers, not JSON paths):
+
+```yaml
+contents:
+  customer_name: {pii: true, sensitivity: personal, category: identity}
+  iban:          {pii: true, sensitivity: confidential, category: financial}
+  utm_campaign:  {pii: false, sensitivity: internal, category: technical}
+unknown_contents: none     # none | possible | likely — is the list exhaustive?
+reason: written in orders/services.py:88-104 and checkout/serializers.py:41
+```
+
+Each entry becomes a row `<app.Model.field>@json.<name>` reviewed and
+overridable on its own; the column's verdict is **derived** (`pii` = any,
+`sensitivity` = max, `category` = the set as `financial+identity+technical`,
+DPIA = max). `unknown_contents: none` replaces the rule's presumption,
+`possible` keeps a `json-unknown-contents` warning, `likely` folds the
+presumption back in (so `contents: {}` + `likely` = "opaque, treat as
+personal"). `data contents <unit:id> name=yes,personal,contact ... [--unknown none]
+[--reason ...]` writes the file; the auto-review never closes a JSON-like
+field with a bare `ok`: it follows the write sites `data_model` lists and
+declares the contents itself.
+
 Humans correct the rules with `<unit>/compliance/data/<app.Model.field>.yaml`
 (any subset of `pii` / `sensitivity` / `category` / `store`, plus a `reason`),
 and add data the ORM does not know with a complete manual item

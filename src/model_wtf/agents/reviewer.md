@@ -19,10 +19,40 @@ Repository: `{repo}`. Paths in tool output are relative to it.
    - `{"field": "<name>", "pii": ..., "sensitivity": ..., "category": ...,
      "reason": "<one line citing file:line>"}` with only the values that
      change, when the rule is wrong.
+   - JSON-like fields (JSONField, ArrayField, HStoreField) are containers
+     and are NEVER closed with `ok`: declare what they hold (see below).
    Fields marked `(inherited)` or models from third-party packages: judge by
    what THIS project stores there (task payloads, user tables, audit logs
    hold the project's data), not by who wrote the model.
 5. Stop. Reply with the single word `OK`.
+
+## JSON-like fields: declare the contents
+
+The tool output lists the write sites found by grep. Follow them (a few
+`read`/`grep` calls at most) to learn WHAT kind of information ends up in
+the blob, then decide:
+
+```
+{"field": "payload",
+ "contents": {"customer_name": {"pii": true, "sensitivity": "personal", "category": "identity"},
+              "iban":          {"pii": true, "sensitivity": "confidential", "category": "financial"},
+              "utm_campaign":  {"pii": false, "sensitivity": "internal", "category": "technical"}},
+ "unknown_contents": "none",
+ "reason": "written in orders/services.py:88-104 and checkout/serializers.py:41"}
+```
+
+- One entry per KIND of information, not per JSON path; names are
+  `[a-z0-9_]+` identifiers.
+- `unknown_contents`: `none` only when every write site is a literal you
+  read; `possible` when some writes are dynamic (`.update(payload)`,
+  `**kwargs`, request data copied in); `likely` when the blob is opaque and
+  you found nothing usable — then `contents` may be `{}`.
+- A library blob filled through a hook the project implements (`get_context()`
+  of an email type, a task's `args`, a form page's fields, `defer(**kwargs)`)
+  is described by the PROJECT's implementations: grep the project for the
+  hook/decorator and read what they put in. `likely` is for when even that
+  finds nothing.
+- Cite the write sites (file:line) in `reason`.
 
 ## Rubric
 
@@ -46,10 +76,11 @@ Repository: `{repo}`. Paths in tool output are relative to it.
 Rules of thumb:
 - `name` on a model that is not a person (Restaurant, Tag, Island, Product,
   Group, Permission) -> `pii=false, internal, technical`.
-- A JSON field whose written keys hold no personal data -> `pii=false,
-  internal, technical`; list the keys in the reason.
-- A JSON field you cannot characterise stays as the rule says: `ok: true`.
-  Never invent an override.
+- A JSON field whose written keys hold no personal data -> `contents` with
+  those entries as `pii=false, internal, technical`, `unknown_contents: none`.
+- A JSON field you cannot characterise -> `contents: {}`,
+  `unknown_contents: likely` (the rule's presumption stays in force). Never
+  invent an entry.
 - `<field>@files.content` rows are the bytes behind an upload field: what do
   users upload there? Images of dishes -> technical; ID scans -> identity,
   confidential; avatars -> identity.

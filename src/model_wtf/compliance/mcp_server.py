@@ -23,17 +23,22 @@ import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, ConfigDict, Field
 
 from model_wtf.compliance.data import (
+    CONTENT_NAME,
     DATA_DIR,
     FILE_STORE_SUFFIX,
+    JSON_SUFFIX,
     Row,
     UnitData,
+    Unknown,
     collect_unit,
+    is_container,
+    write_contents,
 )
 from model_wtf.compliance.discovery import find_repo_root, load_units, select_manifest
 from model_wtf.compliance.knowledge import Knowledge, load_knowledge
@@ -70,7 +75,31 @@ class Decision(BaseModel):
     pii: bool | None = None
     sensitivity: str | None = None
     category: str | None = None
+    contents: dict[str, ContentDecision] | None = Field(
+        default=None,
+        description=(
+            "JSON-like columns only: one entry per kind of information the blob "
+            "holds, keyed by an identifier (not a JSON path)"
+        ),
+    )
+    unknown_contents: Literal["none", "possible", "likely"] | None = Field(
+        default=None,
+        description=(
+            "With contents: none = every write site was read, possible = some "
+            "writes are dynamic, likely = mostly opaque"
+        ),
+    )
     reason: str | None = Field(default=None, description="Required when not ok")
+
+
+class ContentDecision(BaseModel):
+    """Classification of one kind of information inside a JSON-like column."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    pii: bool
+    sensitivity: str
+    category: str
 
 
 @dataclass(frozen=True)
@@ -87,17 +116,18 @@ class ModelRef:
 
 
 def model_of(row: Row) -> str:
-    """``app.Model`` a row belongs to; a file store belongs to its parent model."""
+    """``app.Model`` a row belongs to; ``@files``/``@json`` items to their column's."""
     label = row.id.rsplit(".", 1)[0]
-    if label.endswith(FILE_STORE_SUFFIX):
-        label = label[: -len(FILE_STORE_SUFFIX)].rsplit(".", 1)[0]
+    for suffix in (FILE_STORE_SUFFIX, JSON_SUFFIX):
+        if label.endswith(suffix):
+            label = label[: -len(suffix)].rsplit(".", 1)[0]
     return label
 
 
 def field_of(row: Row) -> str:
-    """Field name shown to the agent; ``<field>@files.content`` for a store."""
+    """Field name shown to the agent; ``<field>@files.content`` / ``<field>@json.x``."""
     label, name = row.id.rsplit(".", 1)
-    if label.endswith(FILE_STORE_SUFFIX):
+    if label.endswith((FILE_STORE_SUFFIX, JSON_SUFFIX)):
         # ``app.Model.file@files`` -> ``file@files.content``
         return f"{label.rsplit('.', 1)[1]}.{name}"
     return name
@@ -215,18 +245,23 @@ class Tools:
                 if store:
                     label = f"{store.slug} ({store.type.value}, {store.backend})"
                 where = f" (bytes behind `{column}`, stored in {label})"
+            elif JSON_SUFFIX in field_name:
+                where = f" (declared content of `{field_name.split(JSON_SUFFIX)[0]}`)"
             else:
                 where = "" if field_name in declared else " (inherited)"
             st = status[row.id]
             st_text = "pending" if st.pending else st.value
             lines.append(
-                f"  {field_name}{where} | {finfo.type} | pii={_yn(row.pii)} | "
+                f"  {field_name}{where} | {row.type} | pii={_yn(row.pii)} | "
                 f"{row.sensitivity} | {row.category} | {row.rule} | {st_text}"
             )
         hints = _json_hints(unit, rows, self.root)
         if hints:
             lines.append("")
-            lines.append("keys written into JSON fields (from grep):")
+            lines.append(
+                "write sites of JSON-like fields (from grep; follow them to "
+                "declare contents):"
+            )
             lines.extend(f"  {h}" for h in hints)
         lines.append("")
         lines.append(f"levels: {', '.join(self.knowledge.ordered_levels())}")
@@ -261,7 +296,21 @@ class Tools:
             if row is None:
                 problems.append(f"{decision.field}: not a field of {ref.label}")
                 continue
+            if decision.contents is not None:
+                problem = self._apply_contents(unit, row, decision)
+                if problem:
+                    problems.append(f"{decision.field}: {problem}")
+                else:
+                    overridden.append(decision.field)
+                continue
             if decision.ok:
+                if row.field is not None and is_container(row.field):
+                    problems.append(
+                        f"{decision.field}: JSON fields need a contents declaration; "
+                        "give contents + unknown_contents (empty contents with "
+                        "unknown_contents: likely is allowed when nothing was found)"
+                    )
+                    continue
                 confirmed.append(row)
                 continue
             problem = self._apply_override(unit, row, decision)
@@ -294,6 +343,48 @@ class Tools:
         ]
         out.extend(f"  rejected {p}" for p in problems)
         return "\n".join(out)
+
+    def _apply_contents(self, unit: Unit, row: Row, d: Decision) -> str | None:
+        """Write a ``contents`` file for a JSON-like column; ``None`` on success."""
+        kn = self.knowledge
+        if row.field is None or not is_container(row.field):
+            return f"{row.type} is not a JSON-like column; contents does not apply"
+        if d.unknown_contents is None:
+            return "unknown_contents (none|possible|likely) is required with contents"
+        if not (d.reason or "").strip():
+            return "a one-line reason citing the write sites (file:line) is required"
+        assert d.contents is not None  # noqa: S101 - caller checked
+        parsed: dict[str, tuple[bool, str, str]] = {}
+        for name, content in d.contents.items():
+            if not re.fullmatch(CONTENT_NAME, name):
+                return f"content name {name!r} must match [a-z0-9_]+"
+            if content.sensitivity not in kn.sensitivity:
+                levels = ", ".join(kn.ordered_levels())
+                bad = content.sensitivity
+                return f"{name}: unknown sensitivity {bad!r}; use {levels}"
+            if content.category not in kn.categories:
+                cats = ", ".join(sorted(kn.categories))
+                return f"{name}: unknown category {content.category!r}; use {cats}"
+            parsed[name] = (content.pii, content.sensitivity, content.category)
+        path = write_contents(
+            unit,
+            row.id,
+            parsed,
+            unknown=Unknown(d.unknown_contents),
+            reason=(d.reason or "").strip(),
+        )
+        if path is None:
+            return f"a file already exists ({row.id}.yaml); leave it"
+        fresh = self.data(unit, refresh=True).rows
+        lock = Lock(unit)
+        lock.mark(
+            [r for r in fresh if r.id == row.id or r.id.startswith(f"{row.id}@json.")],
+            by="agent",
+            note=(d.reason or "").strip(),
+            model=os.environ.get(MODEL_ENV),
+        )
+        lock.save()
+        return None
 
     def _apply_override(self, unit: Unit, row: Row, d: Decision) -> str | None:
         kn = self.knowledge
@@ -390,7 +481,7 @@ def build_server(root: Path, *, batch: int = DEFAULT_BATCH) -> MCPServer:
         name="data_model",
         description=(
             "Everything needed to review one model: its fields with current "
-            "classification and status, keys seen written into its JSON fields, "
+            "classification and status, write sites of its JSON-like fields, "
             "the allowed levels/categories, and the class source code. Usually no "
             "other reading is needed."
         ),
@@ -404,8 +495,10 @@ def build_server(root: Path, *, batch: int = DEFAULT_BATCH) -> MCPServer:
             "Record the decisions for one model in a single call. `decisions` is a "
             "list of {field, ok} to confirm, or {field, pii?, sensitivity?, "
             "category?, reason} to correct (give only what changes; reason cites "
-            "file:line). Fields you omit stay pending. `note` is one line on what "
-            "you looked at."
+            "file:line). JSON-like fields take {field, contents: {name: {pii, "
+            "sensitivity, category}}, unknown_contents, reason} instead and are "
+            "rejected with a bare ok. Fields you omit stay pending. `note` is one "
+            "line on what you looked at."
         ),
     )
     def data_review_model(model: str, decisions: list[Decision], note: str) -> str:
@@ -516,13 +609,18 @@ def _json_hints(unit: Unit, rows: list[Row], root: Path) -> list[str]:
     ``<field>={"key"`` and ``"<field>": {"key"``. Cheap, and it is exactly
     the evidence a reviewer needs to decide what a blob holds.
     """
-    json_fields = [field_of(r) for r in rows if r.rule == "json"]
+    json_fields = [
+        field_of(r)
+        for r in rows
+        if r.field is not None and is_container(r.field) and JSON_SUFFIX not in r.id
+    ]
     code_root = unit.code_root
     if not json_fields or code_root is None or not code_root.is_dir():
         return []
     patterns = {
         name: re.compile(
-            rf"\b{re.escape(name)}\s*(\[|\.get\(|=\s*\{{)|\"{re.escape(name)}\"\s*:"
+            rf"\b{re.escape(name)}\s*(\[|\.get\(|\.update\(|=\s*\{{|=\s*\w+)"
+            rf"|\"{re.escape(name)}\"\s*:"
         )
         for name in json_fields
     }
