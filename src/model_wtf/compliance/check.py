@@ -77,15 +77,15 @@ def run_check(root: Path, *, strict: bool) -> Report:
 
 
 def exit_code_for(diagnostics: list[Diagnostic]) -> ExitCode:
-    """Worst outcome wins: errors → 3, blanks → 1, otherwise clean.
+    """Worst outcome wins: errors → 3, todos → 1, otherwise clean.
 
-    A blank is emitted as a warning (it does not mean the declarations are
+    A todo is emitted as a warning (it does not mean the declarations are
     wrong) but still fails the check, because an unfinished registry is not
     a compliant one.
     """
     if any(d.severity is Severity.ERROR for d in diagnostics):
         return ExitCode.DECLARATION_ERROR
-    if any(d.code == "blank" for d in diagnostics):
+    if any(d.code == "todo" for d in diagnostics):
         return ExitCode.FINDINGS
     return ExitCode.CLEAN
 

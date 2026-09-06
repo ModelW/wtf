@@ -21,12 +21,12 @@ uv run model-wtf compliance check [--strict] [--format text|json|github] [--root
 every image of `snow.yml` (guessing the discovery engine from the code) and
 creates the per-unit folders. It never
 overwrites anything; re-run it to add what is missing. Values left for a human
-are written as the YAML tag `!open`. The processor defaults to
+are written as the YAML tag `!todo`. The processor defaults to
 `default_processor: {name, country, address, email}` from
 `~/.config/model-wtf/config.yml`.
 
 `check` discovers the units, validates every declaration file against its
-schema (pydantic; unknown keys are errors) and lists the `!open` values.
+schema (pydantic; unknown keys are errors) and lists the `!todo` values.
 
 ### Files
 
@@ -76,7 +76,7 @@ The repo-root `compliance/` folder is always loaded as the _shared_ scope
 | Code | Meaning                                                         |
 | ---- | --------------------------------------------------------------- |
 | 0    | Clean                                                           |
-| 1    | Open findings / `!open` values still to fill                    |
+| 1    | Todo findings / `!todo` values still to fill                    |
 | 2    | Stale attestation                                               |
 | 3    | Declaration errors (schema, missing files, dangling party ids)  |
 | 4    | Tool error                                                      |

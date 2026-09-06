@@ -1,9 +1,9 @@
 """Pydantic schemas of the human-written compliance files.
 
-Every field a human must provide is typed ``T | Open`` so that a file can
+Every field a human must provide is typed ``T | Todo`` so that a file can
 be committed half-filled and ``check`` can tell "not done" from "wrong".
 Optional fields are plain ``T | None`` and must be omitted, not left open:
-an ``!open`` there would be noise nobody is required to resolve.
+an ``!todo`` there would be noise nobody is required to resolve.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from model_wtf.compliance.yaml_io import (
-    Open,  # noqa: TC001 - used at runtime by pydantic
+    Todo,  # noqa: TC001 - used at runtime by pydantic
 )
 
 ID_PATTERN = r"^[a-z0-9][a-z0-9-]*$"
@@ -34,8 +34,8 @@ class StrictModel(BaseModel):
 class Contact(StrictModel):
     """A named person or office reachable by email (DPO, representative)."""
 
-    name: NonEmpty | Open
-    email: NonEmpty | Open
+    name: NonEmpty | Todo
+    email: NonEmpty | Todo
     phone: NonEmpty | None = None
 
 
@@ -47,12 +47,12 @@ class Party(StrictModel):
     are declared where the processing is.
     """
 
-    name: NonEmpty | Open
-    country: CountryCode | Open = Field(
+    name: NonEmpty | Todo
+    country: CountryCode | Todo = Field(
         description="ISO 3166-1 alpha-2, drives third-country transfer logic"
     )
-    address: NonEmpty | Open
-    email: NonEmpty | Open
+    address: NonEmpty | Todo
+    email: NonEmpty | Todo
     phone: NonEmpty | None = None
     website: NonEmpty | None = None
     registration: NonEmpty | None = Field(
@@ -74,12 +74,12 @@ class App(StrictModel):
     when the controller runs the product itself.
     """
 
-    name: NonEmpty | Open
-    description: NonEmpty | Open = Field(
+    name: NonEmpty | Todo
+    description: NonEmpty | Todo = Field(
         description="What the product does, for whom, in a few sentences"
     )
-    controller: Slug | Open = Field(description="Party id of the controller")
-    processor: Slug | Open | None = Field(
+    controller: Slug | Todo = Field(description="Party id of the controller")
+    processor: Slug | Todo | None = Field(
         default=None, description="Party id of the processor, if any"
     )
 

@@ -17,7 +17,7 @@ from model_wtf.compliance.init_cmd import (
     run_init,
     slugify,
 )
-from model_wtf.compliance.yaml_io import OPEN, load_yaml
+from model_wtf.compliance.yaml_io import TODO, load_yaml
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -88,7 +88,7 @@ def test_scaffold_is_complete_and_checkable(make_repo: MakeRepo) -> None:
     app = load_yaml(root / "compliance/app.yaml")
     assert app == {
         "name": "Kerfufoo",
-        "description": OPEN,
+        "description": TODO,
         "controller": "acme-corp",
         "processor": "with-madrid-sl",
     }
@@ -96,20 +96,20 @@ def test_scaffold_is_complete_and_checkable(make_repo: MakeRepo) -> None:
     assert acme == {
         "name": "ACME Corp",
         "country": "FR",
-        "address": OPEN,
-        "email": OPEN,
+        "address": TODO,
+        "email": TODO,
     }
     with_ = load_yaml(root / "compliance/parties/with-madrid-sl.yaml")
     assert with_["address"] == "Madrid"
     assert "phone" not in with_
 
-    # The scaffold validates; only blanks remain.
+    # The scaffold validates; only todos remain.
     report = run_check(root, strict=True)
     assert report.exit_code is ExitCode.FINDINGS
     assert sorted(d.message.split(": ", 1)[1] for d in report.diagnostics) == [
-        "address is still !open",
-        "description is still !open",
-        "email is still !open",
+        "address is still !todo",
+        "description is still !todo",
+        "email is still !todo",
     ]
 
 
@@ -154,7 +154,7 @@ def test_snow_patch_touches_only_the_added_lines(make_repo: MakeRepo) -> None:
     assert added == block * 2
     without = "\n".join(line for line in text.splitlines() if line not in block)
     assert without + "\n" == SNOW_FOLDED
-    # Inserted right after ``envs``, before the blank line.
+    # Inserted right after ``envs``, before the todo line.
     assert "envs: [sentry-build]\n" + "\n".join(block) + "\n\ncomponents" in text
 
 

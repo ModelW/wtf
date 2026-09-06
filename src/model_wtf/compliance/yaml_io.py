@@ -1,11 +1,11 @@
-"""YAML loading with the ``!open`` blank marker.
+"""YAML loading with the ``!todo`` marker for values a human still owes.
 
 Compliance files are written by humans over time. A value that nobody has
 filled yet is not "missing" (that would be a schema error) and not an
-empty string (that would silently pass): it is *open*, spelled ``!open``
-in YAML. The loader turns that tag into the :data:`OPEN` sentinel, the
+empty string (that would silently pass): it is a *todo*, spelled ``!todo``
+in YAML. The loader turns that tag into the :data:`TODO` sentinel, the
 schemas accept it wherever a human value is expected, and ``check``
-reports each occurrence as a blank so the exit code says "not done yet"
+reports each occurrence as a todo so the exit code says "not done yet"
 rather than "broken".
 """
 
@@ -21,17 +21,17 @@ from pydantic_core import core_schema
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-OPEN_TAG = "!open"
+TODO_TAG = "!todo"
 
 
-class Open:
+class Todo:
     """Singleton marking a value a human still has to provide.
 
-    Pydantic validates it by identity, so ``str | Open`` in a schema means
+    Pydantic validates it by identity, so ``str | Todo`` in a schema means
     "a string, or explicitly left open" and nothing else.
     """
 
-    _instance: Open | None = None
+    _instance: Todo | None = None
 
     def __new__(cls) -> Self:
         """Always return the same instance."""
@@ -40,7 +40,7 @@ class Open:
         return cls._instance  # type: ignore[return-value]
 
     def __repr__(self) -> str:
-        return OPEN_TAG
+        return TODO_TAG
 
     @classmethod
     def __get_pydantic_core_schema__(
@@ -50,33 +50,33 @@ class Open:
         return core_schema.is_instance_schema(cls)
 
 
-OPEN = Open()
+TODO = Todo()
 
 
 class _Loader(yaml.SafeLoader):
-    """SafeLoader that understands ``!open``."""
+    """SafeLoader that understands ``!todo``."""
 
 
-def _construct_open(_loader: yaml.Loader, _node: yaml.Node) -> Open:
-    return OPEN
+def _construct_todo(_loader: yaml.Loader, _node: yaml.Node) -> Todo:
+    return TODO
 
 
-_Loader.add_constructor(OPEN_TAG, _construct_open)
+_Loader.add_constructor(TODO_TAG, _construct_todo)
 
 
 class _Dumper(yaml.SafeDumper):
-    """SafeDumper that writes the sentinel back as ``!open``."""
+    """SafeDumper that writes the sentinel back as ``!todo``."""
 
 
-def _represent_open(dumper: yaml.SafeDumper, _data: Open) -> yaml.Node:
-    return dumper.represent_scalar(OPEN_TAG, "")
+def _represent_todo(dumper: yaml.SafeDumper, _data: Todo) -> yaml.Node:
+    return dumper.represent_scalar(TODO_TAG, "")
 
 
-_Dumper.add_representer(Open, _represent_open)
+_Dumper.add_representer(Todo, _represent_todo)
 
 
 def load_yaml(path: Path) -> Any:
-    """Parse ``path`` with ``!open`` support; ``None`` for an empty file."""
+    """Parse ``path`` with ``!todo`` support; ``None`` for an empty file."""
     return yaml.load(path.read_text(encoding="utf-8"), Loader=_Loader)  # noqa: S506 - SafeLoader subclass
 
 
@@ -91,13 +91,13 @@ def dump_yaml(data: Any) -> str:
     )
 
 
-def open_text() -> str:
-    """The literal a scaffold writes for a blank value."""
-    return OPEN_TAG
+def todo_text() -> str:
+    """The literal a scaffold writes for a todo value."""
+    return TODO_TAG
 
 
-def iter_open_paths(model: BaseModel, prefix: str = "") -> Iterator[str]:
-    """Yield the dotted path of every :data:`OPEN` inside a validated model.
+def iter_todo_paths(model: BaseModel, prefix: str = "") -> Iterator[str]:
+    """Yield the dotted path of every :data:`TODO` inside a validated model.
 
     Walks nested models and lists; ``prefix`` is used for recursion.
     """
@@ -108,22 +108,22 @@ def iter_open_paths(model: BaseModel, prefix: str = "") -> Iterator[str]:
 
 
 def _walk(value: Any, path: str) -> Iterator[str]:
-    if isinstance(value, Open):
+    if isinstance(value, Todo):
         yield path
     elif isinstance(value, BaseModel):
-        yield from iter_open_paths(value, f"{path}.")
+        yield from iter_todo_paths(value, f"{path}.")
     elif isinstance(value, list):
         for index, item in enumerate(value):
             yield from _walk(item, f"{path}[{index}]")
 
 
 __all__ = [
-    "OPEN",
-    "OPEN_TAG",
-    "Open",
+    "TODO",
+    "TODO_TAG",
     "Path",
+    "Todo",
     "dump_yaml",
-    "iter_open_paths",
+    "iter_todo_paths",
     "load_yaml",
-    "open_text",
+    "todo_text",
 ]

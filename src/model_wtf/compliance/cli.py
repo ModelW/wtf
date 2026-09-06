@@ -150,7 +150,7 @@ def init(
         console.print(f"[dim]exists[/dim]   {_rel(path, resolved_root)}")
     if result.changed:
         console.print(
-            "\nnext: fill the [bold]!open[/bold] values, then run "
+            "\nnext: fill the [bold]!todo[/bold] values, then run "
             "[bold]model-wtf compliance check[/bold]"
         )
     else:

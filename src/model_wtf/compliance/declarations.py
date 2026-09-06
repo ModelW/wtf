@@ -6,8 +6,8 @@ kinds of problems come out, and the exit code depends on which:
 
 * **errors** (``schema-error``, ``unknown-party``, ``app-missing``, ...):
   the declarations are wrong → :attr:`ExitCode.DECLARATION_ERROR`;
-* **blanks** (``blank``): the declarations are fine but unfinished
-  (``!open`` values) → :attr:`ExitCode.FINDINGS`.
+* **todos** (``todo``): the declarations are fine but unfinished
+  (``!todo`` values) → :attr:`ExitCode.FINDINGS`.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from pydantic import BaseModel, ValidationError
 
 from model_wtf.compliance.report import Diagnostic, Severity
 from model_wtf.compliance.schemas import App, Party, is_valid_id
-from model_wtf.compliance.yaml_io import Open, iter_open_paths, load_yaml
+from model_wtf.compliance.yaml_io import Todo, iter_todo_paths, load_yaml
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -42,13 +42,13 @@ class Declarations:
 
     @property
     def has_errors(self) -> bool:
-        """Whether any diagnostic is an error (as opposed to a blank)."""
+        """Whether any diagnostic is an error (as opposed to a todo)."""
         return any(d.severity is Severity.ERROR for d in self.diagnostics)
 
     @property
-    def has_blanks(self) -> bool:
-        """Whether any ``!open`` value was found."""
-        return any(d.code == "blank" for d in self.diagnostics)
+    def has_todos(self) -> bool:
+        """Whether any ``!todo`` value was found."""
+        return any(d.code == "todo" for d in self.diagnostics)
 
 
 def load_declarations(shared: Path) -> Declarations:
@@ -116,7 +116,7 @@ def _check_party_refs(decl: Declarations, app_path: Path) -> None:
     assert decl.app is not None  # noqa: S101 - guarded by caller
     for role in ("controller", "processor"):
         ref = getattr(decl.app, role)
-        if ref is None or isinstance(ref, Open):
+        if ref is None or isinstance(ref, Todo):
             continue
         if ref not in decl.parties and ref not in decl.invalid_parties:
             decl.diagnostics.append(
@@ -133,10 +133,10 @@ def _check_party_refs(decl: Declarations, app_path: Path) -> None:
 def format_errors(exc: ValidationError) -> list[tuple[str, str]]:
     """Flatten a pydantic error into ``(dotted location, message)`` pairs.
 
-    Every human field is a ``T | Open`` union, so pydantic reports two
+    Every human field is a ``T | Todo`` union, so pydantic reports two
     failures per bad value: one for ``T`` and one "should be an instance of
-    Open". The second is noise for the reader; it is dropped and the union
-    branch name (``constrained-str``, ``is-instance[Open]``) is stripped
+    Todo". The second is noise for the reader; it is dropped and the union
+    branch name (``constrained-str``, ``is-instance[Todo]``) is stripped
     from the location.
     """
     out: list[tuple[str, str]] = []
@@ -153,9 +153,9 @@ def format_errors(exc: ValidationError) -> list[tuple[str, str]]:
 def _load_file[M: BaseModel](
     path: Path, model: type[M], diagnostics: list[Diagnostic]
 ) -> M | None:
-    """Validate ``path`` against ``model``; record errors and blanks.
+    """Validate ``path`` against ``model``; record errors and todos.
 
-    Returns the model on success (even when it has blanks) or ``None``
+    Returns the model on success (even when it has todos) or ``None``
     when the file is unreadable or invalid.
     """
     try:
@@ -185,12 +185,12 @@ def _load_file[M: BaseModel](
                 )
             )
         return None
-    for dotted in iter_open_paths(instance):
+    for dotted in iter_todo_paths(instance):
         diagnostics.append(
             Diagnostic(
                 Severity.WARNING,
-                "blank",
-                f"{path.name}: {dotted} is still !open",
+                "todo",
+                f"{path.name}: {dotted} is still !todo",
                 SHARED_SCOPE_ID,
                 path,
             )

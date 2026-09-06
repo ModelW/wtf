@@ -1,4 +1,4 @@
-"""``app.yaml`` + ``parties/``: schema errors, blanks, references."""
+"""``app.yaml`` + ``parties/``: schema errors, todos, references."""
 
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.report import Severity
 from model_wtf.compliance.schemas import App
 from model_wtf.compliance.yaml_io import (
-    OPEN,
-    Open,
+    TODO,
+    Todo,
     dump_yaml,
-    iter_open_paths,
+    iter_todo_paths,
     load_yaml,
 )
 
@@ -28,42 +28,42 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# !open loader
+# !todo loader
 # ---------------------------------------------------------------------------
 
 
 def test_open_tag_loads_as_singleton(tmp_path: Path) -> None:
     path = tmp_path / "f.yaml"
-    path.write_text("a: !open\nb:\n  - !open\n  - 1\n", encoding="utf-8")
+    path.write_text("a: !todo\nb:\n  - !todo\n  - 1\n", encoding="utf-8")
 
     data = load_yaml(path)
 
-    assert data["a"] is OPEN
-    assert data["b"][0] is OPEN
-    assert Open() is OPEN
+    assert data["a"] is TODO
+    assert data["b"][0] is TODO
+    assert Todo() is TODO
 
 
 def test_open_round_trips_through_dump() -> None:
-    assert dump_yaml({"a": OPEN, "b": "x"}) == "a: !open ''\nb: x\n"
+    assert dump_yaml({"a": TODO, "b": "x"}) == "a: !todo ''\nb: x\n"
 
 
-def test_iter_open_paths_walks_nested_models() -> None:
+def test_iter_todo_paths_walks_nested_models() -> None:
     class Inner(BaseModel):
-        x: str | Open
+        x: str | Todo
 
     class Outer(BaseModel):
-        a: str | Open
+        a: str | Todo
         inner: Inner
         many: list[Inner]
 
-    model = Outer(a=OPEN, inner=Inner(x="ok"), many=[Inner(x="ok"), Inner(x=OPEN)])
+    model = Outer(a=TODO, inner=Inner(x="ok"), many=[Inner(x="ok"), Inner(x=TODO)])
 
-    assert list(iter_open_paths(model)) == ["a", "many[1].x"]
+    assert list(iter_todo_paths(model)) == ["a", "many[1].x"]
 
 
 def test_open_is_rejected_where_not_allowed() -> None:
     # ``processor`` may be open; a boolean-ish field like ``name`` may too,
-    # but a non-``Open`` unknown object must fail.
+    # but a non-``Todo`` unknown object must fail.
     with pytest.raises(ValueError, match="controller"):
         App.model_validate({"name": "x", "description": "y", "controller": object()})
 
@@ -87,24 +87,24 @@ def test_valid_and_filled_declarations_have_no_diagnostics(make_repo: MakeRepo) 
     assert decl.parties["with-madrid"].dpo is not None
 
 
-def test_blanks_are_warnings_with_paths(make_repo: MakeRepo) -> None:
+def test_todos_are_warnings_with_paths(make_repo: MakeRepo) -> None:
     files = dict(FILES_ALL_OK)
     files["compliance/app.yaml"] = APP_OK.replace(
-        "description: Back-office for the Kerfufoo client portal.", "description: !open"
+        "description: Back-office for the Kerfufoo client portal.", "description: !todo"
     )
     files["compliance/parties/acme.yaml"] = PARTY_ACME.replace(
-        "address: 1 rue de la Paix, Paris", "address: !open"
+        "address: 1 rue de la Paix, Paris", "address: !todo"
     )
 
     decl = load_declarations(_shared(make_repo, files))
 
     assert [(d.code, d.severity) for d in decl.diagnostics] == [
-        ("blank", Severity.WARNING),
-        ("blank", Severity.WARNING),
+        ("todo", Severity.WARNING),
+        ("todo", Severity.WARNING),
     ]
     assert "app.yaml: description" in decl.diagnostics[0].message
     assert "acme.yaml: address" in decl.diagnostics[1].message
-    assert decl.has_blanks
+    assert decl.has_todos
     assert not decl.has_errors
 
 
@@ -147,12 +147,12 @@ def test_dangling_party_reference(make_repo: MakeRepo) -> None:
 def test_open_processor_is_not_a_dangling_reference(make_repo: MakeRepo) -> None:
     files = dict(FILES_ALL_OK)
     files["compliance/app.yaml"] = APP_OK.replace(
-        "processor: with-madrid", "processor: !open"
+        "processor: with-madrid", "processor: !todo"
     )
 
     decl = load_declarations(_shared(make_repo, files))
 
-    assert [d.code for d in decl.diagnostics] == ["blank"]
+    assert [d.code for d in decl.diagnostics] == ["todo"]
 
 
 def test_invalid_party_file_name(make_repo: MakeRepo) -> None:
@@ -184,10 +184,10 @@ def test_missing_app_and_parties(make_repo: MakeRepo) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_blank_exits_one_and_error_exits_three(make_repo: MakeRepo) -> None:
+def test_todo_exits_one_and_error_exits_three(make_repo: MakeRepo) -> None:
     files = dict(FILES_ALL_OK)
     files["compliance/parties/acme.yaml"] = PARTY_ACME.replace(
-        "address: 1 rue de la Paix, Paris", "address: !open"
+        "address: 1 rue de la Paix, Paris", "address: !todo"
     )
     root = make_repo(snow=SNOW_TWO_UNITS, files=files)
     assert run_check(root, strict=True).exit_code is ExitCode.FINDINGS

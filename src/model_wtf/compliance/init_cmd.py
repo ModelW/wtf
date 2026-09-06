@@ -3,7 +3,7 @@
 The scaffold is deliberately thin: the repo-level manifest (``app.yaml``),
 one party file per organisation named on the command line, a README, the
 ``compliance:`` key on every image of ``snow.yml`` and an empty folder per
-unit. Everything a human still has to write is spelled ``!open`` so that
+unit. Everything a human still has to write is spelled ``!todo`` so that
 ``check`` can list it.
 
 Idempotency is the key property: nothing that exists is ever rewritten, so
@@ -26,7 +26,7 @@ from model_wtf.compliance.discovery import (
     SNOW_MANIFEST,
     normalise_folder,
 )
-from model_wtf.compliance.yaml_io import load_yaml, open_text
+from model_wtf.compliance.yaml_io import load_yaml, todo_text
 
 SHARED_FOLDER = "compliance"
 USER_CONFIG = Path("~/.config/model-wtf/config.yml")
@@ -48,8 +48,8 @@ Each image in `snow.yml` with a `compliance:` block is a *unit*; its own
 folder (next to its Dockerfile by default) holds what is specific to that
 codebase.
 
-Values a human still has to write are marked with the YAML tag `!open`.
-Optional keys are simply omitted, never left `!open`.
+Values a human still has to write are marked with the YAML tag `!todo`.
+Optional keys are simply omitted, never left `!todo`.
 
     model-wtf compliance check     # validates schemas and lists open values
     model-wtf compliance init      # re-run any time to add missing pieces
@@ -74,11 +74,11 @@ class PartySpec:
         return slugify(self.name)
 
     def to_yaml(self) -> str:
-        """Party file body; unknown contact fields are ``!open``."""
+        """Party file body; unknown contact fields are ``!todo``."""
         lines = [f"name: {_scalar(self.name)}"]
         for key in ("country", "address", "email"):
             value = getattr(self, key)
-            lines.append(f"{key}: {_scalar(value) if value else open_text()}")
+            lines.append(f"{key}: {_scalar(value) if value else todo_text()}")
         for key in ("phone", "website", "registration"):
             value = getattr(self, key)
             if value:
@@ -208,7 +208,7 @@ def detect_dockerfiles(root: Path) -> list[tuple[str, str]]:
 def _app_yaml(name: str, controller: PartySpec, processor: PartySpec | None) -> str:
     lines = [
         f"name: {_scalar(name)}",
-        f"description: {open_text()}",
+        f"description: {todo_text()}",
         f"controller: {controller.slug}",
     ]
     if processor is not None:
