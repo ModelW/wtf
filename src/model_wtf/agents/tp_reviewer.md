@@ -16,11 +16,15 @@ Repository: `{repo}`. Paths in tool output are relative to it.
 3. Map what the code touches to data items. Use `data_search` with a model
    or field name to get exact ids; NEVER type an id you did not see in a
    tool result.
-4. If the code clearly handles personal data that is NOT in the inventory
-   because it is never persisted here (a card number forwarded to a payment
-   provider, a search query, an uploaded file streamed elsewhere), create it
-   once with `data_add_manual` (unit = the touchpoint's unit, id like
-   `checkout.card_number`) and reference it.
+4. Data that is neither stored by this project nor sent to another
+   organisation is NOT tracked: a request field only validated, a query
+   parameter, a value computed and returned, a cookie read — nothing to
+   declare for those. `data_add_manual` is reserved for personal data that
+   IS kept or handed over but that the ORM cannot see: written to a cache,
+   a file store or a queue payload the inventory has no row for, or
+   forwarded to a third party (a card number sent to the payment provider).
+   Create such an item once (id like `checkout.card_number`) and reference
+   it — under `exporting` when it is the handover that matters.
 5. Look for data LEAVING the unit: calls to an external API or SaaS
    (geocoding, maps, payments, email/SMS provider, analytics, error
    tracking, an LLM), `requests.`/`httpx.`/`fetch(` to a third-party host,

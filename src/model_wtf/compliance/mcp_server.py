@@ -1004,10 +1004,12 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
     @server.tool(
         name="data_add_manual",
         description=(
-            "Declare data the code handles but never persists (a card number "
-            "forwarded to a PSP, a search query, a file streamed through): "
-            "{unit, id, description, pii, sensitivity, category, reason, store?}. "
-            "Returns the ref to use in touchpoint_set_data."
+            "Declare personal data the ORM cannot see but that IS kept or handed "
+            "over: written to a cache/file store/queue payload without a row, or "
+            "forwarded to a third party (a card number sent to the PSP). NOT for "
+            "data merely validated, computed or returned. {unit, id, description, "
+            "pii, sensitivity, category, reason, store?}; returns the ref for "
+            "touchpoint_set_data."
         ),
     )
     def data_add_manual(
