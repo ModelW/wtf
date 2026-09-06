@@ -1,0 +1,8 @@
+package: whealth
+assumption: >
+  Health-check runs: timing, hostname and per-control results. The default
+  assumes no request or user data is captured in `results`.
+check: Read the project's health controls; if any reports user-level facts, declare them.
+fields:
+  results: {pii: false, sensitivity: internal, category: technical, fixed: false}
+fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}

@@ -151,9 +151,18 @@ anything is pending.
   classification.
 - `data override …` also marks the item reviewed.
 - Third-party models are reviewed like the project's own: what a task queue
-  or a user table holds is this project's data. Curated verdicts for framework
-  fields whose meaning is fixed (`auth.User.password`, …) live in
-  `knowledge/known_fields.yaml` (`known`).
+  or a user table holds is this project's data. What model-wtf already knows
+  about them lives in `knowledge/library/<app.Model>.yaml`: per field a
+  default verdict with `fixed: true` when the framework fixes the meaning
+  (`auth.User.password` — source/status `known`, nothing to review) or
+  `fixed: false` when it depends on the project (`ProcrastinateJob.args`,
+  `Session.session_data`, `FormSubmission.form_data` — source `library`,
+  status `pending:assumed`). Assumed models carry an `assumption` and a
+  `check`: what we take for granted and what to look at in *this* project;
+  `data list` prints the assumption under the row, `data_model` shows it to
+  the agent (which must do the check before confirming), `check` lists every
+  unconfirmed assumption. `fields_default` covers unlisted columns of tables
+  that are technical through and through.
 - Every file field also yields `<field>@files.content`: the bytes in the
   storage behind the column, classified on their own.
 

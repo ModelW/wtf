@@ -88,7 +88,9 @@ class Source(StrEnum):
 
     RULE = "rule"
     KNOWN = "known"
-    """Curated verdict for a well-known third-party field; counts as reviewed."""
+    """Fixed library verdict (a password hash is a password hash): reviewed."""
+    LIBRARY = "library"
+    """Library default resting on an assumption: applied, but still to confirm."""
     OVERRIDE = "override"
     MANUAL = "manual"
     DERIVED = "derived"
@@ -178,6 +180,10 @@ class Row:
     ``None`` when unknown (manual item without ``store``)."""
     contents: tuple[str, ...] = ()
     """Names of the declared contents (container columns only)."""
+    assumption: str | None = None
+    """What a library default takes for granted (source ``library``)."""
+    check: str | None = None
+    """What to look at in this project to confirm or refute ``assumption``."""
     unknown_contents: Unknown | None = None
     """Exhaustiveness of ``contents`` (container columns with a declaration)."""
 
@@ -216,6 +222,8 @@ class Row:
             "rule": self.rule,
             "store": self.store,
             "contents": list(self.contents),
+            "assumption": self.assumption,
+            "check": self.check,
             "unknown_contents": self.unknown_contents.value
             if self.unknown_contents
             else None,
@@ -383,7 +391,7 @@ def _classify(
     unit: Unit,
 ) -> Row:
     rule_id, rule = knowledge.classify(finfo)
-    known = knowledge.known.get(item_id)
+    known = knowledge.known_field(model.label, _library_field_name(item_id, model))
     pii, level, category = (
         rule.pii,
         knowledge.resolve(rule.sensitivity),
@@ -391,13 +399,14 @@ def _classify(
     )
     source = Source.RULE
     store = _store_slug(finfo, model)
+    assumption = check = None
     if known is not None:
-        # Curated verdict for a framework/library field: applied after the
-        # rule, before any repo override, and it needs no review.
-        pii = known.pii if known.pii is not None else pii
-        level = knowledge.resolve(known.sensitivity) if known.sensitivity else level
-        category = knowledge.resolve(known.category) if known.category else category
-        source = Source.KNOWN
+        # Library verdict: applied after the rule, before any repo override.
+        # Fixed ones need no review; assumed ones stay pending with a caption.
+        pii, level, category = known.pii, known.sensitivity, known.category
+        source = Source.KNOWN if known.fixed else Source.LIBRARY
+        if not known.fixed:
+            assumption, check = known.assumption, known.check
     if override_raw is not None:
         path = unit.folder / DATA_DIR / f"{item_id}.yaml"
         override = _validate(Override, override_raw, path, diagnostics)
@@ -427,6 +436,8 @@ def _classify(
         model_module=model.module,
         model_file=model.file,
         store=store,
+        assumption=assumption,
+        check=check,
     )
 
 
@@ -569,6 +580,11 @@ def _dpia(knowledge: Knowledge, level: str | None, category: str | None) -> Dpia
     if level in knowledge.sensitivity and category in knowledge.categories:
         return knowledge.dpia_for(level, category)
     return None
+
+
+def _library_field_name(item_id: str, model: ModelInfo) -> str:
+    """``app.Model.avatar@files.content`` → ``avatar@files.content``."""
+    return item_id[len(model.label) + 1 :]
 
 
 def _store_slug(finfo: FieldInfo, model: ModelInfo) -> str | None:

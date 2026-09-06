@@ -1,0 +1,15 @@
+package: django
+assumption: >
+  `object_repr` and `change_message` quote the edited object's `__str__` and
+  the names of the changed fields. They carry personal data exactly when a
+  model holding personal data has a `__str__` that returns it (a person's
+  name, an email).
+check: >
+  Look at `__str__` of every model registered in the admin that holds
+  personal fields; if any returns a name or email, `object_repr` is personal
+  identity data.
+fields:
+  user: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+  object_repr: {pii: true, sensitivity: personal, category: identity, fixed: false}
+  change_message: {pii: false, sensitivity: internal, category: technical, fixed: false}
+fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}

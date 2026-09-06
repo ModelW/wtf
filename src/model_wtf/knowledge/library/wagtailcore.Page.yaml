@@ -1,0 +1,18 @@
+package: wagtail
+assumption: >
+  The base page fields are CMS metadata (titles, slugs, publication dates);
+  `owner` and `locked_by` are staff references. Titles are personal only if
+  pages are about people in this project.
+check: >
+  If any Page subclass represents a person (author, team member), `title`,
+  `draft_title`, `slug`, `seo_title` and `search_description` are personal
+  identity data.
+fields:
+  title: {pii: false, sensitivity: internal, category: technical, fixed: false}
+  draft_title: {pii: false, sensitivity: internal, category: technical, fixed: false}
+  slug: {pii: false, sensitivity: internal, category: technical, fixed: false}
+  seo_title: {pii: false, sensitivity: internal, category: technical, fixed: false}
+  search_description: {pii: false, sensitivity: internal, category: technical, fixed: false}
+  owner: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+  locked_by: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}

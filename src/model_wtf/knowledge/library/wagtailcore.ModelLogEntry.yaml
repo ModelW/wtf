@@ -1,0 +1,13 @@
+package: wagtail
+assumption: >
+  `data` is the action-specific payload of the audit log (a revision id,
+  old and new title, a workflow task name); `label` is the object's title.
+  Personal only when the edited object's title is about a person.
+check: >
+  If page/snippet titles can be people's names in this project (an author
+  index, a staff directory), `label` and `data` are personal identity data.
+fields:
+  label: {pii: false, sensitivity: internal, category: technical, fixed: false}
+  data: {pii: false, sensitivity: internal, category: technical, fixed: false}
+  user: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}

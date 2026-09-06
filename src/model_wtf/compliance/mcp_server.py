@@ -34,6 +34,7 @@ from model_wtf.compliance.data import (
     FILE_STORE_SUFFIX,
     JSON_SUFFIX,
     Row,
+    Source,
     UnitData,
     Unknown,
     collect_unit,
@@ -194,12 +195,16 @@ class Tools:
             for label, rows in per_model.items():
                 json_count = sum(r.rule == "json" for r in rows)
                 third_party = _is_third_party(rows[0])
+                assumed = all(r.source is Source.LIBRARY for r in rows)
                 # Project models first (the project's own choices), then
                 # third-party ones — which still hold whatever the project
                 # puts in them (task payloads, user tables) and are reviewed
-                # too. JSON-heavy models first within each group.
-                key = (int(third_party), -json_count, label)
+                # too; those resting on a library assumption last, they are
+                # cheapest to confirm. JSON-heavy models first within each.
+                key = (int(third_party) + int(assumed), -json_count, label)
                 where = "third-party" if third_party else "project"
+                if assumed:
+                    where += ", library assumption to confirm"
                 extra = f", {json_count} JSON" if json_count else ""
                 entries.append(
                     (
@@ -251,10 +256,21 @@ class Tools:
                 where = "" if field_name in declared else " (inherited)"
             st = status[row.id]
             st_text = "pending" if st.pending else st.value
+            if row.source is Source.LIBRARY:
+                st_text = "assumed" if st.pending else st.value
             lines.append(
                 f"  {field_name}{where} | {row.type} | pii={_yn(row.pii)} | "
                 f"{row.sensitivity} | {row.category} | {row.rule} | {st_text}"
             )
+        assumptions = {
+            (r.assumption, r.check) for r in rows if r.assumption and r.check
+        }
+        for assumption, check in sorted(assumptions):
+            lines.append("")
+            lines.append(
+                f"ASSUMPTION (library default, fields marked `assumed`): {assumption}"
+            )
+            lines.append(f"CHECK before confirming: {check}")
         hints = _json_hints(unit, rows, self.root)
         if hints:
             lines.append("")

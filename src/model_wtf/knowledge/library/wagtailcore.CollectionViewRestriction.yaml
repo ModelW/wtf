@@ -1,0 +1,4 @@
+package: wagtail
+fields:
+  password: {pii: false, sensitivity: confidential, category: credentials, fixed: true}
+fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}

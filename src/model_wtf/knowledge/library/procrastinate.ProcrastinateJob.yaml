@@ -1,0 +1,12 @@
+package: procrastinate
+assumption: >
+  Job rows hold the task name and its keyword arguments. The default assumes
+  tasks receive only identifiers (primary keys, slugs, timestamps); it is
+  wrong as soon as a task is given an email address, a name or free text.
+check: >
+  Read every `@app.task` function of the project and the `.defer(...)` /
+  `.configure(...).defer(...)` calls; declare the contents of `args` from
+  the arguments actually passed.
+fields:
+  args: {pii: false, sensitivity: internal, category: technical, fixed: false}
+fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}

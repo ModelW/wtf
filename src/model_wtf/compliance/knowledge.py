@@ -11,6 +11,7 @@ built-in vocabulary — still resolve.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from enum import StrEnum
 from functools import cached_property
 from importlib import resources
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from model_wtf.introspect.runner import FieldInfo
 
 SENSITIVITY_DIR = "sensitivity"
+LIBRARY_DIR = "library"
 CATEGORIES_DIR = "categories"
 
 
@@ -77,13 +79,50 @@ class Category(StrictModel):
     replaces: list[str] = Field(default_factory=list)
 
 
-class KnownField(StrictModel):
-    """One entry of ``knowledge/known_fields.yaml``: a curated verdict."""
+class LibraryField(StrictModel):
+    """Default verdict for one field of a library model.
 
-    pii: bool | None = None
-    sensitivity: str | None = None
-    category: str | None = None
-    note: str = ""
+    ``fixed: true`` means the framework fixes the meaning (a password hash is
+    a password hash): applied as ``known``, nothing to review. ``fixed:
+    false`` is a default that depends on the project: applied, but the row
+    stays pending until confirmed, and the model's ``assumption`` / ``check``
+    are shown to whoever reviews it.
+    """
+
+    pii: bool
+    sensitivity: str
+    category: str
+    fixed: bool = True
+
+
+class LibraryModel(StrictModel):
+    """``knowledge/library/<app_label.Model>.yaml``: what we know of a model
+    shipped by a package, and what we merely assume about it."""
+
+    package: str
+    assumption: str | None = None
+    check: str | None = None
+    fields: dict[str, LibraryField] = Field(default_factory=dict)
+    fields_default: LibraryField | None = None
+    """Verdict for fields not listed (``id``, FKs, timestamps of a table that
+    is technical through and through)."""
+
+    def field(self, name: str) -> LibraryField | None:
+        """Verdict for ``name``: listed, else the default, else ``None``."""
+        return self.fields.get(name) or self.fields_default
+
+
+@dataclass(frozen=True)
+class KnownField:
+    """A library verdict resolved for one field, with its model's caveats."""
+
+    pii: bool
+    sensitivity: str
+    category: str
+    fixed: bool
+    package: str
+    assumption: str | None
+    check: str | None
 
 
 class Match(BaseModel):
@@ -175,7 +214,9 @@ class Knowledge:
         self.rules = sorted(rules, key=lambda pair: (pair[1].priority, pair[0]))
         self.aliases = aliases
         self.known = known or {}
-        """Curated verdicts for well-known third-party fields (``app.Model.field``)."""
+        """Library verdicts by ``app.Model.field`` (listed fields only)."""
+        self.library: dict[str, LibraryModel] = {}
+        """Library models by ``app.Model``, for ``fields_default`` and captions."""
         self.todos = todos or []
         """``!todo`` values found in the custom scale/categories."""
 
@@ -185,6 +226,24 @@ class Knowledge:
         return (
             frozenset(_builtin_names(SENSITIVITY_DIR)),
             frozenset(_builtin_names(CATEGORIES_DIR)),
+        )
+
+    def known_field(self, model_label: str, field_name: str) -> KnownField | None:
+        """Library verdict for ``app.Model`` / ``field`` (listed or default)."""
+        model = self.library.get(model_label)
+        if model is None:
+            return None
+        verdict = model.field(field_name)
+        if verdict is None:
+            return None
+        return KnownField(
+            pii=verdict.pii,
+            sensitivity=self.resolve(verdict.sensitivity),
+            category=self.resolve(verdict.category),
+            fixed=verdict.fixed,
+            package=model.package,
+            assumption=model.assumption,
+            check=model.check,
         )
 
     def resolve(self, name: str) -> str:
@@ -231,7 +290,7 @@ def load_knowledge(shared: Path | None) -> Knowledge:
         _builtin_dir(CATEGORIES_DIR), Category, diagnostics, "shared"
     )
     rules_raw = _load_dir(_builtin_dir("data_rules"), DataRule, diagnostics, "shared")
-    known = _load_known(diagnostics)
+    library = _load_library(diagnostics)
     if diagnostics:
         raise KnowledgeError(diagnostics)
 
@@ -254,28 +313,42 @@ def load_knowledge(shared: Path | None) -> Knowledge:
 
     if any(d.severity is Severity.ERROR for d in diagnostics):
         raise KnowledgeError(diagnostics)
-    return Knowledge(
+    knowledge = Knowledge(
         sensitivity,
         categories,
         list(rules_raw.items()),
         aliases,
         todos=[d for d in diagnostics if d.code == "todo"],
-        known=known,
     )
+    knowledge.library = library
+    return knowledge
 
 
-def _load_known(diagnostics: list[Diagnostic]) -> dict[str, KnownField]:
-    path = _builtin_dir("known_fields.yaml")
-    try:
-        raw = load_yaml(path) or {}
-        return {key: KnownField.model_validate(value) for key, value in raw.items()}
-    except (OSError, yaml.YAMLError, ValidationError) as exc:
-        diagnostics.append(
-            Diagnostic(
-                Severity.ERROR, "knowledge", f"known_fields.yaml: {exc}", "shared", path
+def _load_library(diagnostics: list[Diagnostic]) -> dict[str, LibraryModel]:
+    """``knowledge/library/*.yaml`` keyed by ``app_label.Model`` (the stem)."""
+    out: dict[str, LibraryModel] = {}
+    for path in sorted(_builtin_dir(LIBRARY_DIR).glob("*.yaml")):
+        try:
+            data = load_yaml(path)
+            out[path.stem] = LibraryModel.model_validate(data or {})
+        except (OSError, yaml.YAMLError) as exc:
+            diagnostics.append(
+                Diagnostic(
+                    Severity.ERROR, "yaml-error", f"{path.name}: {exc}", "shared", path
+                )
             )
-        )
-        return {}
+        except ValidationError as exc:
+            diagnostics.extend(
+                Diagnostic(
+                    Severity.ERROR,
+                    "schema-error",
+                    f"library/{path.name}: {loc}: {msg}",
+                    "shared",
+                    path,
+                )
+                for loc, msg in format_errors(exc)
+            )
+    return out
 
 
 def _aliases(custom: dict[str, Any]) -> dict[str, str]:

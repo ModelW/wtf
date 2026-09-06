@@ -1,0 +1,5 @@
+package: wagtail
+fields:
+  user: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+  last_seen_at: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}

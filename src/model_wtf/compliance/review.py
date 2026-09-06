@@ -49,6 +49,9 @@ class ReviewStatus(StrEnum):
     PENDING_NEW = "pending:new"
     """Never reviewed."""
 
+    PENDING_ASSUMED = "pending:assumed"
+    """A library default that rests on an assumption; confirm or override."""
+
     PENDING_CONTENTS = "pending:contents"
     """A JSON-like column without a ``contents`` declaration: a lock entry
     alone does not close it, the blob has to be described."""
@@ -63,6 +66,7 @@ class ReviewStatus(StrEnum):
             ReviewStatus.PENDING_NEW,
             ReviewStatus.PENDING_CHANGED,
             ReviewStatus.PENDING_CONTENTS,
+            ReviewStatus.PENDING_ASSUMED,
         )
 
 
@@ -143,6 +147,8 @@ class Lock:
         if row.field is not None and is_container(row.field):
             return Reviewed(row, ReviewStatus.PENDING_CONTENTS, entry)
         if entry is None:
+            if row.source is Source.LIBRARY:
+                return Reviewed(row, ReviewStatus.PENDING_ASSUMED, None)
             return Reviewed(row, ReviewStatus.PENDING_NEW, None)
         if entry.fingerprint != row.fingerprint:
             return Reviewed(row, ReviewStatus.PENDING_CHANGED, entry)

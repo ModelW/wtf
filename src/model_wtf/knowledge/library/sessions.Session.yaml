@@ -1,0 +1,14 @@
+package: django
+assumption: >
+  The session holds the authentication backend and the user's primary key,
+  serialised; the default treats it as connection data. It is wrong as soon
+  as the project writes anything else into `request.session[...]` (a cart, a
+  form draft, an email address).
+check: >
+  Grep the project for `request.session[`, `.session.setdefault(` and
+  `.session.update(`; declare the contents of `session_data` from what is
+  written there.
+fields:
+  session_key: {pii: true, sensitivity: confidential, category: credentials, fixed: true}
+  session_data: {pii: true, sensitivity: personal, category: connection, fixed: false}
+  expire_date: {pii: false, sensitivity: internal, category: technical, fixed: true}

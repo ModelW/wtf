@@ -1,0 +1,6 @@
+package: wagtail
+assumption: Derived copies of images; same verdict as the source image's bytes.
+check: Whatever the image model's `file@files.content` was given.
+fields:
+  file@files.content: {pii: false, sensitivity: internal, category: content, fixed: false}
+fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}

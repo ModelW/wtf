@@ -1,0 +1,13 @@
+package: wagtail
+assumption: >
+  Serialised CMS content (pages, snippets, their drafts and search index):
+  it holds personal data exactly when a page or snippet model of this
+  project has personal fields (an author bio, a staff directory, a contact
+  page with a person's phone).
+check: >
+  Look at the project's Page and snippet models for personal fields; if any,
+  declare the same contents here.
+fields:
+  content: {pii: false, sensitivity: internal, category: content, fixed: false}
+  user: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}

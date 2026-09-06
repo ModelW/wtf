@@ -1,0 +1,13 @@
+package: wagtail
+assumption: >
+  `form_data` holds whatever visitors typed into the project's form pages:
+  by construction at least contact data, often free text. The default treats
+  it as personal content.
+check: >
+  List the form page models (subclasses of `AbstractEmailForm` /
+  `AbstractForm`) and their `form_fields`; declare the contents from the
+  field types visitors fill (email, phone, message...).
+fields:
+  form_data: {pii: true, sensitivity: personal, category: content, fixed: false}
+  submit_time: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
+fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}

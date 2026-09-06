@@ -1,0 +1,2 @@
+package: django-taggit
+fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}
