@@ -112,6 +112,17 @@ def list_cmd(
         reviewed = [r for r in reviewed if r.status.pending]
     if output_format == "json":
         click.echo(json.dumps([r.to_dict() for r in reviewed], indent=2))
+    elif not units:
+        console.print(
+            Text(
+                "no unit declared: no image in snow.yml has a `compliance:` block; "
+                "run `model-wtf compliance init`",
+                style="yellow",
+            )
+        )
+    elif not reviewed:
+        what = "nothing pending" if pending else "no data item found"
+        console.print(Text(f"{what} in unit(s) {', '.join(u.id for u in units)}"))
     else:
         console.print(render_rows(reviewed))
         for unit_data in collected:
