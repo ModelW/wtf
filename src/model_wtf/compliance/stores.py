@@ -8,11 +8,14 @@ store, so stores are items with a stable **slug** that data rows reference
 The inventory is introspected from the Django settings by the in-venv
 script (``DATABASES`` → ``db-<alias>``, ``CACHES`` → ``cache-<alias>``,
 ``STORAGES`` → ``files-<alias>``, brokers → ``queue-*``, search backends →
-``search-<alias>``); nothing has to be written for the common case. The
-optional ``<unit>/compliance/stores/<slug>.yaml`` layer can still:
+``search-<alias>``); nothing has to be written for the common case. A store
+is described by its slug, its ``type`` and a conceptual ``backend``
+(``postgresql``, ``redis``, ``s3``): hosts, bucket names and credentials are
+deployment facts and never appear here. The optional
+``<unit>/compliance/stores/<slug>.yaml`` layer can still:
 
 * **override** facts of an introspected store (a human ``name``, the
-  ``provider``, ``location``, ``retention``...);
+  ``provider``, ``location`` as a region/country, ``retention``...);
 * **declare** a store the settings do not show (an external SaaS, a
   spreadsheet, the browser's localStorage in a front unit) so manual data
   items can reference it — such a file must give ``type``;
@@ -72,6 +75,7 @@ class StoreFile(StrictModel):
     """
 
     type: StoreType | None = None
+    backend: NonEmpty | None = None
     name: NonEmpty | Todo | None = None
     provider: NonEmpty | Todo | None = None
     location: NonEmpty | Todo | None = None
@@ -89,7 +93,7 @@ class Store:
     type: StoreType
     source: StoreSource
     backend: str = ""
-    where: dict[str, str] = field(default_factory=dict)
+    """Conceptual backend (``postgresql``, ``redis``, ``s3``); empty if unknown."""
     config: str = ""
     """Settings key it came from (``DATABASES['default']``); empty if manual."""
     name: str | None = None
@@ -104,13 +108,6 @@ class Store:
         """``unit:slug``."""
         return f"{self.unit}:{self.slug}"
 
-    def short_where(self) -> str:
-        """The one fact that best says where it is (host/bucket/location)."""
-        for key in ("bucket_name", "host", "location", "name", "endpoint_url"):
-            if self.where.get(key):
-                return self.where[key]
-        return self.location or ""
-
     def to_dict(self) -> dict[str, Any]:
         """JSON form."""
         return {
@@ -119,7 +116,6 @@ class Store:
             "type": self.type.value,
             "source": self.source.value,
             "backend": self.backend,
-            "where": dict(self.where),
             "config": self.config,
             "name": self.name,
             "provider": self.provider,
@@ -163,7 +159,6 @@ def collect_stores(unit: Unit, inventory: Inventory | None) -> UnitStores:
                 type=kind,
                 source=StoreSource.CONFIG,
                 backend=info.backend,
-                where=dict(info.where),
                 config=info.config,
             )
     folder = unit.folder / STORES_DIR
@@ -202,6 +197,7 @@ def _merge(unit: Unit, slug: str, base: Store | None, declared: StoreFile) -> St
             slug=slug,
             type=declared.type,
             source=StoreSource.MANUAL,
+            backend=declared.backend or "",
             name=text(declared.name),
             provider=text(declared.provider),
             location=text(declared.location),
@@ -214,8 +210,7 @@ def _merge(unit: Unit, slug: str, base: Store | None, declared: StoreFile) -> St
         slug=slug,
         type=declared.type or base.type,
         source=StoreSource.OVERRIDE,
-        backend=base.backend,
-        where=base.where,
+        backend=declared.backend or base.backend,
         config=base.config,
         name=text(declared.name) or base.name,
         provider=text(declared.provider) or base.provider,

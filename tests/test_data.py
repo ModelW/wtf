@@ -601,12 +601,17 @@ def test_stores_introspected_from_settings(django_repo: Path) -> None:
     stores = {s.slug: s for s in inventory.stores}
     assert {"db-default", "db-audit", "cache-default", "files-default"} <= set(stores)
     # Field-level ``storage=`` not in STORAGES is a store of its own.
-    assert stores["files-shop.AuditEntry.contract"].where["location"] == (
-        "/srv/contracts"
+    assert stores["files-shop.AuditEntry.contract"].type == "filesystem"
+    assert stores["files-shop.AuditEntry.contract"].backend == "filesystem"
+    assert (stores["cache-default"].type, stores["cache-default"].backend) == (
+        "cache",
+        "redis",
     )
-    assert stores["cache-default"].where["location"] == "redis://cache.internal:6379/1"
-    assert stores["cache-default"].type == "cache"
-    assert "must-not-leak" not in inventory.model_dump_json()
+    assert stores["db-audit"].backend == "sqlite"
+    # Nothing environmental leaves the process: no host, path, or credential.
+    dumped = inventory.model_dump_json()
+    for leak in ("must-not-leak", "cache.internal", "/srv/contracts", "secret"):
+        assert leak not in dumped
     assert inventory.sessions is not None
     assert inventory.sessions.store == "db-default"
 
@@ -651,7 +656,7 @@ def test_store_files_override_declare_ignore(django_repo: Path) -> None:
         "override",
         "Scaleway",
         "fr-par",
-        "bucket" if "s3" in files.backend.lower() else "filesystem",
+        "filesystem",
     )
     crm = data.stores.get("crm")
     assert crm is not None

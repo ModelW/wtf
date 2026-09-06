@@ -5,7 +5,7 @@ from __future__ import annotations
 import difflib
 import json
 import os
-from pathlib import Path
+from pathlib import Path  # noqa: TC003 - click needs it at runtime
 
 import rich_click as click
 from rich.console import Console
@@ -26,10 +26,11 @@ from model_wtf.compliance.data import (
     collect_unit,
     parse_full_id,
 )
-from model_wtf.compliance.discovery import find_repo_root, load_units, select_manifest
+from model_wtf.compliance.discovery import load_units, select_manifest
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.knowledge import Knowledge, KnowledgeError, load_knowledge
 from model_wtf.compliance.mcp_server import serve
+from model_wtf.compliance.options import ROOT_OPTION, resolve_root
 from model_wtf.compliance.report import DeclarationError, Severity, Unit
 from model_wtf.compliance.review import Lock, Reviewed
 from model_wtf.compliance.yaml_io import TODO_TAG, todo_text
@@ -43,17 +44,9 @@ def data() -> None:
     """Inventory and classify the application's data."""
 
 
-ROOT_OPTION = click.option(
-    "--root",
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
-    default=None,
-    help="Repository root. Defaults to the enclosing Git checkout, else the cwd.",
-)
-
-
 def load_context(root: Path | None) -> tuple[Path, list[Unit], Knowledge]:
     """Resolve root, units and knowledge, raising ``click.ClickException`` on error."""
-    resolved = root.resolve() if root else find_repo_root(Path.cwd())
+    resolved = resolve_root(root)
     try:
         manifest = select_manifest(resolved)
         units, _ = load_units(manifest, resolved, strict=False)
@@ -467,7 +460,7 @@ def mcp_cmd(*, batch: int, python: str | None, root: Path | None) -> None:
     """Serve the data-review MCP tools over stdio (used by auto-review)."""
     if python:
         os.environ["MODEL_WTF_PYTHON"] = python
-    serve(root, batch=batch)
+    serve(resolve_root(root), batch=batch)
 
 
 def write_override(

@@ -19,14 +19,15 @@ Output schema (``schema: 1``)::
           "max_length": 254, "choices": false, "auto_now": false,
           "relation": null}]}]}
 
-Each model carries its ``database`` (router alias + engine/host/name) and
+Each model carries its ``database`` (router alias + engine) and
 each file field its ``storage`` (class + bucket/location): the *store*
 behind a column is a compliance fact in its own right. The payload also
 lists every store the settings declare (``stores``: databases, caches, file
-storages, brokers, search backends) with a stable slug; models and file
-fields point at those slugs (``database.store`` / ``storage.store``).
-Credentials never leave the process: passwords are dropped and URL userinfo
-is stripped.
+storages, brokers, search backends) with a stable slug and a conceptual
+``backend`` (``postgresql``, ``redis``, ``s3``...); models and file fields
+point at those slugs (``database.store`` / ``storage.store``). Nothing
+environmental (hosts, bucket names, credentials) is exported: a store is a
+fact about the application, not about one deployment.
 
 ``type`` is the concrete class name so custom fields (``PhoneNumberField``,
 ``EncryptedCharField``) stay visible to the rules; ``internal_type`` is the
@@ -44,24 +45,55 @@ import sys
 SCHEMA = 1
 
 
-BUCKET_MARKERS = ("s3", "gcloud", "google", "azure", "boto", "minio", "bucket")
+BUCKET_ENGINES = ("s3", "gcloud", "gcs", "azure", "boto", "minio", "spaces")
 STATIC_ALIAS = "staticfiles"
 
+# Substring of a backend/engine dotted path -> conceptual backend name.
+BACKEND_NAMES = (
+    ("postgis", "postgresql"),
+    ("postgres", "postgresql"),
+    ("psqlextra", "postgresql"),
+    ("psycopg", "postgresql"),
+    ("mysql", "mysql"),
+    ("mariadb", "mysql"),
+    ("sqlite", "sqlite"),
+    ("oracle", "oracle"),
+    ("redis", "redis"),
+    ("valkey", "redis"),
+    ("memcache", "memcached"),
+    ("pymemcache", "memcached"),
+    ("locmem", "memory"),
+    ("dummy", "none"),
+    ("filebased", "filesystem"),
+    ("db.DatabaseCache", "database"),
+    ("s3", "s3"),
+    ("gcloud", "gcs"),
+    ("azure", "azure-blob"),
+    ("filesystem", "filesystem"),
+    ("elasticsearch", "elasticsearch"),
+    ("opensearch", "opensearch"),
+    ("database", "database"),
+    ("amqp", "rabbitmq"),
+    ("sqs", "sqs"),
+)
 
-def _strip_url(value):
-    """``scheme://user:pass@host/x`` → ``scheme://host/x``; other strings as-is."""
-    if not isinstance(value, str):
-        return value
-    if "://" in value and "@" in value:
-        scheme, rest = value.split("://", 1)
-        if "@" in rest.split("/", 1)[0]:
-            rest = rest.split("@", 1)[1]
-        return f"{scheme}://{rest}"
-    return value
+
+def _backend(path):
+    """Dotted backend path (or URL scheme) -> conceptual backend name.
+
+    Falls back to the last component of the path, lowercased, so an unknown
+    backend still yields something stable and readable.
+    """
+    lowered = str(path).lower()
+    for marker, name in BACKEND_NAMES:
+        if marker.lower() in lowered:
+            return name
+    tail = lowered.rsplit(".", 1)[-1].split("://", 1)[0]
+    return tail or "unknown"
 
 
 def _unwrap(storage):
-    """``DefaultStorage``/``LazyObject`` proxies → the backend they wrap."""
+    """``DefaultStorage``/``LazyObject`` proxies -> the backend they wrap."""
     from django.utils.functional import LazyObject, empty
 
     if isinstance(storage, LazyObject):
@@ -73,24 +105,7 @@ def _unwrap(storage):
 
 def _storage_type(cls_path):
     lowered = cls_path.lower()
-    return "bucket" if any(m in lowered for m in BUCKET_MARKERS) else "filesystem"
-
-
-def _storage_where(storage):
-    """Bucket/location facts of a storage instance, credentials excluded."""
-    where = {}
-    for attr in (
-        "bucket_name",
-        "location",
-        "base_url",
-        "endpoint_url",
-        "custom_domain",
-        "region_name",
-    ):
-        value = getattr(storage, attr, None)
-        if isinstance(value, str) and value:
-            where[attr] = _strip_url(value)
-    return where
+    return "bucket" if any(m in lowered for m in BUCKET_ENGINES) else "filesystem"
 
 
 class Stores:
@@ -107,27 +122,17 @@ class Stores:
         self.items = []
         self._by_storage = {}
         for alias, cfg in settings.DATABASES.items():
-            where = {}
-            for key in ("HOST", "NAME", "PORT"):
-                if cfg.get(key):
-                    where[key.lower()] = str(cfg[key])
             self._add(
                 f"db-{alias}",
                 "database",
                 cfg.get("ENGINE", ""),
-                where,
                 f"DATABASES[{alias!r}]",
             )
         for alias, cfg in getattr(settings, "CACHES", {}).items():
-            location = cfg.get("LOCATION")
-            if isinstance(location, (list, tuple)):
-                location = ", ".join(_strip_url(str(v)) for v in location)
-            where = {"location": _strip_url(str(location))} if location else {}
             self._add(
                 f"cache-{alias}",
                 "cache",
                 cfg.get("BACKEND", ""),
-                where,
                 f"CACHES[{alias!r}]",
             )
         self._file_storages()
@@ -137,36 +142,20 @@ class Stores:
                 "queue-celery",
                 "queue",
                 str(broker).split("://", 1)[0],
-                {"location": _strip_url(str(broker))},
                 "CELERY_BROKER_URL",
             )
         for alias, cfg in getattr(settings, "WAGTAILSEARCH_BACKENDS", {}).items():
-            urls = cfg.get("URLS") or cfg.get("URL") or []
-            if isinstance(urls, str):
-                urls = [urls]
-            where = (
-                {"location": ", ".join(_strip_url(str(u)) for u in urls)}
-                if urls
-                else {}
-            )
             self._add(
                 f"search-{alias}",
                 "search",
                 cfg.get("BACKEND", ""),
-                where,
                 f"WAGTAILSEARCH_BACKENDS[{alias!r}]",
             )
         self.sessions = self._sessions(settings)
 
-    def _add(self, slug, kind, backend, where, config):
+    def _add(self, slug, kind, backend, config):
         self.items.append(
-            {
-                "slug": slug,
-                "type": kind,
-                "backend": backend,
-                "where": where,
-                "config": config,
-            }
+            {"slug": slug, "type": kind, "backend": _backend(backend), "config": config}
         )
         return slug
 
@@ -179,11 +168,7 @@ class Stores:
             storage = _unwrap(default_storage)
             cls = f"{type(storage).__module__}.{type(storage).__name__}"
             slug = self._add(
-                "files-default",
-                _storage_type(cls),
-                cls,
-                _storage_where(storage),
-                "DEFAULT_FILE_STORAGE",
+                "files-default", _storage_type(cls), cls, "DEFAULT_FILE_STORAGE"
             )
             self._by_storage[id(storage)] = slug
             return
@@ -193,11 +178,7 @@ class Stores:
             storage = _unwrap(storages[alias])
             cls = f"{type(storage).__module__}.{type(storage).__name__}"
             slug = self._add(
-                f"files-{alias}",
-                _storage_type(cls),
-                cls,
-                _storage_where(storage),
-                f"STORAGES[{alias!r}]",
+                f"files-{alias}", _storage_type(cls), cls, f"STORAGES[{alias!r}]"
             )
             self._by_storage[id(storage)] = slug
 
@@ -218,41 +199,32 @@ class Stores:
         if slug is None:
             cls = f"{type(storage).__module__}.{type(storage).__name__}"
             slug = self._add(
-                f"files-{field_id}",
-                _storage_type(cls),
-                cls,
-                _storage_where(storage),
-                f"{field_id} storage=",
+                f"files-{field_id}", _storage_type(cls), cls, f"{field_id} storage="
             )
             self._by_storage[id(storage)] = slug
         return slug
 
 
 def _storage_info(field, stores, field_id):
-    """Where a file field's bytes go: storage class, bucket/location, store slug."""
+    """Storage class of a file field and the slug of the store behind it."""
     storage = getattr(field, "storage", None)
     if storage is None:
         return None
     storage = _unwrap(storage)
-    info = {"class": f"{type(storage).__module__}.{type(storage).__name__}"}
-    info.update(_storage_where(storage))
-    info["store"] = stores.for_storage(storage, field_id)
-    return info
+    return {
+        "class": f"{type(storage).__module__}.{type(storage).__name__}",
+        "store": stores.for_storage(storage, field_id),
+    }
 
 
 def _database_info(model):
-    """Which configured database the model is written to, and what it is."""
+    """Which configured database the model is written to."""
     from django.conf import settings
     from django.db import router
 
     alias = router.db_for_write(model)
     cfg = settings.DATABASES.get(alias, {})
-    info = {"alias": alias, "engine": cfg.get("ENGINE", ""), "store": f"db-{alias}"}
-    for key in ("HOST", "NAME", "PORT"):
-        value = cfg.get(key)
-        if value:
-            info[key.lower()] = str(value)
-    return info
+    return {"alias": alias, "engine": cfg.get("ENGINE", ""), "store": f"db-{alias}"}
 
 
 def _field_info(field, stores, model_label):  # type: ignore[no-untyped-def]

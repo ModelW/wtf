@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
+from pathlib import Path  # noqa: TC003 - click needs it at runtime
 
 import rich_click as click
 from rich.console import Console
@@ -11,7 +11,6 @@ from rich.text import Text
 
 from model_wtf.compliance.check import run_check
 from model_wtf.compliance.data_cli import data
-from model_wtf.compliance.discovery import find_repo_root
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.init_cmd import (
     PartySpec,
@@ -19,6 +18,7 @@ from model_wtf.compliance.init_cmd import (
     load_default_processor,
     run_init,
 )
+from model_wtf.compliance.options import ROOT_OPTION, resolve_root
 from model_wtf.compliance.render import render_github, render_json, render_text
 from model_wtf.compliance.stores_cli import stores
 
@@ -46,12 +46,7 @@ compliance.add_command(stores)
     show_default=True,
     help="Output style: human-readable, JSON, or GitHub Actions annotations.",
 )
-@click.option(
-    "--root",
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
-    default=None,
-    help="Repository root. Defaults to the enclosing Git checkout, else the cwd.",
-)
+@ROOT_OPTION
 @click.option("--python", default=None, help="Interpreter to use for introspection.")
 @click.pass_context
 def check(
@@ -69,7 +64,7 @@ def check(
     """
     console = Console()
     try:
-        resolved_root = root.resolve() if root else find_repo_root(Path.cwd())
+        resolved_root = resolve_root(root)
         report = run_check(resolved_root, strict=strict, python=python)
         if output_format == "json":
             # Plain write: rich would wrap long lines and break the JSON.
@@ -107,12 +102,7 @@ def check(
     is_flag=True,
     help="Copy the built-in categories to compliance/categories/ for editing.",
 )
-@click.option(
-    "--root",
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
-    default=None,
-    help="Repository root. Defaults to the enclosing Git checkout, else the cwd.",
-)
+@ROOT_OPTION
 @click.pass_context
 def init(
     ctx: click.Context,
@@ -134,7 +124,7 @@ def init(
     overwrites anything: re-run to add what is missing.
     """
     console = Console()
-    resolved_root = root.resolve() if root else find_repo_root(Path.cwd())
+    resolved_root = resolve_root(root)
 
     app_name = _ask(app_name, "Product name")
     controller = PartySpec(

@@ -47,25 +47,8 @@ class StorageInfo(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     class_: str = Field(alias="class")
-    bucket_name: str | None = None
-    location: str | None = None
-    endpoint_url: str | None = None
-    custom_domain: str | None = None
     store: str | None = None
     """Slug of the store in :attr:`Inventory.stores`."""
-
-    def label(self) -> str:
-        """Short human form: ``S3Storage(bucket=media, location=uploads)``."""
-        name = self.class_.rsplit(".", 1)[-1]
-        parts = [
-            f"{key}={value}"
-            for key, value in (
-                ("bucket", self.bucket_name),
-                ("location", self.location),
-            )
-            if value
-        ]
-        return f"{name}({', '.join(parts)})" if parts else name
 
 
 class DatabaseInfo(BaseModel):
@@ -75,16 +58,8 @@ class DatabaseInfo(BaseModel):
 
     alias: str
     engine: str = ""
-    host: str | None = None
-    name: str | None = None
     store: str | None = None
     """Slug of the store in :attr:`Inventory.stores`."""
-
-    def label(self) -> str:
-        """Short human form: ``default (postgresql @ db.internal/fah)``."""
-        engine = self.engine.rsplit(".", 1)[-1] or "?"
-        where = "/".join(p for p in (self.host, self.name) if p)
-        return f"{self.alias} ({engine}{' @ ' + where if where else ''})"
 
 
 class FieldInfo(BaseModel):
@@ -140,7 +115,7 @@ class StoreInfo(BaseModel):
     slug: str
     type: str
     backend: str = ""
-    where: dict[str, str] = Field(default_factory=dict)
+    """Conceptual backend: ``postgresql``, ``redis``, ``s3``, ``filesystem``..."""
     config: str = ""
     """The settings key it was read from, for ``stores explain``."""
 

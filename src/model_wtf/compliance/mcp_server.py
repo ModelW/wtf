@@ -213,8 +213,7 @@ class Tools:
                 store = data.stores.get(row.store)
                 label = "unknown store"
                 if store:
-                    place = store.short_where() or store.backend
-                    label = f"{store.slug} ({store.type.value}, {place})"
+                    label = f"{store.slug} ({store.type.value}, {store.backend})"
                 where = f" (bytes behind `{column}`, stored in {label})"
             else:
                 where = "" if field_name in declared else " (inherited)"
@@ -246,8 +245,8 @@ class Tools:
                 continue
             data = self.data(unit)
             for store in data.stores.visible():
-                where = store.short_where() or store.backend or "-"
-                lines.append(f"{unit.id}:{store.slug} | {store.type.value} | {where}")
+                backend = store.backend or "-"
+                lines.append(f"{unit.id}:{store.slug} | {store.type.value} | {backend}")
         return "\n".join(lines) or "no store found"
 
     def review_model(self, ref_text: str, decisions: list[Decision], note: str) -> str:
@@ -426,7 +425,7 @@ def build_server(root: Path, *, batch: int = DEFAULT_BATCH) -> MCPServer:
         name="stores_list",
         description=(
             "The stores (databases, caches, buckets, queues) of a unit with their "
-            "slug, type and location, so notes can name where data lives."
+            "slug, type and backend, so notes can name where data lives."
         ),
     )
     def stores_list(unit: str | None = None) -> str:

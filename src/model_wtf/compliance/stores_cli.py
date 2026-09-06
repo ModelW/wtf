@@ -12,8 +12,9 @@ from rich.table import Table
 from rich.text import Text
 
 from model_wtf.compliance.data import UnitData, parse_full_id
-from model_wtf.compliance.data_cli import ROOT_OPTION, collect_all, load_context
+from model_wtf.compliance.data_cli import collect_all, load_context
 from model_wtf.compliance.exit_codes import ExitCode
+from model_wtf.compliance.options import ROOT_OPTION
 from model_wtf.compliance.report import Severity
 from model_wtf.compliance.stores import Store, StoreType
 from model_wtf.introspect.runner import IntrospectionFailed
@@ -140,7 +141,6 @@ def explain_cmd(
         ("location", store.location),
         ("retention", store.retention),
         ("description", store.description),
-        *((f"where.{k}", v) for k, v in sorted(store.where.items())),
     ]
     for key, value in facts:
         if value:
@@ -162,7 +162,7 @@ def explain_cmd(
 def render_stores(entries: list[tuple[Store, int]]) -> Table:
     """Stores as a rich table; the slug column is copy-pasteable."""
     table = Table(title="Stores", title_justify="left")
-    for name in ("Store", "Type", "Backend", "Where", "Source", "Items"):
+    for name in ("Store", "Type", "Backend", "Source", "Items"):
         table.add_column(name)
     for store, count in entries:
         style = TYPE_STYLES[store.type]
@@ -172,8 +172,7 @@ def render_stores(entries: list[tuple[Store, int]]) -> Table:
         table.add_row(
             slug,
             Text(store.type.value, style=style),
-            store.backend.rsplit(".", 1)[-1] if store.backend else "-",
-            store.short_where() or "-",
+            store.backend or "-",
             store.source.value,
             str(count),
         )
