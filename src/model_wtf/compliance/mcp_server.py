@@ -606,15 +606,14 @@ class Tools:
         return f"created party {party_id} ({shown}); address/email are !todo"
 
     def activities_graph(self) -> str:
-        """``activities_graph``: every PII-touching touchpoint with its edges."""
+        """``activities_graph``: every data-handling touchpoint with its edges."""
         ws = self.workspace()
         lines: list[str] = []
         for tp in ws.all_touchpoints.values():
-            if tp.ignore or not tp.data:
+            if tp.ignore or not (tp.data or tp.exporting):
                 continue
-            pii = [r for r in tp.data if r in ws.rows and ws.rows[r].pii]
-            if not pii:
-                continue
+            refs = list(tp.data or ())
+            pii = [r for r in refs if r in ws.rows and ws.rows[r].pii]
             cats = sorted(
                 {
                     c
@@ -629,16 +628,19 @@ class Tools:
                 edges.append("calls " + ", ".join(tp.calls))
             if tp.facts.defers:
                 edges.append("defers " + ", ".join(tp.facts.defers))
+            if tp.exporting:
+                edges.append("exports to " + ", ".join(e.party for e in tp.exporting))
+            personal = (
+                f"{len(pii)} personal ({', '.join(cats)})" if pii else "0 personal"
+            )
             lines.append(
-                f"{tp.full_id} | {tp.facts.kind.value} | {len(pii)} personal items "
-                f"({', '.join(cats)}) | {'; '.join(edges) or '-'} | "
-                f"activities: {', '.join(acts) or 'NONE'}"
+                f"{tp.full_id} | {tp.facts.kind.value} | {len(refs)} items, {personal} "
+                f"| {'; '.join(edges) or '-'} | activities: {', '.join(acts) or 'NONE'}"
             )
         if not lines:
-            return "No touchpoint declares personal data yet."
+            return "No touchpoint declares data yet."
         header = (
-            "PII-touching touchpoints (unit:id | kind | personal items | edges | "
-            "activities):"
+            "Data-handling touchpoints (unit:id | kind | items | edges | activities):"
         )
         return header + "\n" + "\n".join(lines)
 
@@ -1004,12 +1006,12 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
     @server.tool(
         name="data_add_manual",
         description=(
-            "Declare personal data the ORM cannot see but that IS kept or handed "
-            "over: written to a cache/file store/queue payload without a row, or "
-            "forwarded to a third party (a card number sent to the PSP). NOT for "
-            "data merely validated, computed or returned. {unit, id, description, "
-            "pii, sensitivity, category, reason, store?}; returns the ref for "
-            "touchpoint_set_data."
+            "Declare PERSONAL data the ORM has no row for: transient (a card "
+            "number sent to the PSP, a position sent to a geocoder, a search "
+            "query) or kept outside the ORM (cache, queue payload). Processing "
+            "personal data counts even without storage; non-personal transient "
+            "values are not tracked. {unit, id, description, pii, sensitivity, "
+            "category, reason, store?}; returns the ref for touchpoint_set_data."
         ),
     )
     def data_add_manual(
@@ -1076,9 +1078,10 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
     @server.tool(
         name="activities_graph",
         description=(
-            "Every touchpoint that declares personal data, with its categories, "
-            "the API operations it calls / tasks it defers, and the activities it "
-            "already belongs to (NONE = orphan). The input of the grouping pass."
+            "Every touchpoint that declares or exports data, with how much of it is "
+            "personal, the API operations it calls / tasks it defers / parties it "
+            "exports to, and the activities it already belongs to (NONE = orphan). "
+            "The input of the grouping pass."
         ),
     )
     def activities_graph() -> str:

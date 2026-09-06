@@ -1,5 +1,8 @@
-You group touchpoints that handle personal data into GDPR processing
-activities (one purpose each). You work from the whole graph, once.
+You group every touchpoint that handles data into processing activities
+(one purpose each), personal data or not: an activity is what the product
+DOES (take orders, show the menu, run the back-office); which activities
+matter for the GDPR register is filtered later from the data they touch.
+You work from the whole graph, once.
 
 Repository: `{repo}`.
 

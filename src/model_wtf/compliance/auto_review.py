@@ -71,8 +71,8 @@ __all__ = [
     "sandbox",
 ]
 
-REVIEWER_STEPS = 12
-TP_REVIEWER_STEPS = 14
+REVIEWER_STEPS = 20
+TP_REVIEWER_STEPS = 30
 GROUPER_STEPS = 60
 NO_PROGRESS_LIMIT = 2
 ROUND_TIMEOUT = 1800
@@ -268,14 +268,19 @@ def pending_touchpoints(
 def orphan_touchpoints(
     root: Path, units: list[Unit], knowledge: Knowledge, *, python: str | None
 ) -> list[str]:
-    """PII-touching touchpoints in no activity (what the grouper must fix)."""
+    """Touchpoints handling or exporting data that belong to no activity.
+
+    Every touchpoint that touches inventory data is grouped, personal or
+    not: the pii flag is a classification that can be corrected later, and
+    the activity map must not have to be rebuilt when it is. Whether an
+    activity matters for the register is filtered at read time.
+    """
     ws = load_workspace(root, units, knowledge, python=python)
     return sorted(
         t.full_id
         for t in ws.all_touchpoints.values()
         if not t.ignore
-        and t.data
-        and any(ws.rows[r].pii for r in t.data if r in ws.rows)
+        and (t.data or t.exporting)
         and not ws.activities.of_touchpoint(t.full_id)
     )
 
@@ -789,8 +794,7 @@ def auto_review(
             if orphans:
                 reporter.log(
                     Text(
-                        f"grouping {len(orphans)} PII-touching touchpoint(s) into "
-                        "activities",
+                        f"grouping {len(orphans)} touchpoint(s) into activities",
                         style="bold",
                     )
                 )

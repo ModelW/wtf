@@ -260,9 +260,10 @@ one touchpoint per subagent session: `touchpoint_show` gives the code
 location, the schemas and what the API operations it calls already declare;
 the reviewer reads the view/task/route, resolves items with `data_search`
 (never typing an id it did not see), creates a **manual item** with
-`data_add_manual` only for personal data that is kept or handed over
-without an ORM row (a cache/queue payload, a card number forwarded to the
-PSP) — data merely validated, computed or returned is not tracked — and closes
+`data_add_manual` for personal data the ORM has no row for — transient
+(a card number forwarded to the PSP, a position sent to a geocoder, a search
+query) or kept outside the ORM; processing counts even without storage,
+while non-personal transient values are not tracked — and closes
 with one `touchpoint_set_data` call citing file:line (`[]` = touches nothing
 personal). **Pass 2**, once nothing is pending (or right away with
 `--group-only`): a single session reads `activities_graph` — every

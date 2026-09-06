@@ -16,15 +16,16 @@ Repository: `{repo}`. Paths in tool output are relative to it.
 3. Map what the code touches to data items. Use `data_search` with a model
    or field name to get exact ids; NEVER type an id you did not see in a
    tool result.
-4. Data that is neither stored by this project nor sent to another
-   organisation is NOT tracked: a request field only validated, a query
-   parameter, a value computed and returned, a cookie read — nothing to
-   declare for those. `data_add_manual` is reserved for personal data that
-   IS kept or handed over but that the ORM cannot see: written to a cache,
-   a file store or a queue payload the inventory has no row for, or
-   forwarded to a third party (a card number sent to the payment provider).
-   Create such an item once (id like `checkout.card_number`) and reference
-   it — under `exporting` when it is the handover that matters.
+4. Transient data (never stored by this project) follows one rule: if it is
+   PERSONAL, it is still processed and must be declared; if it is not, it
+   is noise. So: a card number forwarded to the payment provider, a
+   position sent to a geocoder, a search query, an email address typed into
+   a form and only mailed on — declare each once with `data_add_manual`
+   (unit = the touchpoint's unit, id like `checkout.card_number`, a
+   `description` saying it is transient) and reference it, under
+   `exporting` too when it is handed to another organisation. A validated
+   quantity, a page number, a computed total, a cookie flag: nothing to
+   declare.
 5. Look for data LEAVING the unit: calls to an external API or SaaS
    (geocoding, maps, payments, email/SMS provider, analytics, error
    tracking, an LLM), `requests.`/`httpx.`/`fetch(` to a third-party host,
@@ -46,6 +47,15 @@ Repository: `{repo}`. Paths in tool output are relative to it.
   (prices, flags, names of places too): the data-flow model needs the whole
   picture; the register filters on `pii` by itself. `data: []` is only for
   a touchpoint that touches no inventory item at all.
+- But only the fields THIS touchpoint actually touches: the columns a
+  serializer/schema returns, the columns a form or payload writes, the
+  columns an admin screen lists. Do not dump every field of every model a
+  view can reach; a generic framework view (Wagtail page editing, revisions,
+  choosers) touches the page tree's own columns (`wagtailcore.Page.*`,
+  `wagtailcore.Revision.*`), not every page model's fields.
+- Budget: at most ~6 reads/greps. If the code is a framework view you
+  cannot fully trace, declare what the shapes and the model prove and say
+  `partial` in the reason rather than running out of steps.
 - `exporting` is for the project's data sent to another organisation
   (personal or not). Map tiles, fonts, CDN assets loaded by a browser are
   not exports of the project's data; do not declare them.

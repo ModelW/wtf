@@ -478,7 +478,7 @@ def test_mcp_touchpoint_write_tools(repo: Path) -> None:
     assert "api:checkout" not in tools.touchpoint_pending()
 
     graph = tools.activities_graph()
-    assert "api:checkout | route | 2 personal items (contact, financial)" in graph
+    assert "api:checkout | route | 2 items, 2 personal (contact, financial)" in graph
     assert "defers send_receipt" in graph
     assert "activities: NONE" in graph
 
