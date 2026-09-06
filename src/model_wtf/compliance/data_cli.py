@@ -5,7 +5,7 @@ from __future__ import annotations
 import difflib
 import json
 import os
-from pathlib import Path
+from pathlib import Path  # noqa: TC003 - click needs it at runtime
 
 import rich_click as click
 from rich.console import Console
@@ -26,10 +26,11 @@ from model_wtf.compliance.data import (
     collect_unit,
     parse_full_id,
 )
-from model_wtf.compliance.discovery import find_repo_root, load_units, select_manifest
+from model_wtf.compliance.discovery import load_units, select_manifest
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.knowledge import Knowledge, KnowledgeError, load_knowledge
 from model_wtf.compliance.mcp_server import serve
+from model_wtf.compliance.options import ROOT_OPTION, resolve_root
 from model_wtf.compliance.report import DeclarationError, Severity, Unit
 from model_wtf.compliance.review import Lock, Reviewed
 from model_wtf.compliance.yaml_io import TODO_TAG, todo_text
@@ -43,17 +44,9 @@ def data() -> None:
     """Inventory and classify the application's data."""
 
 
-ROOT_OPTION = click.option(
-    "--root",
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
-    default=None,
-    help="Repository root. Defaults to the enclosing Git checkout, else the cwd.",
-)
-
-
 def load_context(root: Path | None) -> tuple[Path, list[Unit], Knowledge]:
     """Resolve root, units and knowledge, raising ``click.ClickException`` on error."""
-    resolved = root.resolve() if root else find_repo_root(Path.cwd())
+    resolved = resolve_root(root)
     try:
         manifest = select_manifest(resolved)
         units, _ = load_units(manifest, resolved, strict=False)
@@ -236,6 +229,7 @@ def rules_cmd(*, root: Path | None) -> None:
 @click.option("--pii/--no-pii", "pii", default=None, help="Personal data or not.")
 @click.option("--sensitivity", default=None, help="Sensitivity level id.")
 @click.option("--category", default=None, help="Category id.")
+@click.option("--store", default=None, help="Slug of the store holding the value.")
 @click.option("--reason", default=None, help="Why the rule was wrong (else !todo).")
 @ROOT_OPTION
 @click.pass_context
@@ -246,6 +240,7 @@ def override_cmd(
     pii: bool | None,
     sensitivity: str | None,
     category: str | None,
+    store: str | None,
     reason: str | None,
     root: Path | None,
 ) -> None:
@@ -259,10 +254,10 @@ def override_cmd(
         unit_id, local_id = parse_full_id(item_id, units)
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
-    if pii is None and sensitivity is None and category is None:
+    if pii is None and sensitivity is None and category is None and store is None:
         msg = (
             "nothing to override: pass at least one of --pii/--no-pii, "
-            "--sensitivity, --category"
+            "--sensitivity, --category, --store"
         )
         raise click.UsageError(msg)
     if sensitivity is not None and sensitivity not in knowledge.sensitivity:
@@ -275,13 +270,18 @@ def override_cmd(
         raise click.UsageError(msg)
 
     unit = next(u for u in units if u.id == unit_id)
-    known = {row.id for row in collect_unit(unit, knowledge).rows if row.field}
+    unit_data = collect_unit(unit, knowledge)
+    known = {row.id for row in unit_data.rows if row.field}
+    if store is not None and unit_data.stores.get(store) is None:
+        slugs = ", ".join(s.slug for s in unit_data.stores.visible()) or "none"
+        msg = f"unknown store {store!r} in unit {unit_id!r}; known: {slugs}"
+        raise click.UsageError(msg)
     if local_id not in known:
         close = difflib.get_close_matches(local_id, sorted(known), n=3, cutoff=0.6)
         hint = f"; did you mean {', '.join(close)}?" if close else ""
         msg = (
             f"{local_id!r} is not a field of unit {unit_id!r}{hint}. "
-            "To declare a store outside the ORM, write a manual item file by hand."
+            "To declare data outside the ORM, write a manual item file by hand."
         )
         raise click.UsageError(msg)
     path = write_override(
@@ -290,6 +290,7 @@ def override_cmd(
         pii=pii,
         sensitivity=sensitivity,
         category=category,
+        store=store,
         reason=reason,
     )
     if path is None:
@@ -459,7 +460,7 @@ def mcp_cmd(*, batch: int, python: str | None, root: Path | None) -> None:
     """Serve the data-review MCP tools over stdio (used by auto-review)."""
     if python:
         os.environ["MODEL_WTF_PYTHON"] = python
-    serve(root, batch=batch)
+    serve(resolve_root(root), batch=batch)
 
 
 def write_override(
@@ -470,6 +471,7 @@ def write_override(
     sensitivity: str | None,
     category: str | None,
     reason: str | None,
+    store: str | None = None,
 ) -> Path | None:
     """Write the override file; ``None`` when it already exists."""
     path = unit.folder / DATA_DIR / f"{local_id}.yaml"
@@ -482,6 +484,8 @@ def write_override(
         lines.append(f"sensitivity: {sensitivity}")
     if category is not None:
         lines.append(f"category: {category}")
+    if store is not None:
+        lines.append(f"store: {store}")
     lines.append(f"reason: {_quote(reason) if reason else todo_text()}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

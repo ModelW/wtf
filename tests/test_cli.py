@@ -7,8 +7,10 @@ import re
 from typing import TYPE_CHECKING
 
 import pytest
+from click.testing import CliRunner
 
 from conftest import FILES_ALL_OK, SNOW_FRONT_UNDECLARED, SNOW_TWO_UNITS
+from model_wtf.cli import cli
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -187,3 +189,17 @@ def test_unexpected_exception_exits_four_on_stderr(
     assert "Tool error" in result.stderr
     assert "disk on fire" in result.stderr
     assert result.stdout == ""
+
+
+def test_global_root_option(make_repo: MakeRepo) -> None:
+    """``model-wtf --root X compliance ...`` applies to every subcommand."""
+    root = make_repo(snow=SNOW_TWO_UNITS, files=FILES_ALL_OK)
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["--root", str(root), "compliance", "check"])
+    assert result.exit_code == 0, result.output
+
+    listed = runner.invoke(
+        cli, ["--root", str(root), "compliance", "data", "list", "--format", "json"]
+    )
+    assert listed.exit_code == 0, listed.output

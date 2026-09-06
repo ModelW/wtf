@@ -47,23 +47,8 @@ class StorageInfo(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     class_: str = Field(alias="class")
-    bucket_name: str | None = None
-    location: str | None = None
-    endpoint_url: str | None = None
-    custom_domain: str | None = None
-
-    def label(self) -> str:
-        """Short human form: ``S3Storage(bucket=media, location=uploads)``."""
-        name = self.class_.rsplit(".", 1)[-1]
-        parts = [
-            f"{key}={value}"
-            for key, value in (
-                ("bucket", self.bucket_name),
-                ("location", self.location),
-            )
-            if value
-        ]
-        return f"{name}({', '.join(parts)})" if parts else name
+    store: str | None = None
+    """Slug of the store in :attr:`Inventory.stores`."""
 
 
 class DatabaseInfo(BaseModel):
@@ -73,14 +58,8 @@ class DatabaseInfo(BaseModel):
 
     alias: str
     engine: str = ""
-    host: str | None = None
-    name: str | None = None
-
-    def label(self) -> str:
-        """Short human form: ``default (postgresql @ db.internal/fah)``."""
-        engine = self.engine.rsplit(".", 1)[-1] or "?"
-        where = "/".join(p for p in (self.host, self.name) if p)
-        return f"{self.alias} ({engine}{' @ ' + where if where else ''})"
+    store: str | None = None
+    """Slug of the store in :attr:`Inventory.stores`."""
 
 
 class FieldInfo(BaseModel):
@@ -128,6 +107,28 @@ class ModelInfo(BaseModel):
         return f"{self.app_label}.{self.name}"
 
 
+class StoreInfo(BaseModel):
+    """One store the settings declare (database, cache, file storage...)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    slug: str
+    type: str
+    backend: str = ""
+    """Conceptual backend: ``postgresql``, ``redis``, ``s3``, ``filesystem``..."""
+    config: str = ""
+    """The settings key it was read from, for ``stores explain``."""
+
+
+class SessionsInfo(BaseModel):
+    """Which store the session backend writes to (``None`` = signed cookies)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    engine: str = ""
+    store: str | None = None
+
+
 class Inventory(BaseModel):
     """The whole introspection payload."""
 
@@ -137,6 +138,8 @@ class Inventory(BaseModel):
     django: str
     settings: str | None = None
     sys_path: list[str] = Field(default_factory=list)
+    stores: list[StoreInfo] = Field(default_factory=list)
+    sessions: SessionsInfo | None = None
     models: list[ModelInfo] = Field(default_factory=list)
 
 

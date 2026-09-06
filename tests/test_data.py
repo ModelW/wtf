@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -326,7 +327,7 @@ def test_collect_unit_classifies_every_field(django_repo: Path) -> None:
     assert avatar_store.store is not None
     assert rows["shop.Customer.avatar"].rule == "file_path"
     assert rows["shop.Customer.email"].store is not None
-    assert rows["shop.Customer.email"].store.startswith("default (sqlite3")
+    assert rows["shop.Customer.email"].store == "db-default"
     assert rows["shop.Customer.email"].full_id == "api:shop.Customer.email"
     assert len(rows["shop.Customer.email"].fingerprint) == 8
     # Same field facts, different verdict -> different fingerprint.
@@ -591,3 +592,167 @@ def test_cli_list_rules_override(django_repo: Path) -> None:
 
     unknown_unit = runner.invoke(cli, [*base, "list", *root, "--unit", "nope"])
     assert unknown_unit.exit_code == 1
+
+
+def test_stores_introspected_from_settings(django_repo: Path) -> None:
+    """Databases, caches and file storages become slugged stores, credentials out."""
+    inventory = introspect(django_repo / "api")
+
+    stores = {s.slug: s for s in inventory.stores}
+    assert {"db-default", "db-audit", "cache-default", "files-default"} <= set(stores)
+    # Field-level ``storage=`` not in STORAGES is a store of its own.
+    assert stores["files-shop.AuditEntry.contract"].type == "filesystem"
+    assert stores["files-shop.AuditEntry.contract"].backend == "filesystem"
+    assert (stores["cache-default"].type, stores["cache-default"].backend) == (
+        "cache",
+        "redis",
+    )
+    assert stores["db-audit"].backend == "sqlite"
+    # Nothing environmental leaves the process: no host, path, or credential.
+    dumped = inventory.model_dump_json()
+    for leak in ("must-not-leak", "cache.internal", "/srv/contracts", "secret"):
+        assert leak not in dumped
+    assert inventory.sessions is not None
+    assert inventory.sessions.store == "db-default"
+
+    data = collect_unit(_unit(django_repo), load_knowledge(None))
+    rows = {r.id: r for r in data.rows}
+    # Rows follow the router, not the default alias.
+    assert rows["shop.AuditEntry.message"].store == "db-audit"
+    assert rows["shop.Customer.email"].store == "db-default"
+    assert rows["shop.AuditEntry.contract@files.content"].store == (
+        "files-shop.AuditEntry.contract"
+    )
+    assert rows["shop.Customer.avatar@files.content"].store == "files-default"
+    audit = data.stores.get("db-audit")
+    assert audit is not None
+    assert audit.source.value == "config"
+
+
+def test_store_files_override_declare_ignore(django_repo: Path) -> None:
+    folder = django_repo / "api" / "compliance" / "stores"
+    folder.mkdir(parents=True)
+    (folder / "files-default.yaml").write_text(
+        "provider: Scaleway\nlocation: fr-par\nretention: !todo\n"
+    )
+    (folder / "crm.yaml").write_text("type: external\nname: HubSpot\n")
+    (folder / "db-audit.yaml").write_text("ignore: true\n")
+    data_folder = django_repo / "api" / "compliance" / "data"
+    data_folder.mkdir()
+    (data_folder / "hubspot-contacts.yaml").write_text(
+        "description: Contacts synced to the CRM\npii: true\n"
+        "sensitivity: personal\ncategory: contact\nstore: crm\n"
+    )
+    (data_folder / "shop.Customer.notes.yaml").write_text(
+        "store: db-audit\nreason: mirrored to the audit db\n"
+    )
+    (data_folder / "shop.Customer.phone.yaml").write_text("store: nope\nreason: typo\n")
+
+    data = collect_unit(_unit(django_repo), load_knowledge(None))
+
+    files = data.stores.get("files-default")
+    assert files is not None
+    assert (files.source.value, files.provider, files.location, files.type.value) == (
+        "override",
+        "Scaleway",
+        "fr-par",
+        "filesystem",
+    )
+    crm = data.stores.get("crm")
+    assert crm is not None
+    assert (crm.source.value, crm.type.value, crm.name) == (
+        "manual",
+        "external",
+        "HubSpot",
+    )
+    audit = data.stores.get("db-audit")
+    assert audit is not None
+    assert audit.ignore is True
+    assert "db-audit" not in {s.slug for s in data.stores.visible()}
+    rows = {r.id: r for r in data.rows}
+    assert rows["hubspot-contacts"].store == "crm"
+    codes = sorted(d.code for d in data.diagnostics)
+    assert codes == ["store-ignored-referenced", "store-unknown", "todo"]
+    assert run_check(django_repo, strict=False).exit_code is ExitCode.DECLARATION_ERROR
+
+
+@pytest.mark.parametrize(
+    ("body", "code"),
+    [
+        ("name: Lonely\n", "store-orphan"),
+        ("type: warehouse\n", "schema-error"),
+        ("type: external\ncolour: red\n", "schema-error"),
+    ],
+    ids=["manual-without-type", "bad-type", "unknown-key"],
+)
+def test_store_file_errors(django_repo: Path, body: str, code: str) -> None:
+    folder = django_repo / "api" / "compliance" / "stores"
+    folder.mkdir(parents=True)
+    (folder / "thing.yaml").write_text(body)
+
+    data = collect_unit(_unit(django_repo), load_knowledge(None))
+
+    assert code in [d.code for d in data.diagnostics]
+
+
+def test_cli_stores(django_repo: Path) -> None:
+    runner = CliRunner()
+    root = ["--root", str(django_repo)]
+
+    listed = runner.invoke(
+        cli, ["compliance", "stores", "list", *root], env={"COLUMNS": "200"}
+    )
+    assert listed.exit_code == 0, listed.output
+    assert "db-audit" in listed.output
+    assert "cache-default" in listed.output
+
+    as_json = runner.invoke(
+        cli, ["compliance", "stores", "list", *root, "--format", "json"]
+    )
+    entries = {e["slug"]: e for e in json.loads(as_json.output)}
+    assert entries["db-default"]["items"] > 0
+    assert entries["files-shop.AuditEntry.contract"]["items"] == 1
+
+    explain = runner.invoke(
+        cli, ["compliance", "stores", "explain", "api:db-audit", *root]
+    )
+    assert explain.exit_code == 0, explain.output
+    assert "DATABASES['audit']" in explain.output
+    assert "shop.AuditEntry.message" in explain.output
+
+    missing = runner.invoke(cli, ["compliance", "stores", "explain", "api:nope", *root])
+    assert missing.exit_code == 2
+    assert "known:" in missing.output
+
+    bad_store = runner.invoke(
+        cli,
+        [
+            "compliance",
+            "data",
+            "override",
+            "api:shop.Customer.email",
+            *root,
+            "--store",
+            "x",
+        ],
+    )
+    assert bad_store.exit_code == 2
+    assert "unknown store" in bad_store.output
+
+    ok = runner.invoke(
+        cli,
+        [
+            "compliance",
+            "data",
+            "override",
+            "api:shop.Customer.email",
+            *root,
+            "--store",
+            "db-audit",
+            "--reason",
+            "mirrored",
+        ],
+    )
+    assert ok.exit_code == 0, ok.output
+    path = django_repo / "api" / "compliance" / "data" / "shop.Customer.email.yaml"
+    assert path.read_text() == 'store: db-audit\nreason: "mirrored"\n'

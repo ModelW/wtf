@@ -18,7 +18,7 @@ uv run model-wtf compliance check [--strict] [--format text|json|github] [--root
 
 `init` scaffolds the repo-root `compliance/` folder (`app.yaml`, one
 `parties/<id>.yaml` per organisation, a README), adds a `compliance:` block to
-every image of `snow.yml` (guessing the discovery engine from the code) and
+every image of `snow.yml` (guessing the discovery backend from the code) and
 creates the per-unit folders. It never
 overwrites anything; re-run it to add what is missing. Values left for a human
 are written as the YAML tag `!todo`. The processor defaults to
@@ -40,7 +40,7 @@ schema (pydantic; unknown keys are errors) and lists the `!todo` values.
 ### Unit discovery
 
 Units are read from `snow.yml` at the repo root: every `images[]` entry that
-carries a `compliance:` block is a unit. `discover` names the discovery engine
+carries a `compliance:` block is a unit. `discover` names the discovery backend
 for that codebase (`django`, `sveltekit`, `none`); the compliance folder is
 `compliance/` next to the image's Dockerfile unless `dir` (relative to the
 build context) says otherwise. An image without `compliance` produces a
@@ -101,9 +101,10 @@ until a review says otherwise; unrecognised plain fields default to
 `technical` and rely on the review to be promoted.
 
 Humans correct the rules with `<unit>/compliance/data/<app.Model.field>.yaml`
-(any subset of `pii` / `sensitivity` / `category`, plus a `reason`), and add
-stores the ORM does not know with a complete manual item (`description`,
-`pii`, `sensitivity`, `category`) under any other id.
+(any subset of `pii` / `sensitivity` / `category` / `store`, plus a `reason`),
+and add data the ORM does not know with a complete manual item
+(`description`, `pii`, `sensitivity`, `category`, optional `store`) under any
+other id.
 
 `init --custom-sensitivity` / `--custom-categories` copy the built-in scale
 or category list into `compliance/sensitivity/` / `compliance/categories/`
@@ -127,9 +128,36 @@ anything is pending.
   fields whose meaning is fixed (`auth.User.password`, …) live in
   `knowledge/known_fields.yaml` (`known`).
 - Every file field also yields `<field>@files.content`: the bytes in the
-  storage behind the column, classified on their own, with the storage backend
-  (bucket/location) in the `Store` column. Ordinary columns show the database
-  they are written to.
+  storage behind the column, classified on their own.
+
+### Stores
+
+```
+uv run model-wtf compliance stores list [--unit ID] [--all] [--format table|json]
+uv run model-wtf compliance stores explain <unit>:<slug>
+```
+
+Where the data lives is an item with a slug, and every data row references one
+in its `Store` column. A store is a slug, a `type` and a conceptual `backend`
+(`postgresql`, `redis`, `s3`, `filesystem`, ...) — nothing environmental:
+hosts, bucket names and credentials belong to a deployment, not to the model
+of the application. Stores are read from the Django settings, so there is
+nothing to write for the common case: `DATABASES[alias]` → `db-<alias>` (rows
+follow the router), `CACHES` → `cache-<alias>`, `STORAGES` → `files-<alias>`
+(`bucket` when the backend is S3/GCS/Azure, else `filesystem`; `staticfiles`
+skipped), a field's own `storage=` → `files-<app.Model.field>`,
+`CELERY_BROKER_URL` → `queue-celery`, `WAGTAILSEARCH_BACKENDS` →
+`search-<alias>`.
+
+Optional `<unit>/compliance/stores/<slug>.yaml` files can override facts of an
+introspected store (`backend`, `name`, `provider`, `location` as a region or
+country, `retention`, `description`), declare a store the settings do not show
+(`type: external`, `browser`, ... — `type` is then mandatory), or hide one
+with `ignore: true`.
+`check` reports `store-unknown` / `store-ignored-referenced` for data rows
+naming a slug that does not exist or is hidden, and `store-orphan` for a
+manual store file without `type`. `data override … --store <slug>` moves a
+row to another store.
 
 ```
 uv run model-wtf compliance data auto-review [--unit ID] [--base REF] [--batch 8] [--max-rounds 20] [--max-tokens N] [--model provider/model] [--dry-run]
