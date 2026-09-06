@@ -248,7 +248,8 @@ def test_uncovered_member_becomes_a_finding(make_repo: MakeRepo) -> None:
         for d in check.diagnostics
         if d.code == "GDPR-ACTIVITY-COVERAGE" and d.element == "activity.people"
     ]
-    assert coverage and coverage[0].finding_id is not None
+    assert coverage
+    assert coverage[0].finding_id is not None
 
     # Claim it back: the gate passes on the next run.
     (folder / "processing" / "me.yaml").write_text(
