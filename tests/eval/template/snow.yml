@@ -1,0 +1,4 @@
+images:
+  - id: api
+    context: api
+    compliance: compliance

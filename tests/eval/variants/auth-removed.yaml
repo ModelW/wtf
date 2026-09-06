@@ -1,0 +1,8 @@
+apply:
+- replace: api/settings.py
+  old: '    "django.contrib.auth.middleware.AuthenticationMiddleware",
+
+    '
+  new: ''
+expect:
+  restaged_min: 1

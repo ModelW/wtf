@@ -1,0 +1,8 @@
+apply:
+- replace: api/apps/leads/api.py
+  old: ', throttle=[AnonRateThrottle("10/m")]'
+  new: ''
+expect:
+  checkpoints:
+    MW-SEC-001@http:POST:/leads/: not_ok
+    MW-SEC-004@http:POST:/leads/: not_ok

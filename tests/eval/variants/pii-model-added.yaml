@@ -1,0 +1,12 @@
+apply:
+- append: api/apps/leads/models.py
+  text: "\n\nclass Patient(models.Model):\n    \"\"\"Medical intake.\"\"\"\n\n   \
+    \ name = models.CharField(max_length=200)\n    diagnosis = models.TextField()\n"
+expect:
+  items:
+    leads.patient:
+    - name
+    - health
+  findings:
+  - GDPR-SPECIAL-CATEGORY
+  - GDPR-DPIA

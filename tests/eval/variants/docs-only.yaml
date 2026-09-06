@@ -1,0 +1,7 @@
+apply:
+- replace: api/apps/leads/api.py
+  old: Create a lead from the marketing site.
+  new: Create a lead from the public marketing site.
+expect:
+  restaged: 0
+  agent_calls: 0

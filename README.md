@@ -163,6 +163,21 @@ erasure time limits, derived rights matrix), recipients, data objects, and the
 byte-identical output. Templates are one Jinja file per kind under
 `src/model_wtf/compliance/templates/registry/`.
 
+## Agents
+
+`src/model_wtf/agents/` is the only configuration the OpenCode instance booted
+by `compliance auto` sees: one read-only subagent per work-item kind
+(`wtf-discover`, `wtf-classify-{data-object,recipient,activity}`,
+`wtf-evaluate`, `wtf-stage`; no edit/write tools, bash limited to `git`/`rg`), a
+pydantic output schema per kind (`agents/schemas.py`, injected verbatim into the
+prompt and enforced before anything is written), and skills the agents load on
+demand (`compliance-folder`, `data-items`, `pii-detection`, `gdpr-verify`,
+`threat-django`, `threat-sveltekit`, `finding-style`).
+
+`tests/eval/` holds a template repo plus scripted variants with expected
+statuses; `make eval` runs them against a real model (needs
+`OPENROUTER_API_KEY`, not part of CI).
+
 ## Knowledge
 
 The rules, the data-item vocabulary and the egress catalogue live as YAML under

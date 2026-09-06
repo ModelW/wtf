@@ -1,0 +1,11 @@
+apply: []
+expect:
+  checkpoints:
+    MW-SEC-001@http:POST:/leads/: ok
+    GDPR-RETENTION-ENFORCED@data_object:leads.lead: ok
+  items:
+    leads.lead:
+    - email
+    - phone
+    - name
+    - none

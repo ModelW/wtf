@@ -1,4 +1,4 @@
-.PHONY: help clean format lint typecheck test prettier
+.PHONY: help clean format lint typecheck test prettier eval
 
 PYTHON_BIN ?= uv run python
 
@@ -23,3 +23,6 @@ typecheck: ## Type-check with mypy
 
 test: ## Run the test suite
 	uv run pytest
+
+eval: ## Run the agent eval fixtures against a real model (needs OPENROUTER_API_KEY)
+	uv run model-wtf compliance eval --template tests/eval/template --variants tests/eval/variants
