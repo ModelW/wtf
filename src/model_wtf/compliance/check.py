@@ -234,7 +234,13 @@ def _check_threats(
         elements = {c.element for c in cells}
         topics = Counter(c.topic or "review" for c in cells)
         summary = ", ".join(f"{n} {t}" for t, n in topics.most_common(4))
-        stale = sum(c.verdict is Verdict.STALE for c in cells)
+        challenged = sum(
+            c.verdict is Verdict.STALE and c.reason.startswith("challenged")
+            for c in cells
+        )
+        stale = sum(c.verdict is Verdict.STALE for c in cells) - challenged
+        if challenged:
+            summary += f"; {challenged} stamp(s) challenged"
         if stale:
             summary += f"; {stale} stamped on code that moved"
         diagnostics.append(

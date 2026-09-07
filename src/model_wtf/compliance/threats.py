@@ -25,6 +25,7 @@ import functools
 import re
 from collections import Counter
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -43,6 +44,7 @@ from model_wtf.compliance.severity import (
 from model_wtf.compliance.stamps import (
     Finding,
     Stamp,
+    StampChallenge,
     Stamps,
     read_stamps,
     write_stamps,
@@ -650,6 +652,14 @@ def apply_stamp(cell: Cell, element: Element, elements: dict[str, Element]) -> C
             stamp=stamp,
             stamp_key=key,
         )
+    if stamp.challenge is not None:
+        return replace(
+            cell,
+            verdict=Verdict.STALE,
+            reason=f"challenged at {stamp.challenge.commit}: {stamp.challenge.grounds}",
+            stamp=stamp,
+            stamp_key=key,
+        )
     if stamp.fingerprint and fingerprint and stamp.fingerprint != fingerprint:
         return replace(
             cell,
@@ -941,6 +951,10 @@ def stamp_cell(  # noqa: C901 - one validation per refusal, one knob per narrowi
     stamps = read_stamps(path)
     key = f"{sid}@{sink}" if sink else sid
     _, fingerprint, _ = stamps_of(holder, matrix.elements)
+    previous_stamp = stamps.root.get(key)
+    answered = None
+    if isinstance(previous_stamp, Stamp):
+        answered = previous_stamp.challenge or previous_stamp.answered
     value: Stamp | Missing | Finding
     if missing is not None:
         text = missing.strip()
@@ -975,6 +989,7 @@ def stamp_cell(  # noqa: C901 - one validation per refusal, one knob per narrowi
             commit=commit,
             fingerprint=fingerprint or None,
             by=by,  # type: ignore[arg-type]
+            answered=answered,
         )
     stamps.root[key] = value
     write_stamps(path, stamps)
@@ -984,6 +999,45 @@ def stamp_cell(  # noqa: C901 - one validation per refusal, one knob per narrowi
         matrix.cells.append(fresh)
         matrix.ids = assign_ids(matrix, ws.shared)
     return path, key, value
+
+
+def challenge_stamp(
+    matrix: Matrix,
+    units: dict[str, Unit],
+    shared: Path,
+    element_id: str,
+    key: str,
+    *,
+    commit: str,
+    grounds: str,
+) -> str | None:
+    """Cast a doubt on one stamp (``SID`` or ``SID@sink`` of ``element_id``):
+    the cell is stale until re-stamped. Returns the reason when refused
+    (same contract as :func:`touchpoints.challenge_manifest`)."""
+    element = matrix.elements.get(element_id)
+    if element is None:
+        return f"no element {element_id!r}"
+    holder, _ = _stamp_holder(element, matrix.elements)
+    path = _holder_path(holder, units, shared)
+    if path is None:
+        return f"{holder.id} has no YAML file"
+    stamps = read_stamps(path)
+    stamp = stamps.root.get(key)
+    if stamp is None:
+        known = ", ".join(sorted(stamps.root)) or "none"
+        return f"no stamp {key!r} on {holder.id} (stamped: {known})"
+    if not isinstance(stamp, Stamp):
+        return f"{holder.id}#{key} is a finding (!missing), not a claim to challenge"
+    if stamp.challenge is not None:
+        return f"already challenged at {stamp.challenge.commit}"
+    if stamp.answered is not None and stamp.answered.commit == commit:
+        return "already answered by the current stamp"
+    at = datetime.now(tz=UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    stamps.root[key] = stamp.model_copy(
+        update={"challenge": StampChallenge(commit=commit, grounds=grounds, at=at)}
+    )
+    write_stamps(path, stamps)
+    return None
 
 
 def _flow_holder(

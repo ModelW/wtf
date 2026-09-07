@@ -421,7 +421,9 @@ def test_store_and_party_stamps(repo: Path) -> None:
     assert finding.origin == "claimed"
     assert finding.note == "no owner check"
     # The challenger sees stamps as assertions to re-check.
-    assert "threat AA03: mitigated — x" in tools.reviews(["api/shop/api.py"])
+    assert "threat api:getCustomer#AA03: mitigated — x" in tools.reviews(
+        ["api/shop/api.py"]
+    )
 
 
 def test_stamps_survive_hostile_notes_and_keep_the_rest_of_the_file(repo: Path) -> None:

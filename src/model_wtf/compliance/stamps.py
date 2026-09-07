@@ -42,6 +42,16 @@ STAMP_STATUSES = ("mitigated", "accepted", "n/a")
 NOTE_REQUIRED = frozenset({"accepted", "n/a"})
 
 
+class StampChallenge(BaseModel):
+    """A doubt the challenger cast on a stamp: which change, and why."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    commit: str
+    grounds: str
+    at: str | None = None
+
+
 class Stamp(BaseModel):
     """One ``threats:`` entry that closes a cell."""
 
@@ -56,6 +66,16 @@ class Stamp(BaseModel):
         "now means the code moved and the stamp is stale",
     )
     by: Literal["human", "agent"] | None = None
+    challenge: StampChallenge | None = Field(
+        default=None,
+        description="The challenger doubts this verdict after a change: the "
+        "cell is open again until re-stamped",
+    )
+    answered: StampChallenge | None = Field(
+        default=None,
+        description="The last challenge a re-stamp closed (so the same grounds "
+        "are not raised twice for the same change)",
+    )
 
     @model_validator(mode="after")
     def _note_when_needed(self) -> Stamp:
@@ -151,18 +171,23 @@ def stamps_to_yaml(stamps: Stamps) -> CommentedMap:
                 found[name] = item
             block[key] = found
             continue
-        entry = CommentedMap()
-        entry["status"] = value.status
-        if value.note:
-            entry["note"] = value.note
-        if value.commit:
-            entry["commit"] = value.commit
-        if value.fingerprint:
-            entry["fingerprint"] = value.fingerprint
-        if value.by:
-            entry["by"] = value.by
-        block[key] = entry
+        block[key] = _stamp_node(value)
     return block
+
+
+def _stamp_node(value: Stamp) -> CommentedMap:
+    """One stamp as a YAML mapping, keys in a stable order so re-stamps diff
+    cleanly; `challenge`/`answered` blocks only when present."""
+    entry = CommentedMap()
+    entry["status"] = value.status
+    for name in ("note", "commit", "fingerprint", "by"):
+        if getattr(value, name):
+            entry[name] = getattr(value, name)
+    for name in ("challenge", "answered"):
+        block_value = getattr(value, name)
+        if block_value is not None:
+            entry[name] = CommentedMap(block_value.model_dump(exclude_none=True))
+    return entry
 
 
 def stamp_lines(stamps: Stamps) -> list[str]:

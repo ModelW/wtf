@@ -34,13 +34,24 @@ Repository: `{repo}`, a full git checkout. The change is `{base}..HEAD`.
    - a retention/purge task changed or removed, a delete path added or
      removed, a cascade changed, an anonymisation that no longer covers a
      field;
-   - an exemption note that names a mechanism the diff removed or altered.
+   - an exemption note that names a mechanism the diff removed or altered;
+   - a **threat stamp** whose note cites a control the hunk removes or
+     weakens: a queryset scope (`filter(user=request.user)`), an auth class
+     or permission check, a throttle, a validator or typed schema, escaping,
+     a CSRF/session/cookie setting, a file-type check. `reviews` prints
+     each stamp as `threat <element>#<SID>: mitigated — <note>`; that
+     `<element>#<SID>` is the ref to challenge. A stamp marked `(a finding)`
+     is not a claim: nothing to challenge there.
    Also follow one level out: a schema/serializer/service the changed file
    defines and other touchpoints use (`grep -rn <ClassName>`).
 4. For each assertion the change plausibly undermines, call `challenge`
-   with the item or touchpoint id **exactly as `reviews` printed it** and
-   one line of grounds: the hunk (`file:line`) and the assertion it
-   undermines. One challenge per item, even if several hunks apply.
+   with the ref **exactly as `reviews` printed it** — an item id, a
+   touchpoint id, or `element#SID` for one threat stamp — and one line of
+   grounds: the hunk (`file:line`) and the assertion it undermines. One
+   challenge per ref, even if several hunks apply. A hunk that changes
+   what a touchpoint reads, writes, returns or sends re-opens the
+   touchpoint; a hunk that removes a control re-opens the stamp; both when
+   both.
 5. Do not challenge when the change is cosmetic, a rename that keeps the
    semantics, a formatting change, or when the assertion is untouched by
    what changed. Do not challenge items already answered for this change
