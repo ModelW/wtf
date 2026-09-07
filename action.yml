@@ -14,7 +14,7 @@ author: ModelW
 
 inputs:
     merge-into:
-        description: Base ref to compare against (default: the pull request base).
+        description: "Base ref to compare against (default: the pull request base)."
         required: false
         default: ""
     fail-on-existing:
