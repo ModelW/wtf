@@ -13,6 +13,8 @@
 #                                       no unsafe HTTP method
 #     methods_only: [GET, HEAD, OPTIONS]  fires when methods ⊆ this set
 #     framework: [ninja, drf, ...]
+#     vendor: true                      fires when the view lives in a dependency
+#                                       (site-packages, node_modules)
 #     id_absent: [<word>, ...]          fires when no word is a substring of the id
 #     id_regex_absent: [<regex>, ...]   same, anchored regexes on the id
 #     grep_absent: [<regex>, ...]       fires when none matches in the files
@@ -136,6 +138,12 @@ no_json_get_with_session:
       - methods_exclude: [GET]
       - framework_not: [ninja, drf]
       - auth_not_cookie: true
+
+vendor_code:
+  applies: [process, flow]
+  description: the view is a dependency's (Django, Wagtail, a package), not the project's; its controls are the framework's, kept by dependency updates, and often sit in its URL conf where a view-level review cannot see them. The data it exposes is still declared and its surface still checked.
+  when:
+    vendor: true
 
 public_by_design:
   applies: [process]

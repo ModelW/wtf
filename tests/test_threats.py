@@ -372,15 +372,13 @@ def test_flow_stamps_live_on_the_source_keyed_by_sink(repo: Path) -> None:
     assert by["api:checkout->api:db-default", "DS06"].verdict is Verdict.STAMPED
     # The actor flow is not covered by a sink-specific stamp...
     assert by["actor:subject->api:checkout", "DS06"].verdict is Verdict.OPEN
-    # A bare SID would cover every flow of the touchpoint at once: refused
-    # while several carry the open cell, with the keys to use instead.
-    out = _stamp(repo, "api:checkout", "DR01", "--status", "n/a", "--note", "https")
+    # A bare `missing` would land on every flow at once and take the heaviest
+    # weight: refused while several carry the open cell, keys listed.
+    out = _stamp(repo, "api:checkout", "DR01", "--missing", "leaks the email")
     assert out.exit_code != 0  # type: ignore[attr-defined]
     assert "DR01@actor:subject" in out.output  # type: ignore[attr-defined]
     assert "DR01@api:db-default" in out.output  # type: ignore[attr-defined]
-    for sink in ("api:db-default", "api:task:shop.send_receipt"):
-        _stamp(repo, "api:checkout", f"DR01@{sink}", "--status", "n/a", "--note", "x")
-    # Once only one flow is left open, the bare key is unambiguous.
+    # A verdict (n/a, mitigated) on the bare key covers every flow: fine.
     out = _stamp(repo, "api:checkout", "DR01", "--status", "n/a", "--note", "https")
     assert out.exit_code == 0, out.output  # type: ignore[attr-defined]
     matrix = build_matrix(_ws(repo))
@@ -733,3 +731,50 @@ def test_flow_keyed_stamps_are_listed_and_stamped_per_flow(repo: Path) -> None:
     assert by["api:checkout->party:mapbox", "DS06"].reason == "declared_transfer"
     with pytest.raises(ValueError, match="no flow"):
         tools.threat_stamp("api:checkout", "DS06@party:nope", missing="x")
+
+
+def test_vendor_views_are_not_code_reviewed(repo: Path) -> None:
+    """A touchpoint whose view lives in a dependency is dismissed by rule on
+    the code-review topics: its controls are the framework's (often in its
+    URL conf, invisible from the view). Data and surface still apply."""
+    from model_wtf.compliance.touchpoints import Touchpoint, _is_vendor_path
+
+    assert _is_vendor_path("api/.venv/lib/python3.14/site-packages/wagtail/x.py")
+    assert _is_vendor_path("front/node_modules/@sveltejs/kit/src/x.js")
+    assert not _is_vendor_path("api/fah/apps/cart/api.py")
+    ws = _ws(repo)
+    tp = ws.all_touchpoints["api:getCustomer"]
+    assert not tp.vendor
+    vendored = Touchpoint(
+        unit=tp.unit,
+        facts=tp.facts.model_copy(
+            update={"file": "/x/.venv/lib/python3.14/site-packages/pkg/views.py"}
+        ),
+        data=(EMAIL,),
+        scope=tp.scope,
+    )
+    assert vendored.vendor
+    ws.touchpoints["api"].items = [
+        vendored if t.id == tp.id else t for t in ws.touchpoints["api"].items
+    ]
+    cells = {c.sid: c for c in build_matrix(ws, register=False).by_element(tp.full_id)}
+    assert cells["AA01"].verdict is Verdict.DISMISSED
+    assert cells["AA01"].reason == "vendor_code"
+    assert cells["INP10"].reason == "vendor_code"
+    # Surface threats are ours whatever the code's origin.
+    assert cells["DS03"].reason != "vendor_code"
+
+
+def test_bare_key_is_refused_only_for_a_finding(repo: Path) -> None:
+    _tp(repo, "checkout", f"scope: subject\ndata:\n  - {EMAIL}: create\n")
+    ok = _stamp(repo, "api:checkout", "DS06", "--status", "n/a", "--note", "schema")
+    assert ok.exit_code == 0, ok.output  # type: ignore[attr-defined]
+    matrix = build_matrix(_ws(repo), register=False)
+    covered = [
+        c for c in matrix.cells if c.sid == "DS06" and "api:checkout" in c.element
+    ]
+    assert covered
+    assert all(c.verdict is Verdict.STAMPED for c in covered)
+    bad = _stamp(repo, "api:checkout", "DR01", "--missing", "email in the url")
+    assert bad.exit_code != 0  # type: ignore[attr-defined]
+    assert "DR01@" in bad.output  # type: ignore[attr-defined]

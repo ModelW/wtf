@@ -158,6 +158,7 @@ class RuleWhen(BaseModel):
     scope: list[str] | None = None
     framework: list[str] | None = None
     framework_not: list[str] | None = None
+    vendor: bool | None = None
     no_request: bool | None = None
     no_file_request: bool | None = None
     no_ids: bool | None = None
@@ -707,6 +708,8 @@ def _fires(when: RuleWhen, element: Element, ws: Workspace) -> bool:  # noqa: C9
         facts is not None and facts.framework in when.framework_not
     ):
         return False
+    if when.vendor is not None and (tp is None or tp.vendor is not when.vendor):
+        return False
     if when.no_request and not _no_request(element):
         return False
     if when.no_file_request and facts is not None and _has_file_request(facts):
@@ -944,16 +947,17 @@ def stamp_cell(  # noqa: C901 - one validation per refusal, one knob per narrowi
             and _stamp_holder(matrix.elements[c.element], matrix.elements)[0] is element
             and c.verdict.needs_review
         ]
-        if len(carried) > 1:
+        if len(carried) > 1 and missing is not None:
             keys = ", ".join(
                 f"{sid}@{_stamp_holder(matrix.elements[c.element], matrix.elements)[1]}"
                 for c in carried
             )
             msg = (
                 f"{sid} is a flow threat and {element_id} has {len(carried)} flows "
-                f"with it open; stamp the one your evidence is about: {keys}"
+                f"with it open; a finding is about one of them: {keys}"
             )
             raise StampError(msg)
+        # A mitigated / n/a verdict on the bare key covers every flow.
         cell = carried[0] if carried else None
     if cell is None:
         msg = f"{sid} does not apply to {element_id} (not in its matrix row)"

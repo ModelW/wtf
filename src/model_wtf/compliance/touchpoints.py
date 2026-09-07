@@ -108,6 +108,15 @@ manifest says otherwise. The admin's data exposure is carried by the
 ``admin:<app.Model>`` screen touchpoints instead."""
 
 
+_VENDOR_DIRS = re.compile(
+    r"(^|/)(site-packages|dist-packages|node_modules|\.venv|venv)/"
+)
+
+
+def _is_vendor_path(path: str | None) -> bool:
+    return bool(path) and bool(_VENDOR_DIRS.search(str(path).replace("\\", "/")))
+
+
 class Kind(StrEnum):
     """What sort of entry point a touchpoint is."""
 
@@ -385,6 +394,19 @@ class Touchpoint:
         return self.data is None or self.challenge is not None or bool(self.undeclared)
 
     @property
+    def vendor(self) -> bool:
+        """Whether the code behind it is a dependency's (Django's, Wagtail's,
+        a node package's), not the project's.
+
+        Its controls are the framework's, kept by dependency updates and
+        usually placed where a view-level read cannot see them (Wagtail
+        wraps its admin URL conf in ``require_admin_access``); reviewing the
+        view alone yields false findings. What stays ours: the data it
+        exposes (the declaration) and the surface it sits on.
+        """
+        return _is_vendor_path(self.facts.file)
+
+    @property
     def fingerprint(self) -> str:
         """Hash of the facts a review looked at (schemas, view, methods)."""
         f = self.facts
@@ -462,6 +484,7 @@ class Touchpoint:
             "scope": self.scope.value,
             "ignore": self.ignore,
             "pending": self.pending,
+            "vendor": self.vendor,
             "note": self.note,
             "fingerprint": self.fingerprint,
         }
