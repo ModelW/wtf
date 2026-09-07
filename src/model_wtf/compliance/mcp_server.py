@@ -41,13 +41,14 @@ from model_wtf.compliance.data import (
     Unknown,
     collect_unit,
     is_container,
+    parse_full_id,
     write_contents,
 )
 from model_wtf.compliance.declarations import PARTIES_DIR, load_declarations
 from model_wtf.compliance.discovery import find_repo_root, load_units, select_manifest
 from model_wtf.compliance.knowledge import Knowledge, load_knowledge
 from model_wtf.compliance.ops import OPS_HELP, OpError, OpSpec, parse_ops_json
-from model_wtf.compliance.review import Lock
+from model_wtf.compliance.review import Lock, Reviewed, git_head
 from model_wtf.compliance.rights import (
     AGENT_PREFIX,
     Exemption,
@@ -55,9 +56,15 @@ from model_wtf.compliance.rights import (
     Right,
     set_right,
 )
-from model_wtf.compliance.touchpoints import Scope, Transfer, write_manifest
+from model_wtf.compliance.touchpoints import (
+    Scope,
+    Touchpoint,
+    Transfer,
+    challenge_manifest,
+    write_manifest,
+)
 from model_wtf.compliance.workspace import Workspace, load_workspace
-from model_wtf.compliance.yaml_io import Missing, todo_text
+from model_wtf.compliance.yaml_io import Missing, load_yaml, todo_text
 from model_wtf.introspect.runner import IntrospectionFailed
 
 if TYPE_CHECKING:
@@ -416,6 +423,97 @@ class Tools:
             )
         return "\n".join(lines)
 
+    # -- challenger -------------------------------------------------------
+
+    def reviews(self, files: list[str]) -> str:
+        """``reviews``: everything reviewers asserted about the given code files.
+
+        For each file (repo-relative): the reviewed data items whose model
+        lives there (classification + the reviewer's reason/note, the
+        rights notes), and the declared touchpoints whose view, task or
+        route lives there (scope, ops, transfers, note). That is the list
+        of assertions a change to the file may invalidate.
+        """
+        ws = self.workspace(refresh=True)
+        wanted = {f.strip().lstrip("./") for f in files if f.strip()}
+        out: list[str] = []
+        for unit in self.units:
+            lock = Lock(unit)
+            for reviewed in lock.annotate(self.data(unit, refresh=True).rows):
+                row = reviewed.row
+                if reviewed.status.pending or not row.model_file:
+                    continue
+                if self._rel(Path(row.model_file)) in wanted:
+                    out.append(self._item_review(unit, reviewed))
+        for tp in ws.all_touchpoints.values():
+            if tp.pending or tp.ignore or tp.data is None:
+                continue
+            files_of = {self._rel(Path(p)) for p in _touchpoint_files(tp)} & wanted
+            if files_of:
+                out.append(_touchpoint_review(tp, files_of))
+        if not out:
+            return "No reviewed item or declared touchpoint depends on these files."
+        return "\n\n".join(out)
+
+    def _item_review(self, unit: Unit, reviewed: Reviewed) -> str:
+        row, entry = reviewed.row, reviewed.entry
+        bits = [
+            f"{row.full_id}: pii={row.pii} {row.sensitivity or ''} "
+            f"{row.category or ''}".rstrip()
+        ]
+        if entry and entry.note:
+            bits.append(f"  review note: {entry.note}")
+        reason = self._override_reason(unit, row.id)
+        if reason:
+            bits.append(f"  reason: {reason}")
+        bits.extend(f"  {right}: {note}" for right, note in _rights_notes(row))
+        if entry and entry.answered:
+            bits.append(
+                f"  answered challenge at {entry.answered.commit}: "
+                f"{entry.answered.grounds}"
+            )
+        bits.append(f"  reviewed at commit {entry.commit if entry else '?'}")
+        return "\n".join(bits)
+
+    def challenge(self, ref: str, grounds: str) -> str:
+        """``challenge``: put a reviewed item or touchpoint back to pending."""
+        commit = git_head(self.root) or "unknown"
+        ws = self.workspace()
+        if ref in ws.all_touchpoints:
+            tp = ws.all_touchpoints[ref]
+            refused = challenge_manifest(
+                self.unit(tp.unit), tp, commit=commit, grounds=grounds
+            )
+        else:
+            unit_id, local_id = parse_full_id(ref, self.units)
+            unit = self.unit(unit_id)
+            lock = Lock(unit)
+            refused = lock.challenge(local_id, commit=commit, grounds=grounds)
+            if refused is None:
+                lock.save()
+        if refused:
+            return f"Refused ({ref}): {refused}"
+        _log_activity("challenge", ref=ref, grounds=grounds, commit=commit)
+        self._workspace = None
+        return f"Challenged {ref} at {commit}."
+
+    def _rel(self, path: Path) -> str:
+        try:
+            return str(path.resolve().relative_to(self.root.resolve()))
+        except ValueError:
+            return str(path)
+
+    def _override_reason(self, unit: Unit, item_id: str) -> str | None:
+        path = unit.folder / DATA_DIR / f"{item_id}.yaml"
+        if not path.is_file():
+            return None
+        try:
+            payload = load_yaml(path)
+        except Exception:
+            return None
+        reason = payload.get("reason") if isinstance(payload, dict) else None
+        return reason if isinstance(reason, str) else None
+
     def data_search(self, query: str, unit_id: str | None = None) -> str:
         """``data_search``: fuzzy lookup of data ids so refs are never invented."""
         ws = self.workspace()
@@ -644,6 +742,8 @@ class Tools:
             transfers=exports,
             note=reason.strip(),
             scope=scope_value,
+            # A re-declaration answers the open challenge.
+            answered=tp.challenge or tp.answered,
         )
         self.workspace(refresh=True)
         _log_activity(
@@ -1116,6 +1216,33 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
         return _guard(lambda: tools.review_model(model, decisions, note))
 
     @server.tool(
+        name="reviews",
+        description=(
+            "What reviewers asserted about the given code files (repo-relative "
+            "paths, e.g. from `git diff --name-only`): reviewed data items whose "
+            "model lives there with their reasons and rights notes, declared "
+            "touchpoints whose view/task/route lives there with their ops, "
+            "transfers and note. These assertions are what a change may "
+            "invalidate."
+        ),
+    )
+    def reviews(files: list[str]) -> str:
+        return _guard(lambda: tools.reviews(files))
+
+    @server.tool(
+        name="challenge",
+        description=(
+            "Put a reviewed data item (`unit:app.Model.field`) or declared "
+            "touchpoint (`unit:id`) back to pending because a change casts doubt "
+            "on what its review asserted. `grounds`: one line citing the change "
+            "(file:line) and the assertion it undermines. You do not reclassify; "
+            "a reviewer will. Refused when already challenged or already answered."
+        ),
+    )
+    def challenge(ref: str, grounds: str) -> str:
+        return _guard(lambda: tools.challenge(ref, grounds))
+
+    @server.tool(
         name="data_changed",
         description=(
             "Given a base git ref: Python files changed since it and the models "
@@ -1376,6 +1503,48 @@ def _log_activity(kind: str, **fields: object) -> None:
     line = json.dumps({"kind": kind, **fields}, ensure_ascii=False)
     with contextlib.suppress(OSError), Path(path).open("a", encoding="utf-8") as fh:
         fh.write(line + "\n")
+
+
+def _rights_notes(row: Row) -> list[tuple[str, str]]:
+    """``(right, note)`` for every exemption or !missing a reviewer wrote."""
+    if row.rights is None:
+        return []
+    out: list[tuple[str, str]] = []
+    for right in Right:
+        value = getattr(row.rights, right.value)
+        if isinstance(value, Missing):
+            out.append((right.value, f"!missing {value.note or ''}".strip()))
+        elif isinstance(value, Exemption) and value.note:
+            out.append((right.value, f"exempt {value.exempt.value}: {value.note}"))
+    return out
+
+
+def _touchpoint_review(tp: Touchpoint, files_of: set[str]) -> str:
+    ops = ", ".join(
+        f"{ref.split(':', 1)[-1]}: {'/'.join(o.op.value for o in specs)}"
+        for ref, specs in sorted(tp.ops.items())
+    )
+    bits = [
+        f"{tp.full_id} ({tp.facts.kind.value}, scope {tp.scope.value}) "
+        f"in {', '.join(sorted(files_of))}",
+        f"  data: {ops or 'none'}",
+    ]
+    bits.extend(f"  transfer to {t.party}: {', '.join(t.data)}" for t in tp.transfers)
+    if tp.note:
+        bits.append(f"  note: {tp.note}")
+    if tp.answered:
+        bits.append(
+            f"  answered challenge at {tp.answered.commit}: {tp.answered.grounds}"
+        )
+    return "\n".join(bits)
+
+
+def _touchpoint_files(tp: Touchpoint) -> list[str]:
+    """Source files a touchpoint's declaration rests on (view, schemas)."""
+    facts = tp.facts
+    files = [facts.file] if facts.file else []
+    files.extend(facts.files)
+    return files
 
 
 def _guard(call: Callable[[], str]) -> str:

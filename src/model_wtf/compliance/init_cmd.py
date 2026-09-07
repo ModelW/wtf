@@ -132,7 +132,13 @@ jobs:
             - uses: actions/checkout@v4
               with:
                   fetch-depth: 0
+                  # The PR branch itself (not the merge ref): the challenger
+                  # commits what it re-opens onto it.
+                  ref: ${{ github.event.pull_request.head.ref }}
             - uses: ModelW/wtf@v1
+              with:
+                  # Optional: enables the challenger agent.
+                  openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
 """
 
 

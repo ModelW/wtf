@@ -34,9 +34,16 @@ inputs:
         required: false
         default: "true"
     openrouter-api-key:
-        description: Reserved for a future auto-review step; never required for the gate.
+        description: >-
+            Enables the challenger: an agent that reads the diff and re-opens the
+            reviews it undermines (they then count as introduced). Never required
+            for the deterministic gate.
         required: false
         default: ""
+    commit-challenges:
+        description: Commit and push what the challenger re-opened to the PR branch.
+        required: false
+        default: "true"
 
 outputs:
     introduced:
@@ -92,11 +99,49 @@ runs:
                   echo "::endgroup::"
               done
 
+        - name: Install opencode (challenger)
+          if: inputs.openrouter-api-key != ''
+          shell: bash
+          run: |
+              set -euo pipefail
+              if ! command -v opencode >/dev/null; then
+                  echo "::group::install opencode"
+                  npm install -g opencode-ai >/dev/null
+                  echo "::endgroup::"
+              fi
+              opencode --version
+
         - name: Compliance gate
           id: gate
           shell: bash
+          env:
+              OPENROUTER_API_KEY: ${{ inputs.openrouter-api-key }}
+              # The challenger only ever sees the model-wtf sandbox environment;
+              # GitHub's token is not exported to this step at all.
           run: |
+              set -uo pipefail
               args=()
               [ -n "${{ inputs.merge-into }}" ] && args+=(--merge-into "${{ inputs.merge-into }}")
               [ "${{ inputs.fail-on-existing }}" = "true" ] && args+=(--fail-on-existing)
+              if [ -n "$OPENROUTER_API_KEY" ]; then
+                  args+=(--challenge)
+                  [ "${{ inputs.commit-challenges }}" = "true" ] && args+=(--commit-challenges)
+              else
+                  args+=(--no-challenge)
+              fi
               model-wtf compliance ghate "${args[@]}"
+              code=$?
+              echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+              exit $code
+
+        - name: Push challenges
+          if: >-
+              always() && inputs.openrouter-api-key != '' &&
+              inputs.commit-challenges == 'true' && github.event_name == 'pull_request' &&
+              github.event.pull_request.head.repo.full_name == github.repository
+          shell: bash
+          run: |
+              set -euo pipefail
+              if [ "$(git rev-parse HEAD)" != "${{ github.event.pull_request.head.sha }}" ]; then
+                  git push origin "HEAD:${{ github.event.pull_request.head.ref }}"
+              fi

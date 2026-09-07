@@ -60,15 +60,35 @@ class ReviewStatus(StrEnum):
     PENDING_CHANGED = "pending:changed"
     """Reviewed once, but the field's facts changed since."""
 
+    PENDING_CHALLENGED = "pending:challenged"
+    """Reviewed, facts unchanged, but a change in the code casts doubt on
+    the verdict (the challenger read a diff): re-review or confirm."""
+
     @property
     def pending(self) -> bool:
         """Whether a review is still owed."""
         return self in (
             ReviewStatus.PENDING_NEW,
             ReviewStatus.PENDING_CHANGED,
+            ReviewStatus.PENDING_CHALLENGED,
             ReviewStatus.PENDING_CONTENTS,
             ReviewStatus.PENDING_ASSUMED,
         )
+
+
+class Challenge(BaseModel):
+    """A doubt cast on a review by a code change, pending until re-reviewed.
+
+    ``commit`` is the head the challenger looked at; ``grounds`` cites the
+    change. Once resolved (the item is reviewed again), the challenge moves
+    to ``LockEntry.answered`` so the same grounds are not raised twice.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    commit: str
+    grounds: str
+    at: datetime | None = None
 
 
 class LockEntry(BaseModel):
@@ -82,6 +102,10 @@ class LockEntry(BaseModel):
     by: Literal["human", "agent"]
     model: str | None = None
     note: str = ""
+    challenge: Challenge | None = None
+    answered: Challenge | None = None
+    """The last challenge a re-review closed: the challenger sees it and
+    only raises the item again on changes made after ``answered.commit``."""
 
 
 class LockFile(BaseModel):
@@ -158,6 +182,8 @@ class Lock:
             return Reviewed(row, ReviewStatus.PENDING_NEW, None)
         if entry.fingerprint != row.fingerprint:
             return Reviewed(row, ReviewStatus.PENDING_CHANGED, entry)
+        if entry.challenge is not None:
+            return Reviewed(row, ReviewStatus.PENDING_CHALLENGED, entry)
         return Reviewed(row, ReviewStatus.REVIEWED, entry)
 
     def annotate(self, rows: list[Row]) -> list[Reviewed]:
@@ -176,6 +202,14 @@ class Lock:
         now = datetime.now(tz=UTC).replace(microsecond=0)
         commit = git_head(self.unit.folder)
         for row in rows:
+            previous = self.data.items.get(row.id)
+            # A re-review answers the open challenge; keep it so the
+            # challenger does not raise the same grounds again.
+            answered = (
+                previous.challenge
+                if previous and previous.challenge
+                else (previous.answered if previous else None)
+            )
             self.data.items[row.id] = LockEntry(
                 fingerprint=row.fingerprint,
                 reviewed_at=now,
@@ -183,7 +217,30 @@ class Lock:
                 by=by,
                 model=model,
                 note=note,
+                answered=answered,
             )
+
+    def challenge(self, item_id: str, *, commit: str, grounds: str) -> str | None:
+        """Cast a doubt on a reviewed item; the reason it was refused, if so.
+
+        Refused when the item is not reviewed (nothing to challenge), already
+        challenged, or when the grounds were already answered by a review
+        made at or after the challenged commit — false positives are paid
+        once.
+        """
+        entry = self.data.items.get(item_id)
+        if entry is None:
+            return "not reviewed: a pending item needs no challenge"
+        if entry.challenge is not None:
+            return f"already challenged at {entry.challenge.commit}"
+        if entry.answered is not None and entry.answered.commit == commit:
+            return f"already answered by the review at {entry.commit}"
+        entry.challenge = Challenge(
+            commit=commit,
+            grounds=grounds,
+            at=datetime.now(tz=UTC).replace(microsecond=0),
+        )
+        return None
 
     def prune(self, live_rows: list[Row]) -> list[str]:
         """Drop entries whose field no longer exists; return the dropped ids.
@@ -243,6 +300,14 @@ def _entry_dict(entry: LockEntry) -> dict[str, object]:
         out["model"] = entry.model
     if entry.note:
         out["note"] = entry.note
+    for key in ("challenge", "answered"):
+        challenge = getattr(entry, key)
+        if challenge is not None:
+            block: dict[str, object] = {"commit": challenge.commit}
+            if challenge.at:
+                block["at"] = challenge.at.isoformat().replace("+00:00", "Z")
+            block["grounds"] = challenge.grounds
+            out[key] = block
     return out
 
 

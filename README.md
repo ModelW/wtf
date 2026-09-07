@@ -425,8 +425,12 @@ jobs:
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v4
-              with: { fetch-depth: 0 }
+              with:
+                  fetch-depth: 0
+                  ref: ${{ github.event.pull_request.head.ref }}
             - uses: ModelW/wtf@v1
+              with:
+                  openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}  # optional
 ```
 
 The action (`action.yml` at the root of this repository, `v1` tag) installs
@@ -462,6 +466,34 @@ legitimate reason for new findings). Exit codes: 0 nothing introduced
 declaration errors in the head (always the PR's fault), 4 tool error;
 `--fail-on-existing` also fails on pre-existing findings for repositories
 that are already clean.
+
+#### The challenger
+
+Fingerprints catch shape changes (a new field, a serializer that returns
+more); they cannot catch a view that starts mailing an address to a new
+provider, a purge task that gets disabled, or a column re-purposed with the
+same type. That is a reading job, so with an API key the gate first runs
+the **challenger**: an agent with the full git checkout, `git diff` and
+`grep`, the `reviews` tool (what reviewers asserted about the changed
+files: classifications with their reasons, declared ops, transfers,
+exemption notes — every one citing code) and one write tool, `challenge`.
+It does not reclassify; it re-opens, with grounds citing the hunk.
+
+A challenge is recorded in `data.lock.yaml` (`challenge: {commit,
+grounds}`) or in the touchpoint manifest and makes the item
+`pending:challenged`, which the gate counts as introduced. The record is
+what keeps the non-determinism out of the gate: an item is challenged at
+most once per change, a re-review (confirming is fine) moves the challenge
+to `answered:` and the same grounds are refused afterwards — a false
+positive costs one review, then silence. In CI the challenger's commit is
+pushed to the PR branch (`commit-challenges`, default on); the developer
+sees exactly which reviews to redo and why. The agent's shell never sees
+the CI environment: only the OpenCode whitelist, and our own MCP server
+drops `GITHUB_TOKEN` and friends.
+
+```
+uv run model-wtf compliance challenge --merge-into develop [--commit]
+```
 
 ### Exit codes
 

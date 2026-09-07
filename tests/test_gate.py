@@ -77,6 +77,8 @@ def repo(make_repo: MakeRepo, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("MODEL_WTF_PYTHON", sys.executable)
     monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
     monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    # No challenger in these tests: the gate itself is deterministic.
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setenv("MODEL_WTF_WORKTREE_DIR", str(root.parent / "worktrees"))
     git(root, "init", "-q", "-b", "develop")
     (root / ".gitignore").write_text("__pycache__/\n")
@@ -332,3 +334,109 @@ def test_cli_formats_and_github_context(
     context = github_context()
     assert context is not None
     assert context.base_ref == "origin/develop"
+
+
+# ---------------------------------------------------------------------------
+# challenges: the deterministic memory behind the challenger
+# ---------------------------------------------------------------------------
+
+
+def test_challenge_reopens_an_item_once_and_a_review_answers_it(repo: Path) -> None:
+    from model_wtf.compliance.mcp_server import Decision, Tools
+
+    tools = Tools(repo)
+    tools.review_model(
+        "api:shop.Customer",
+        [Decision(field="email", ok=True), Decision(field="phone", ok=True)],
+        "checked",
+    )
+    commit(repo, "reviews")  # the base has the reviews
+    head = git(repo, "rev-parse", "--short", "HEAD")
+
+    # Nothing to challenge on a pending item; a reviewed one goes back to pending.
+    assert tools.challenge("api:shop.Customer.iban", "x").startswith("Refused")
+    assert tools.challenge(
+        "api:shop.Customer.email", "views.py:12 now logs the email"
+    ).startswith("Challenged")
+    lock = repo / "api" / "compliance" / "data.lock.yaml"
+    text = lock.read_text()
+    assert "challenge:" in text
+    assert f"commit: {head}" in text
+    assert "grounds: views.py:12 now logs the email" in text
+    _, rows = _rows(repo)
+    status = {r.row.id: r.status.value for r in Lock(_rows(repo)[0]).annotate(rows)}
+    assert status["shop.Customer.email"] == "pending:challenged"
+    assert status["shop.Customer.phone"] == "reviewed"
+    # The gate sees it as an introduced finding on exactly that item.
+    result = run_gate(repo, base_ref="develop")
+    assert [(f.code, f.subject) for f in result.introduced] == [
+        ("pending-review", "api:shop.Customer.email")
+    ]
+    assert "challenged" in result.introduced[0].diagnostic.message
+
+    # No spin: a second challenge is refused while the first is open.
+    assert "already challenged" in tools.challenge("api:shop.Customer.email", "again")
+
+    # Re-reviewing answers it; the same grounds at the same commit are refused.
+    tools.review_model(
+        "api:shop.Customer", [Decision(field="email", ok=True)], "still right"
+    )
+    text = lock.read_text()
+    assert "challenge:" not in text.replace("answered:", "")
+    assert "answered:" in text
+    assert "already answered" in tools.challenge("api:shop.Customer.email", "again")
+    # The reviews tool tells the challenger about it.
+    listing = tools.reviews(["api/shop/models.py"])
+    assert "api:shop.Customer.email" in listing
+    assert "answered challenge at" in listing
+    assert "api:shop.Customer.iban" not in listing  # still pending: not an assertion
+
+
+def test_challenge_on_a_touchpoint_goes_through_the_manifest(repo: Path) -> None:
+    from model_wtf.compliance.mcp_server import DataRef, Tools
+
+    tools = Tools(repo)
+    assert tools.challenge("api:checkout", "x").startswith("Refused")
+    tools.touchpoint_set_data(
+        "api:checkout",
+        [DataRef(ref="shop.Customer.email", ops=[{"op": "create"}])],
+        reason="api.py:22 stores the email",
+    )
+    commit(repo, "declared")
+    listing = tools.reviews(["api/shop/api.py"])
+    assert "api:checkout" in listing
+    assert "email: create" in listing
+    out = tools.challenge("api:checkout", "api.py:30 now mails it to mailgun")
+    assert out.startswith("Challenged")
+    manifest = repo / "api" / "compliance" / "touchpoints" / "checkout.yaml"
+    assert "challenge:" in manifest.read_text()
+    result = run_gate(repo, base_ref="develop")
+    assert ("touchpoint-pending", "api:checkout") in [
+        (f.code, f.subject) for f in result.introduced
+    ]
+    assert "already challenged" in tools.challenge("api:checkout", "again")
+    # Re-declaring answers it.
+    tools.touchpoint_set_data(
+        "api:checkout",
+        [DataRef(ref="shop.Customer.email", ops=[{"op": "create"}])],
+        reason="still fine",
+    )
+    text = manifest.read_text()
+    assert "answered:" in text
+    assert "\nchallenge:" not in text
+    assert "already answered" in tools.challenge("api:checkout", "again")
+
+
+def test_commit_challenges_stages_only_compliance_files(repo: Path) -> None:
+    from model_wtf.compliance.gate import commit_challenges
+
+    (repo / "api" / "shop" / "junk.py").write_text("x = 1\n")
+    lock = repo / "api" / "compliance" / "data.lock.yaml"
+    lock.write_text("schema: 1\nitems: {}\n")
+    sha = commit_challenges(repo, ["api:shop.Customer.email"], base_sha="abc123def456")
+    assert sha
+    assert "Challenge 1 review(s) after abc123def456" in git(
+        repo, "log", "-1", "--format=%s"
+    )
+    assert git(repo, "status", "--porcelain") == "?? api/shop/junk.py"
+    assert commit_challenges(repo, [], base_sha="abc123def456") is None

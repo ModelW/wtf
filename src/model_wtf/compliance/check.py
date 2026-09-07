@@ -174,6 +174,7 @@ def _check_reviews(unit: Unit, rows: list[Row], diagnostics: list[Diagnostic]) -
     labels = {
         ReviewStatus.PENDING_NEW: "new",
         ReviewStatus.PENDING_CHANGED: "changed",
+        ReviewStatus.PENDING_CHALLENGED: "challenged",
         ReviewStatus.PENDING_ASSUMED: "assumed",
         ReviewStatus.PENDING_CONTENTS: "contents",
     }

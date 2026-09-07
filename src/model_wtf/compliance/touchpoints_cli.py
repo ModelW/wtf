@@ -405,6 +405,7 @@ def tp_set_data(
         transfers=transfers,
         note=note or tp.note,
         ignore=ignore,
+        answered=tp.challenge or tp.answered,
     )
     console.print(Text.assemble(("wrote", "green"), "  ", str(path)))
     ctx.exit(0)

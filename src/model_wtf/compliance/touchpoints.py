@@ -51,6 +51,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from enum import StrEnum
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -180,6 +181,14 @@ DataEntry = str | dict[str, Any]
 """One ``data`` entry: a bare ref (read) or ``{ref: <ops>}``."""
 
 
+class ManifestChallenge(StrictModel):
+    """See :class:`model_wtf.compliance.review.Challenge`."""
+
+    commit: str
+    grounds: str
+    at: str | None = None
+
+
 class Manifest(StrictModel):
     """``touchpoints/<slug>.yaml``."""
 
@@ -195,6 +204,16 @@ class Manifest(StrictModel):
     )
     ignore: bool = False
     note: str | None = None
+    challenge: ManifestChallenge | None = Field(
+        default=None,
+        description="A doubt cast by the challenger on this declaration; the "
+        "touchpoint is pending until re-reviewed",
+    )
+    answered: ManifestChallenge | None = Field(
+        default=None,
+        description="The last challenge a re-review closed (kept so the same "
+        "grounds are not raised twice)",
+    )
 
     @model_validator(mode="after")
     def _fold_exporting(self) -> Manifest:
@@ -296,6 +315,9 @@ class Touchpoint:
     scope_declared: bool = False
     ignore: bool = False
     note: str | None = None
+    challenge: ManifestChallenge | None = None
+    """Open doubt on the declaration; makes the touchpoint pending."""
+    answered: ManifestChallenge | None = None
     calls: tuple[str, ...] = ()
     """Full ids of the touchpoints this one calls (cross-unit edges)."""
     code_root: Path | None = None
@@ -318,8 +340,11 @@ class Touchpoint:
 
     @property
     def pending(self) -> bool:
-        """Whether it still needs a data declaration."""
-        return self.data is None and not self.ignore
+        """Whether it still needs a data declaration (or a re-review after
+        a challenge)."""
+        if self.ignore:
+            return False
+        return self.data is None or self.challenge is not None
 
     @property
     def fingerprint(self) -> str:
@@ -691,6 +716,8 @@ def _apply(
         scope_declared=manifest.scope is not None,
         ignore=manifest.ignore,
         note=manifest.note,
+        challenge=manifest.challenge,
+        answered=manifest.answered,
         calls=tuple(facts.calls),
         code_root=unit.code_root,
     )
@@ -761,8 +788,11 @@ def write_manifest(
     note: str | None = None,
     ignore: bool = False,
     scope: Scope | None = None,
+    answered: ManifestChallenge | None = None,
 ) -> Path:
     """Create or replace the manifest of ``touchpoint``; return its path.
+
+    ``answered`` records the challenge this declaration closes.
 
     ``ops`` maps a ref (or glob) to its ops; refs absent from it are bare
     reads. Entries are written in the order of ``data``, one per line, the
@@ -788,9 +818,40 @@ def write_manifest(
                 lines.append(f"    purpose: {_scalar(transfer.purpose)}")
     if note:
         lines.append(f"note: {_scalar(note)}")
+    if answered is not None:
+        lines.extend(_challenge_lines("answered", answered))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def _challenge_lines(key: str, challenge: ManifestChallenge) -> list[str]:
+    lines = [f"{key}:", f"  commit: {challenge.commit}"]
+    if challenge.at:
+        lines.append(f"  at: {_scalar(challenge.at)}")
+    lines.append(f"  grounds: {_scalar(challenge.grounds)}")
+    return lines
+
+
+def challenge_manifest(
+    unit: Unit, touchpoint: Touchpoint, *, commit: str, grounds: str
+) -> str | None:
+    """Add a ``challenge:`` block to an existing manifest; the reason it was
+    refused, if so (same rules as :meth:`Lock.challenge`)."""
+    if touchpoint.data is None or touchpoint.ignore:
+        return "not declared: a pending or ignored touchpoint needs no challenge"
+    if touchpoint.challenge is not None:
+        return f"already challenged at {touchpoint.challenge.commit}"
+    if touchpoint.answered is not None and touchpoint.answered.commit == commit:
+        return "already answered by the current declaration"
+    path = unit.folder / TOUCHPOINTS_DIR / f"{touchpoint.slug}.yaml"
+    text = path.read_text(encoding="utf-8").rstrip("\n")
+    at = datetime.now(tz=UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    block = _challenge_lines(
+        "challenge", ManifestChallenge(commit=commit, grounds=grounds, at=at)
+    )
+    path.write_text(text + "\n" + "\n".join(block) + "\n", encoding="utf-8")
+    return None
 
 
 class _FlowDumper(yaml.SafeDumper):

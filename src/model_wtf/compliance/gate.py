@@ -36,7 +36,7 @@ from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.report import Diagnostic, Report, Section
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 # Per-unit environments worth carrying over to the base worktree, keyed by
 # the lockfile that must match for the environment to be the same.
@@ -189,12 +189,15 @@ def run_gate(
     head_ref: str | None = None,
     strict: bool = False,
     python: str | None = None,
+    before_head: Callable[[Path, str], None] | None = None,
 ) -> GateResult:
     """Run ``check`` on both sides and compare.
 
     ``head_ref`` defaults to the working tree as it is; a ref checks that
     revision out into a worktree instead. The base always runs in a
-    worktree that is removed afterwards, whatever happens.
+    worktree that is removed afterwards, whatever happens. ``before_head``
+    runs on the head tree with the base sha before its check — the
+    challenger hooks in there, so what it re-opens counts as introduced.
     """
     root = root.resolve()
     _ensure_git(root)
@@ -204,10 +207,14 @@ def run_gate(
         warnings.extend(_carry_environments(root, base_root))
         base = run_check(base_root, strict=strict, python=python, allow_todo=True)
         if head_ref is None:
+            if before_head is not None:
+                before_head(root, base_sha)
             head = run_check(root, strict=strict, python=python, allow_todo=True)
         else:
             with _worktree(root, _rev_parse(root, head_ref)) as head_root:
                 warnings.extend(_carry_environments(root, head_root))
+                if before_head is not None:
+                    before_head(head_root, base_sha)
                 head = run_check(
                     head_root, strict=strict, python=python, allow_todo=True
                 )
@@ -485,3 +492,31 @@ __all__ = [
     "summary_markdown",
     "write_github_outputs",
 ]
+
+
+def commit_challenges(root: Path, refs: list[str], *, base_sha: str) -> str | None:
+    """Commit the lock/manifest changes the challenger made; the sha, or
+    ``None`` when nothing changed. Only compliance folders are staged."""
+    status = _git(root, "status", "--porcelain", "--", "*compliance*")
+    if not status.strip():
+        return None
+    _git(root, "add", "--", "*compliance*")
+    body = "\n".join(f"- {ref}" for ref in refs)
+    message = (
+        f"[compliance] Challenge {len(refs)} review(s) after {base_sha[:12]}\n\n"
+        "The compliance challenger read the change and found these reviews\n"
+        "may no longer hold. They are pending again: re-review or confirm.\n\n"
+        f"{body}\n"
+    )
+    _git(
+        root,
+        "-c",
+        "user.name=model-wtf",
+        "-c",
+        "user.email=model-wtf@users.noreply.github.com",
+        "commit",
+        "-q",
+        "-m",
+        message,
+    )
+    return _git(root, "rev-parse", "HEAD")
