@@ -62,7 +62,6 @@ runs:
         - uses: astral-sh/setup-uv@v5
           with:
               enable-cache: true
-              python-version: ${{ inputs.python-version }}
 
         - name: Install model-wtf
           shell: bash
@@ -73,6 +72,9 @@ runs:
           shell: bash
           run: |
               set -euo pipefail
+              # Each unit picks its own interpreter from its pyproject; never
+              # let the runner's VIRTUAL_ENV / UV_PYTHON leak into it.
+              unset VIRTUAL_ENV UV_PYTHON
               for lock in uv.lock */uv.lock; do
                   [ -f "$lock" ] || continue
                   echo "::group::uv sync $(dirname "$lock")"
@@ -120,6 +122,7 @@ runs:
               # GitHub's token is not exported to this step at all.
           run: |
               set -uo pipefail
+              unset VIRTUAL_ENV UV_PYTHON
               args=()
               [ -n "${{ inputs.merge-into }}" ] && args+=(--merge-into "${{ inputs.merge-into }}")
               [ "${{ inputs.fail-on-existing }}" = "true" ] && args+=(--fail-on-existing)
