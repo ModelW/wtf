@@ -11,3 +11,8 @@ fields:
   data: {pii: false, sensitivity: internal, category: content, fixed: false}
   user: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
 fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}
+rights:
+  # Autosaved editor form drafts: replaced on every save, deleted on
+  # publish; the row belongs to the staff account (CASCADE).
+  erase: {exempt: contract_active, note: "deleted on publish and with the staff account (CASCADE)"}
+  retention: {exempt: contract_active, note: "transient editor draft, replaced on save"}

@@ -171,6 +171,11 @@ class ManualItem(StrictModel):
     category: str | Marker
     store: str | Marker | None = None
     """Slug of the store holding the item (``stores/`` declares external ones)."""
+    transient: bool = Field(
+        default=False,
+        description="Processed but never kept by this project (a card number "
+        "forwarded, a query parameter): no storage, so no storage-side rights",
+    )
     reason: NonEmpty | None = Field(default=None, description="Optional rationale")
     rights: RightsSpec | None = None
 
@@ -195,6 +200,8 @@ class Row:
     model_module: str | None = None
     model_file: str | None = None
     """Absolute path of the module defining the model, from introspection."""
+    model_bases: tuple[str, ...] = ()
+    """Library models in the MRO (``wagtailcore.Page`` for a page type)."""
     store: str | None = None
     """Slug of the store holding the value (``db-default``, ``files-default``);
     ``None`` when unknown (manual item without ``store``)."""
@@ -208,6 +215,8 @@ class Row:
     """Exhaustiveness of ``contents`` (container columns with a declaration)."""
     rights: RightsSpec | None = None
     """Exemptions / observed gaps, from the item's file or the model glob file."""
+    transient: bool = False
+    """Manual item never kept by this project; only transfers matter."""
 
     @property
     def full_id(self) -> str:
@@ -340,6 +349,7 @@ def collect_unit(
         if row is not None:
             data.rows.append(row)
 
+    _apply_library_rights(data, knowledge)
     _apply_model_rights(unit, data, model_rights)
     data.rows.sort(key=lambda r: r.id)
     _check_store_references(data)
@@ -360,6 +370,44 @@ def _pop_model_rights(
     return out
 
 
+def _split_id(item_id: str) -> tuple[str, str]:
+    """``cms.CustomDocument.file@files.content`` → ``(cms.CustomDocument, file)``.
+
+    The ``@files`` / ``@json`` suffix hangs off the field, so it is cut first;
+    the model label is everything before the field.
+    """
+    base = item_id.split("@", 1)[0]
+    label, _, field_name = base.rpartition(".")
+    return label, field_name
+
+
+def _apply_library_rights(data: UnitData, knowledge: Knowledge) -> None:
+    """Rights a library model ships for its own personal fields.
+
+    Lowest precedence: the project's glob file and item file both win, right
+    by right. Keyed by model label, so a project override of the
+    classification does not lose the framework's rights story.
+    """
+    for index, row in enumerate(data.rows):
+        if not row.pii:
+            continue
+        label, field_name = _split_id(row.id)
+        block = knowledge.library_rights(label)
+        if not block:
+            # A project model deriving from a library one (a Wagtail page
+            # type) inherits the story for the columns the base defines.
+            for base in row.model_bases:
+                model = knowledge.library.get(base)
+                if model is not None and model.rights and field_name in model.fields:
+                    block = model.rights
+                    break
+        if not block:
+            continue
+        spec = RightsSpec.model_validate(block)
+        merged = spec if row.rights is None else _merge_rights(spec, row.rights)
+        data.rows[index] = replace(row, rights=merged)
+
+
 def _apply_model_rights(
     unit: Unit, data: UnitData, model_rights: dict[str, RightsSpec]
 ) -> None:
@@ -372,7 +420,7 @@ def _apply_model_rights(
     if not model_rights:
         return
     for index, row in enumerate(data.rows):
-        label = row.id.rsplit(".", 1)[0].split("@", 1)[0]
+        label, _ = _split_id(row.id)
         spec = model_rights.get(label)
         if spec is None or not row.pii:
             continue
@@ -467,7 +515,17 @@ def _classify(
     unit: Unit,
 ) -> Row:
     rule_id, rule = knowledge.classify(finfo)
-    known = knowledge.known_field(model.label, _library_field_name(item_id, model))
+    field_name = _library_field_name(item_id, model)
+    known = knowledge.known_field(model.label, field_name)
+    if known is None:
+        # A project model deriving from a library one (``cms.CustomDocument``
+        # from ``wagtaildocs.AbstractDocument``) inherits the verdicts for
+        # the columns the base defines — listed fields only, never the
+        # base's ``fields_default`` (the project's own columns are its own).
+        for base in model.bases:
+            known = knowledge.known_field(base, field_name, listed_only=True)
+            if known is not None:
+                break
     pii, level, category = (
         rule.pii,
         knowledge.resolve(rule.sensitivity),
@@ -525,6 +583,7 @@ def _classify(
         field=finfo,
         model_module=model.module,
         model_file=model.file,
+        model_bases=tuple(model.bases),
         store=store,
         assumption=assumption,
         check=check,
@@ -728,6 +787,7 @@ def _manual_row(
         source=Source.MANUAL,
         store=None if isinstance(item.store, Marker) else item.store,
         rights=item.rights,
+        transient=item.transient,
     )
 
 
@@ -777,7 +837,14 @@ def _validate[M: StrictModel](
             for loc, msg in format_errors(exc)
         )
         return None
-    diagnostics.extend(marker_diagnostics(instance, path, None))
+    # A marker inside ``rights`` is reported per item by the rights derivation
+    # (it knows which items and which activities); the file-level line would
+    # say the same thing twice.
+    diagnostics.extend(
+        d
+        for d in marker_diagnostics(instance, path, None)
+        if not (d.subject or "").split("#", 1)[-1].startswith("rights.")
+    )
     return instance
 
 

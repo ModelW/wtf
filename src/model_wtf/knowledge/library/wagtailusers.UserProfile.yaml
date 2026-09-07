@@ -13,3 +13,8 @@ fields:
   density: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
   keyboard_shortcuts: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
 fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}
+rights:
+  # The staff member's own preferences: they edit them in the account
+  # screen; the row goes with the user (CASCADE).
+  erase: {exempt: contract_active, note: "deleted with the staff account (CASCADE)"}
+  retention: {exempt: contract_active, note: "lives with the staff account"}

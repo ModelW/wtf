@@ -262,18 +262,22 @@ to the Django touchpoints by operation id (`calls`). Plumbing (health checks,
 OpenAPI documents, the admin's own URL patterns) is ignored by default.
 
 The optional manifest `<unit>/compliance/touchpoints/<slug>.yaml` declares
-what the touchpoint **does** to data, with a closed vocabulary of operations
+what the touchpoint **does** to data, with a closed vocabulary of **facts**
 (`src/model_wtf/compliance/ops.py`): each `data:` entry is a ref (`@json`/
 `@files` rows allowed, `unit:app.Model.*` for a whole model) and its ops —
 a bare `- unit:app.Model.field` is a `read`, `- ref: create`, `- ref: [create,
-read]`, `- ref: {erase: {by: subject, mode: anonymise}}`, `- ref:
-{retention_purge: {after: {days: 30}, from: unit:app.Model.created_at}}`.
-Verbs: `create[{consent_for}]`, `read`, `update`, `rectify{by}`, `access`,
-`portability{format}`, `erase{by?, mode, on?}`, `retention_purge{after, from}`,
-`delete`, `consent_withdraw{for}`, `object`, `restrict{by}`; each verb takes
-only its own metadata, anything else is a schema error. `write` is a
-deprecated alias for `[create, update]` (`op-ambiguous` warning). Touchpoints
-state facts about the code; the rights derivation reads them. `transfers:`
+read]`, `- ref: {delete: {mode: anonymise}}`, `- ref: {retention_purge:
+{after: settings.ANONYMOUS_ADDRESS_MAX_AGE, since: last use, when: anonymous
+only}}`. Verbs: `create[{consent_for}]`, `read`, `update`, `delete[{mode}]`,
+`retention_purge{after (duration or setting name), since, when?}`,
+`portability{format}`, `consent_withdraw{for}`; each verb takes only its own
+metadata. No legal verb: a person changing their own address is an `update`,
+deleting it a `delete` — what that means for their rights follows from the
+touchpoint's **scope** (`scope: subject | staff | public | system`, inferred
+from auth classes, `request.user` in the body and admin namespaces, or
+declared in the manifest). `write`, `rectify`, `access`, `erase`, `object`,
+`restrict` still load, folded onto the fact they imply with an
+`op-ambiguous` warning. `transfers:`
 lists what leaves to another organisation — `- {party: mapbox, data: [...],
 purpose: ...}`, the party being a `compliance/parties/` id, which is where
 the register's recipients come from (`exporting:` still loads, with a
@@ -354,15 +358,25 @@ item in every activity that handles it**, whether each right is served
 
 | right | satisfied when | code |
 | -- | -- | -- |
-| access (Art. 15) | an `access` op reaches it | `access-missing` |
-| rectification (Art. 16) | a `rectify` op (subject or staff) | `rectification-missing` |
-| erasure (Art. 17) | an `erase` op; `mode: anonymise` needs a ground to keep the row; `legal_obligation` activities exempt by construction | `erasure-missing` |
-| storage limitation (Art. 5(1)(e)) | a `retention_purge` op, or an `erase` with `on: <event>` | `retention-missing` |
-| portability (Art. 20) | consent/contract activities with a subject-facing `create`: a `portability` op | `portability-missing` |
-| objection (Art. 21) | legitimate-interests activities: an `object` op on one of its items | `objection-missing` |
+| access (Art. 15) | a `subject`-scoped touchpoint `read`s it | `access-missing` |
+| rectification (Art. 16) | only for values the person provided: a `subject` `update`, or delete + create (re-creation) | `rectification-missing` |
+| erasure (Art. 17) | a `subject` `delete`; `mode: anonymise` needs a ground to keep the row; `legal_obligation` activities exempt by construction | `erasure-missing` |
+| storage limitation (Art. 5(1)(e)) | a `retention_purge` covering all rows, or purge cases + a delete path for the rest; a staff/system `delete` also ends the row's life | `retention-missing` |
+| portability (Art. 20) | consent/contract, values the person provided, access served: a `portability` op or a JSON API the person calls on their own data | `portability-missing` |
+| objection (Art. 21) | legitimate-interests activities: a `subject` update/delete on one of its items (an opt-out) | `objection-missing` |
 | consent (Art. 7) | consent activities: `consent.record` created with `consent_for`, and a `consent_withdraw: {for: slug}` op | `consent-proof-missing`, `consent-withdrawal-missing` |
-| transfers (Ch. V) | party outside the EEA / adequacy list (`knowledge/adequacy.yaml`) carries `safeguard: sccs|bcr|dpf|derogation` (`dpf` with `dpf_certified: true`) | `transfer-safeguard-missing` |
-| DPIA (Art. 35) | derived trigger `always`/`large_scale` → `dpia_reference` on the activity | `dpia-missing` |
+| transfers (Ch. V) | party outside the EEA / adequacy list (`knowledge/adequacy.yaml`) carries `safeguard: sccs|bcr|dpf|derogation` (`dpf` with `dpf_certified: true`); an unknown country is a Todo | `transfer-safeguard-missing` |
+| DPIA (Art. 35) | special-category data (`always`) → `dpia_reference` on the activity; `large_scale` (confidential data) is a Todo question | `dpia-missing` |
+
+When a staff screen performs the op but no self-service does, the finding
+says so (*no self-service; staff can via admin:people.User — exempt
+staff_only if a request process exists*). When every activity holding an
+item is about `staff`/`employees`, the back-office is the person's own
+interface and staff ops count as the subject's. Transient manual items
+(`transient: true`) have no storage-side rights, only transfers. Library
+models ship their own rights story (`knowledge/library/*.yaml` `rights:`
+block: an audit trail is kept for accountability, a session is purged by the
+framework) which applies to inherited columns too (a page type's `owner`).
 
 Exemptions live on the **data item** (`<unit>/compliance/data/<id>.yaml`, or
 `<app.Model>.*.yaml` for every personal field of a model; the item's own

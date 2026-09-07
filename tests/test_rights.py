@@ -123,23 +123,28 @@ def test_nothing_derived_without_an_activity_or_pii(repo: Path) -> None:
 
 
 def test_every_right_derives_from_ops(repo: Path) -> None:
+    """Facts on a subject-facing touchpoint are the person's rights.
+
+    A `read` of one's own data is access, an `update` is rectification, a
+    `delete` is erasure; the reviewer never writes a legal verb.
+    """
     _tp(
         repo,
         "checkout",
-        f"data:\n  - {EMAIL}: create\n  - {IBAN}: create\n",
+        f"scope: subject\ndata:\n  - {EMAIL}: create\n  - {IBAN}: create\n",
     )
     _tp(
         repo,
         "getCustomer",
-        f"data:\n  - {EMAIL}: [access, {{rectify: {{by: subject}}}}, "
+        f"scope: subject\ndata:\n  - {EMAIL}: [read, update, "
         "{portability: {format: json}}]\n"
-        f"  - {IBAN}: {{erase: {{by: subject}}}}\n",
+        f"  - {IBAN}: delete\n",
     )
     _tp(
         repo,
         "task__shop.purge_carts",
         f"data:\n  - {IBAN}: {{retention_purge: {{after: {{years: 1}}, "
-        f"from: api:shop.Customer.created_at}}}}\n",
+        f"since: creation}}}}\n",
     )
     _activity(
         repo,
@@ -149,26 +154,26 @@ def test_every_right_derives_from_ops(repo: Path) -> None:
     )
 
     email = _status(repo, EMAIL)
-    assert email[Right.ACCESS] == (
-        RightStatus.SATISFIED,
-        "satisfied by api:getCustomer",
-    )
+    assert email[Right.ACCESS] == (RightStatus.SATISFIED, "by api:getCustomer")
     assert email[Right.RECTIFY][0] is RightStatus.SATISFIED
     assert email[Right.PORTABILITY][0] is RightStatus.SATISFIED
-    assert email[Right.ERASE] == (RightStatus.MISSING, "no erase op reaches it")
+    assert email[Right.ERASE] == (
+        RightStatus.MISSING,
+        "nothing lets the person delete it",
+    )
     assert email[Right.RETENTION] == (
         RightStatus.MISSING,
-        "no retention_purge and no event-driven erase",
+        "kept forever: no purge task, nothing deletes it",
     )
     iban = _status(repo, IBAN)
     assert iban[Right.ERASE][0] is RightStatus.SATISFIED
     assert iban[Right.RETENTION] == (
         RightStatus.SATISFIED,
-        "satisfied by api:task:shop.purge_carts",
+        "1 years after creation (api:task:shop.purge_carts)",
     )
-    assert iban[Right.ACCESS][0] is RightStatus.MISSING
-    # Portability only applies with a subject-facing create; IBAN has one.
-    assert iban[Right.PORTABILITY][0] is RightStatus.MISSING
+    assert iban[Right.ACCESS] == (RightStatus.MISSING, "nothing shows it to the person")
+    # Portability presupposes access: with access missing there is one gap, not two.
+    assert Right.PORTABILITY not in iban
 
     report = run_check(repo, strict=False)
     missing = {d.subject: d for d in report.by_section()[Section.MISSING]}
@@ -176,6 +181,55 @@ def test_every_right_derives_from_ops(repo: Path) -> None:
     assert missing[f"{EMAIL}#erase"].code == "erasure-missing"
     assert "[derived]" in missing[f"{EMAIL}#erase"].message
     assert f"{IBAN}#erase" not in missing
+
+
+def test_staff_reads_are_not_access(repo: Path) -> None:
+    """The same facts on a staff screen serve no right of the person; the
+    finding says staff could, so a request process can be declared."""
+    _tp(repo, "admin__shop.Customer", f"data:\n  - {EMAIL}: [read, update, delete]\n")
+    _tp(repo, "checkout", f"scope: public\ndata:\n  - {EMAIL}: create\n")
+    _activity(
+        repo,
+        "ordering",
+        "name: O\npurpose: p\nlegal_basis: contract\ndata_subjects: [customers]\n"
+        "touchpoints: [api:checkout, api:admin:shop.Customer]\n",
+    )
+    status = _status(repo, EMAIL)
+    assert status[Right.ACCESS][0] is RightStatus.MISSING
+    assert "staff can via api:admin:shop.Customer" in status[Right.ACCESS][1]
+    assert status[Right.ERASE][0] is RightStatus.MISSING
+    # A staff delete still ends the row's life: storage limitation holds.
+    assert status[Right.RETENTION][0] is RightStatus.SATISFIED
+    ws = _ws(repo)
+    assert ws.all_touchpoints["api:admin:shop.Customer"].scope.value == "staff"
+    assert ws.all_touchpoints["api:checkout"].scope_declared
+
+
+def test_retention_cases(repo: Path) -> None:
+    """Purge cases cover some rows; the rest must end somewhere too."""
+    _tp(repo, "checkout", f"scope: public\ndata:\n  - {EMAIL}: create\n")
+    _tp(
+        repo,
+        "task__shop.purge_carts",
+        f"data:\n  - {EMAIL}: {{retention_purge: {{after: settings.GUEST_MAX_AGE, "
+        "since: last use, when: guest customers only}}\n",
+    )
+    _activity(
+        repo,
+        "ordering",
+        "name: O\npurpose: p\nlegal_basis: contract\ndata_subjects: [customers]\n"
+        "touchpoints: [api:checkout, api:task:shop.purge_carts, api:getCustomer]\n",
+    )
+    status = _status(repo, EMAIL)
+    assert status[Right.RETENTION][0] is RightStatus.MISSING
+    assert status[Right.RETENTION][1] == (
+        "settings.GUEST_MAX_AGE after last use, guest customers only "
+        "(api:task:shop.purge_carts); the other rows are kept forever "
+        "(no purge, no delete)"
+    )
+    # A delete path for the others closes the gap.
+    _tp(repo, "getCustomer", f"scope: subject\ndata:\n  - {EMAIL}: delete\n")
+    assert _status(repo, EMAIL)[Right.RETENTION][0] is RightStatus.SATISFIED
 
 
 def test_portability_needs_a_subject_facing_create(repo: Path) -> None:
@@ -196,7 +250,11 @@ def test_portability_needs_a_subject_facing_create(repo: Path) -> None:
 
 
 def _ordering_with_email(repo: Path, extra_tp: str = "") -> None:
-    _tp(repo, "checkout", f"data:\n  - {EMAIL}: create\n  - {IBAN}: create\n{extra_tp}")
+    _tp(
+        repo,
+        "checkout",
+        f"scope: subject\ndata:\n  - {EMAIL}: create\n  - {IBAN}: create\n{extra_tp}",
+    )
     _activity(
         repo,
         "ordering",
@@ -220,11 +278,12 @@ def test_exemptions_on_the_item(repo: Path) -> None:
     status = _status(repo, EMAIL)
     assert status[Right.ERASE][0] is RightStatus.EXEMPT
     assert "invoices" in status[Right.ERASE][1]
-    assert status[Right.PORTABILITY][0] is RightStatus.EXEMPT
     assert status[Right.RECTIFY][0] is RightStatus.EXEMPT
     # staff_only is verified: no admin screen performs `access` by staff.
     assert status[Right.ACCESS][0] is RightStatus.MISSING
     assert "staff_only" in status[Right.ACCESS][1]
+    # And with access missing, portability is not asked separately.
+    assert Right.PORTABILITY not in status
 
     report = run_check(repo, strict=False)
     review = [d for d in report.diagnostics if d.code == "manual-exemption"]
@@ -240,30 +299,22 @@ def test_exemptions_on_the_item(repo: Path) -> None:
 
 def test_staff_only_is_verified_against_admin_ops(repo: Path) -> None:
     _ordering_with_email(repo)
-    _tp(
-        repo,
-        "admin__shop.Customer",
-        f"data:\n  - {EMAIL}: {{rectify: {{by: staff}}}}\n",
-    )
+    _tp(repo, "admin__shop.Customer", f"data:\n  - {EMAIL}: update\n")
     _data(repo, "shop.Customer.email", "rights:\n  rectify: {exempt: staff_only}\n")
     status = _status(repo, EMAIL)
     assert status[Right.RECTIFY][0] is RightStatus.EXEMPT
     assert "served by api:admin:shop.Customer" in status[Right.RECTIFY][1]
 
 
-def test_contract_active_needs_an_event_driven_erase(repo: Path) -> None:
+def test_contract_active_needs_an_end_of_contract_delete(repo: Path) -> None:
     _ordering_with_email(repo)
     _data(repo, "shop.Customer.email", "rights:\n  erase: {exempt: contract_active}\n")
     assert _status(repo, EMAIL)[Right.ERASE][0] is RightStatus.MISSING
-    _tp(
-        repo,
-        "admin__shop.Customer",
-        f"data:\n  - {EMAIL}: {{erase: {{on: account_closed, by: staff}}}}\n",
-    )
+    _tp(repo, "admin__shop.Customer", f"data:\n  - {EMAIL}: delete\n")
     status = _status(repo, EMAIL)
     assert status[Right.ERASE][0] is RightStatus.EXEMPT
-    assert "erased on event by" in status[Right.ERASE][1]
-    # And the event-driven erase also satisfies storage limitation.
+    assert "removed at end of contract by" in status[Right.ERASE][1]
+    # And that delete also satisfies storage limitation.
     assert status[Right.RETENTION][0] is RightStatus.SATISFIED
 
 
@@ -271,8 +322,8 @@ def test_anonymisation_needs_a_ground_to_keep_the_row(repo: Path) -> None:
     _ordering_with_email(repo)
     _tp(
         repo,
-        "admin__shop.Customer",
-        f"data:\n  - {EMAIL}: {{erase: {{by: staff, mode: anonymise}}}}\n",
+        "getCustomer",
+        f"scope: subject\ndata:\n  - {EMAIL}: {{delete: {{mode: anonymise}}}}\n",
     )
     status = _status(repo, EMAIL)
     assert status[Right.ERASE][0] is RightStatus.MISSING
@@ -423,7 +474,8 @@ def test_objection_for_legitimate_interests(repo: Path) -> None:
     assert "objection-missing" in {d.code for d in report.diagnostics}
     # The balancing test is scaffolded as a question.
     assert "security.yaml#interest" in {d.subject for d in report.diagnostics}
-    _tp(repo, "getCustomer", f"data:\n  - {EMAIL}: [read, object]\n")
+    # An opt-out is a subject-facing update on one of the items.
+    _tp(repo, "getCustomer", f"scope: subject\ndata:\n  - {EMAIL}: [read, update]\n")
     assert "objection-missing" not in {
         d.code for d in run_check(repo, strict=False).diagnostics
     }
@@ -447,13 +499,21 @@ def test_third_country_transfer_needs_a_safeguard(repo: Path) -> None:
     status = _status(repo, EMAIL)
     assert status[Right.TRANSFER][0] is RightStatus.MISSING
     assert "mapbox (US)" in status[Right.TRANSFER][1]
+
+    # An unknown country is a question, not a finding.
+    party = repo / "compliance" / "parties" / "mapbox.yaml"
+    party.write_text(party.read_text().replace("country: US", "country: !todo"))
+    assert _status(repo, EMAIL)[Right.TRANSFER][0] is RightStatus.UNKNOWN
+    report = run_check(repo, strict=False)
+    todo = {d.subject for d in report.by_section()[Section.TODO]}
+    assert f"{EMAIL}#transfer" in todo
+    party.write_text(party.read_text().replace("country: !todo", "country: US"))
     assert "transfer-safeguard-missing" in {
         d.code for d in run_check(repo, strict=False).diagnostics
     }
 
     with pytest.raises(ValueError, match="dpf_certified"):
         tools.party_add("other", "Other", country="US", safeguard="dpf")
-    party = repo / "compliance" / "parties" / "mapbox.yaml"
     party.write_text(party.read_text() + "safeguard: dpf\ndpf_certified: true\n")
     status = _status(repo, EMAIL)
     assert status[Right.TRANSFER] == (RightStatus.SATISFIED, "sent to mapbox")
@@ -464,6 +524,18 @@ def test_third_country_transfer_needs_a_safeguard(repo: Path) -> None:
 
 
 def test_dpia_reference_when_the_trigger_fires(repo: Path) -> None:
+    """Special-category data (``always``) is a gap; ``large_scale`` (merely
+    confidential data) is a question for a human, not a finding."""
+    _tp(repo, "getCustomer", f"data: [{IBAN}]\n")
+    _activity(
+        repo,
+        "billing",
+        "name: B\npurpose: p\nlegal_basis: contract\ndata_subjects: [customers]\n"
+        "touchpoints: [api:getCustomer]\n",
+    )
+    report = run_check(repo, strict=False)
+    assert "dpia-missing" not in {d.code for d in report.diagnostics}
+    assert "billing.yaml#dpia_reference" in {d.subject for d in report.diagnostics}
     _tp(repo, "checkout", "data: [api:shop.Customer.allergies]\n")
     _activity(
         repo,

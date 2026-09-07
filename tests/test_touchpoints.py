@@ -132,14 +132,14 @@ def test_django_touchpoints_introspected(repo: Path) -> None:
     assert admin.facts.request["iban"] == "readonly_fields"
     assert admin.facts.request["email"] == "list_display"
     assert "read only: iban" in admin.facts.hints
-    assert "erase(by=staff)|delete: has_delete_permission default (allowed)" in (
-        admin.facts.hints
-    )
+    assert "delete: has_delete_permission default (allowed)" in admin.facts.hints
     order_admin = tps.get("admin:shop.Order")
     assert order_admin is not None
-    assert "no erase(by=staff)|delete: has_delete_permission returns False" in (
-        order_admin.facts.hints
-    )
+    assert "no delete: has_delete_permission returns False" in order_admin.facts.hints
+    # Scope is inferred: admin screens are staff, tasks system, bare routes public.
+    assert admin.scope.value == "staff"
+    assert purge.scope.value == "system"
+    assert checkout.scope.value == "public"
 
     # Plumbing is hidden by default; the health check pattern as well.
     hidden = {t.id for t in tps.items if t.ignore}
@@ -194,7 +194,7 @@ def test_manifests_and_reference_checks(repo: Path) -> None:
     (folder / "checkout.yaml").write_text(
         "data:\n  - shop.Customer.email: write\n  - api:shop.Order.total\n"
         "  - shop.Customer.nope\n  - other:shop.Customer.email\n"
-        "  - shop.Customer.*: {erase: {by: subject, mode: anonymise}}\n"
+        "  - shop.Customer.*: {delete: {mode: anonymise}}\n"
         "  - shop.Customer.iban: [create, {rectify: {by: staff}}]\n"
         "  - shop.Customer.zzz*: read\n"
     )
@@ -206,7 +206,7 @@ def test_manifests_and_reference_checks(repo: Path) -> None:
         "data:\n  - shop.Customer.email: {frobnicate: {}}\n"
     )
     (folder / "admin__shop.Customer.yaml").write_text(
-        "data:\n  - shop.Customer.email: {erase: {}}\n"
+        "data:\n  - shop.Customer.email: {delete: {mode: vanish}}\n"
         "exporting: [{party: acme, data: [shop.Customer.email]}]\n"
     )
 
@@ -220,12 +220,13 @@ def test_manifests_and_reference_checks(repo: Path) -> None:
     assert [o.label() for o in checkout.ops_of("api:shop.Customer.email")] == [
         "create",
         "update",
-        "erase(by=subject, mode=anonymise)",
+        "delete(mode=anonymise)",
     ]
+    # ``rectify`` is a legacy legal verb: read as the fact ``update``.
     assert [o.label() for o in checkout.ops_of("api:shop.Customer.iban")] == [
-        "erase(by=subject, mode=anonymise)",
+        "delete(mode=anonymise)",
         "create",
-        "rectify(by=staff)",
+        "update",
     ]
     assert [o.label() for o in checkout.ops_of("api:shop.Order.total")] == ["read"]
     assert checkout.pending is False
@@ -243,14 +244,15 @@ def test_manifests_and_reference_checks(repo: Path) -> None:
     assert len(by_code["data-ref-unknown"]) == 2  # nope + the empty glob
     assert any("matches no data item" in m for m in by_code["data-ref-unknown"])
     assert "write" in by_code["op-ambiguous"][0]
+    assert any("rectify" in m for m in by_code["op-ambiguous"])
     schema = by_code["schema-error"]
     assert any("unknown op 'frobnicate'" in m for m in schema)
-    assert any("erase needs" in m for m in schema)
+    assert any("delete: mode" in m for m in schema)
     assert any("colour" in m for m in schema)
     # ``exporting`` still loads (folded into transfers) but says so.
     admin = tps.get("admin:shop.Customer")
     assert admin is not None
-    assert admin.pending  # its manifest failed on the erase op
+    assert admin.pending  # its manifest failed on the delete mode
     (folder / "admin__shop.Customer.yaml").write_text(
         "data: [shop.Customer.email]\n"
         "exporting: [{party: acme, data: [shop.Customer.email]}]\n"
@@ -319,18 +321,19 @@ def test_activities_derivation_and_check(repo: Path) -> None:
         "activity-unknown-touchpoint",
         "party-unknown",
     ]
-    # The declared !missing, plus what the rights derivation finds: every
-    # personal item of ``ordering``/``support`` lacks access, rectification,
-    # erasure and retention; the derived DPIA trigger has no reference.
+    # The declared !missing, plus what the rights derivation finds: the
+    # personal items of ``ordering``/``support`` lack access, erasure and
+    # retention (bare reads: nobody typed them in, so no rectification).
     missing = sections[Section.MISSING]
     assert missing.count("missing") == 1
-    assert "dpia-missing" in missing
-    assert {"access-missing", "rectification-missing", "erasure-missing"} <= set(
-        missing
-    )
-    assert "retention-missing" in missing
+    # Confidential data is a DPIA *question* (large scale?), not a finding.
+    assert "dpia-missing" not in missing
+    assert "ordering.yaml#dpia_reference" in {d.subject for d in report.diagnostics}
+    assert {"access-missing", "erasure-missing", "retention-missing"} <= set(missing)
+    assert "rectification-missing" not in missing
     assert "portability-missing" not in missing  # no subject-facing create
-    assert sections[Section.TODO] == ["todo"]
+    # The hand-written !todo plus the DPIA question on ``ordering``.
+    assert sections[Section.TODO] == ["todo", "todo"]
     # admin:shop.Customer now belongs to ``support``; the front unit's
     # touchpoints and the api data are still pending.
     assert sorted(sections[Section.REVIEW]) == [
@@ -405,7 +408,7 @@ def test_cli_touchpoints_activities_why(repo: Path) -> None:
             "api:checkout",
             "shop.Customer.email=create,read",
             "shop.Customer.iban",
-            "shop.Customer.phone={rectify: {by: subject}}",
+            "shop.Customer.phone={delete: {mode: anonymise}}",
             *root,
             "--note",
             "api.py:24",
@@ -416,7 +419,7 @@ def test_cli_touchpoints_activities_why(repo: Path) -> None:
     assert manifest.read_text() == (
         "data:\n  - api:shop.Customer.email: [create, read]\n"
         "  - api:shop.Customer.iban\n"
-        "  - api:shop.Customer.phone:\n      rectify: {by: subject}\n"
+        "  - api:shop.Customer.phone:\n      delete: {mode: anonymise}\n"
         "note: api.py:24\n"
     )
     bad_op = runner.invoke(
@@ -484,9 +487,15 @@ def test_cli_touchpoints_activities_why(repo: Path) -> None:
         cli, ["compliance", "data", "why", "api:shop.Customer.email", *root]
     )
     assert why.exit_code == 0, why.output
-    assert "touchpoint api:checkout" in why.output
+    assert "via api:checkout" in why.output
     assert "activity ordering" in why.output
     assert "held by 1 activity" in why.output
+    # The per-touchpoint list with locations is detail, behind -v.
+    assert "api.py:22" not in why.output
+    verbose = runner.invoke(
+        cli, ["compliance", "data", "why", "api:shop.Customer.email", "-v", *root]
+    )
+    assert "api/shop/api.py:22" in verbose.output
     why_json = runner.invoke(
         cli,
         [
@@ -504,10 +513,10 @@ def test_cli_touchpoints_activities_why(repo: Path) -> None:
     assert results["api:shop.Customer.ip_address"]["verdict"] == "unreferenced"
     assert results["api:shop.Customer.email"]["verdict"] == "held"
     assert results["api:shop.Customer.email"]["lifecycle"] == (
-        "created by api:checkout, read by api:checkout, never erased"
+        "created by anyone via api:checkout; read by anyone via api:checkout"
     )
     assert results["api:shop.Customer.phone"]["lifecycle"] == (
-        "rectified by api:checkout (by subject), never erased"
+        "deleted by anyone via api:checkout (mode anonymise)"
     )
     manifests = runner.invoke(
         cli,
@@ -592,7 +601,7 @@ def test_mcp_touchpoint_write_tools(repo: Path) -> None:
                     {
                         "op": "retention_purge",
                         "after": {"years": 1},
-                        "from": "api:shop.Customer.email",
+                        "since": "creation",
                     }
                 ],
             ),
@@ -604,7 +613,7 @@ def test_mcp_touchpoint_write_tools(repo: Path) -> None:
     assert manifest.read_text() == (
         "data:\n  - api:shop.Customer.email: create\n  - api:checkout.card_number\n"
         "  - api:shop.Customer.*:\n      retention_purge:\n"
-        "        after: {years: 1}\n        from: api:shop.Customer.email\n"
+        "        after: {years: 1}\n        since: creation\n"
         "note: api.py:22-30\n"
     )
     bad_ops = tools.touchpoint_set_data(

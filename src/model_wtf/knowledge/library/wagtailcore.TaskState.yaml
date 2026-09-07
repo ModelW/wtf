@@ -4,3 +4,9 @@ fields:
   finished_by: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
   comment: {pii: true, sensitivity: personal, category: content, fixed: true}
 fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}
+rights:
+  # An audit trail exists to prove who did what: it is kept for
+  # accountability (Art. 5(2)) and is not the person's to edit or erase.
+  rectify: {exempt: legal_obligation, note: "audit trail: integrity of the record (Art. 5(2) accountability)"}
+  erase: {exempt: legal_obligation, note: "audit trail kept for accountability (Art. 5(2)); anonymised when the user row is deleted (FK SET_NULL)"}
+  retention: {exempt: legal_obligation, note: "audit trail kept for the life of the content it documents; the user reference is nulled on account deletion"}

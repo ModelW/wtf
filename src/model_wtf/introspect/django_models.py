@@ -308,6 +308,24 @@ def main() -> int:
                     "file": source_file,
                     "database": _database_info(model),
                     "fields": fields,
+                    # Library models this one derives from (``wagtailcore.Page``
+                    # for a page type, ``wagtaildocs.AbstractDocument`` for a
+                    # custom document): what the library knows about their
+                    # fields applies to the inherited columns.
+                    "bases": [
+                        f"{b._meta.app_label}.{b.__name__}"
+                        for b in model.__mro__[1:]
+                        if hasattr(b, "_meta")
+                        and not b._meta.abstract
+                        and b is not model
+                    ]
+                    + [
+                        f"{b._meta.app_label}.{b.__name__}"
+                        for b in model.__mro__[1:]
+                        if hasattr(b, "_meta")
+                        and b._meta.abstract
+                        and getattr(b._meta, "app_label", None)
+                    ],
                 }
             )
         payload = {

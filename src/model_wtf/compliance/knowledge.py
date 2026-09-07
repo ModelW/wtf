@@ -106,6 +106,12 @@ class LibraryModel(StrictModel):
     fields_default: LibraryField | None = None
     """Verdict for fields not listed (``id``, FKs, timestamps of a table that
     is technical through and through)."""
+    rights: dict[str, Any] | None = None
+    """The framework's own rights story for the personal fields of this model
+    (an audit trail is kept for accountability: erasure exempt with a ground;
+    a session is purged by the framework: retention exempt). Same shape as a
+    data file's ``rights`` block; applied to every personal field unless the
+    project's own data file says otherwise."""
 
     def field(self, name: str) -> LibraryField | None:
         """Verdict for ``name``: listed, else the default, else ``None``."""
@@ -230,12 +236,16 @@ class Knowledge:
             frozenset(_builtin_names(CATEGORIES_DIR)),
         )
 
-    def known_field(self, model_label: str, field_name: str) -> KnownField | None:
+    def known_field(
+        self, model_label: str, field_name: str, *, listed_only: bool = False
+    ) -> KnownField | None:
         """Library verdict for ``app.Model`` / ``field`` (listed or default)."""
         model = self.library.get(model_label)
         if model is None:
             return None
-        verdict = model.field(field_name)
+        verdict = (
+            model.fields.get(field_name) if listed_only else model.field(field_name)
+        )
         if verdict is None:
             return None
         return KnownField(
@@ -247,6 +257,11 @@ class Knowledge:
             assumption=model.assumption,
             check=model.check,
         )
+
+    def library_rights(self, model_label: str) -> dict[str, Any] | None:
+        """The ``rights`` block a library model ships for its personal fields."""
+        model = self.library.get(model_label)
+        return model.rights if model is not None else None
 
     def resolve(self, name: str) -> str:
         """Map a built-in level/category id to its custom replacement, if any."""

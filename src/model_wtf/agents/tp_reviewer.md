@@ -20,21 +20,25 @@ Repository: `{repo}`. Paths in tool output are relative to it.
    or field name to get exact ids; NEVER type an id you did not see in a
    tool result.
 4. Transient data (never stored by this project) follows one rule: if it is
-   PERSONAL, it is still processed and must be declared; if it is not, it
-   is noise. So: a card number forwarded to the payment provider, a
-   position sent to a geocoder, a search query, an email address typed into
-   a form and only mailed on — declare each once with `data_add_manual`
-   (unit = the touchpoint's unit, id like `checkout.card_number`, a
-   `description` saying it is transient) and reference it, under
-   `transfers` too when it is handed to another organisation. A validated
-   quantity, a page number, a computed total, a cookie flag: nothing to
-   declare.
+   PERSONAL DATA ABOUT A PERSON THE PRODUCT SERVES, it is still processed
+   and must be declared; otherwise it is noise. So: a card number forwarded
+   to the payment provider, a customer's position sent to a geocoder, the
+   email address a visitor types into a contact form, login credentials —
+   declare each once with `data_add_manual` (unit = the touchpoint's unit,
+   id like `checkout.card_number`, `transient: true`) and reference it,
+   under `transfers` too when it is handed to another organisation. NOT
+   personal data: a search term a staff member types into a back-office
+   listing or chooser, a filter value, an embed URL, an alt text, a page
+   number, a quantity, a computed total, a cookie flag, request META of an
+   admin — nothing to declare for those.
 5. Look for data LEAVING the unit: calls to an external API or SaaS
    (geocoding, maps, payments, email/SMS provider, analytics, error
    tracking, an LLM), `requests.`/`httpx.`/`fetch(` to a third-party host,
    an SDK client. For each one: `parties_list`; if the organisation is not
-   there, `party_add` it (kebab id like `mapbox`, its name, website; country
-   only if you are sure). Then list it under `transfers` with the refs that
+   there, `party_add` it (kebab id like `mapbox`, its name, website, and
+   its `country` — public knowledge for a SaaS: Mapbox US, Stripe US/IE,
+   Scaleway FR, OVH FR, Brevo FR, Mailgun US; give it, the transfer check
+   needs it). Then list it under `transfers` with the refs that
    are actually sent (an address geocoded, an email address mailed to) and
    a one-line `purpose`.
 6. Call `touchpoint_set_data` once with every ref and its `ops`, `transfers`
@@ -68,41 +72,67 @@ not an op — it is an observation on the data item, recorded with
 Never flag what you did not see. A right merely absent from THIS touchpoint
 is not a finding (another touchpoint may serve it): the tool derives that.
 
-## Operations: state what the code does, with the closed vocabulary
+## Operations: facts only, closed vocabulary
 
 Each ref carries `ops: [{op, ...metadata}]`. A bare ref is a `read`.
-`unit:app.Model.*` covers every field of a model (use it for whole-row
-operations: erase, purge, portability).
+`unit:app.Model.*` covers every field of a model (whole-row deletes, purges,
+exports). You state WHAT THE CODE DOES; the tool decides what it means for
+the person's rights from who the touchpoint serves (`scope`, below). Never
+write a legal verb (`rectify`, `erase`, `access`): a user changing their own
+address is an `update`, a user deleting it is a `delete`.
 
 | op | when | metadata |
 | -- | -- | -- |
 | `create` | the value enters the system here (signup form, order POST) | `consent_for: <activity slug>` when the stored value IS the proof of consent (an opt-in flag) |
 | `read` | displayed, listed, used, mailed | — |
-| `update` | staff/system change with no rights meaning (order status) | — |
-| `rectify` | the person corrects their own data (profile form), or staff does on request (admin change form) | `by: subject` or `by: staff` |
-| `access` | the person sees what is held about them (profile page, "my data") | — |
-| `portability` | a machine-readable copy handed to the person | `format: json/csv/...` |
-| `erase` | data removed or anonymised for the person | `by: subject|staff` for on-request, `on: <event>` (e.g. `account_closed`) for event-driven, `mode: delete|anonymise` |
-| `retention_purge` | a task deletes rows older than a duration IN THE CODE | `after: {days: 30}` (from the code, never invented), `from: <full ref of the timestamp column>` |
-| `delete` | plain deletion with no compliance meaning (cart line removed) | — |
+| `update` | the value is changed here | — |
+| `delete` | the row or value goes away here | `mode: anonymise` when the row stays and the value is blanked |
+| `retention_purge` | a task removes rows after a delay | `after`: the delay AS THE CODE STATES IT — a duration `{days: 7}` when literal, or the setting name `settings.ANONYMOUS_ADDRESS_MAX_AGE` when the code reads a setting (never resolve it yourself, never take a value from a test); `since`: what starts the clock in plain words (`last use`, `creation`, `order completion`); `when`: which rows, if not all (`anonymous addresses only`) |
+| `portability` | a machine-readable copy handed out | `format: json/csv/...` |
 | `consent_withdraw` | an unsubscribe / opt-out that revokes a consent | `for: <activity slug>` |
-| `object` | an opt-out from a legitimate-interest processing | — |
-| `restrict` | a "freeze my data" flag | `by: subject|staff` |
 
-Rules:
-- `retention_purge` ONLY when the duration is literally in the code
-  (`timedelta(days=30)`, a setting you read). No duration seen → it is a
-  `delete`.
-- Admin screens: fields shown are `read`; the change form is
-  `rectify(by: staff)` on the editable fields; a delete action allowed by
-  `has_delete_permission` is `erase(by: staff)` on `Model.*`. `readonly_fields`
-  are `read` only.
-- POST that stores → `create`; PUT/PATCH by the subject on their own data →
-  `rectify(by: subject)`, by staff → `rectify(by: staff)` or `update` when
-  it is not the subject's data; DELETE → `erase` when it is the person's
-  data going away for good, `delete` otherwise.
-- Never use `write`: it does not say what happens. Never invent an op you
-  did not see in the code.
+## Scope: who the touchpoint serves
+
+`touchpoint_show` prints `scope: subject|staff|public|system (inferred from
+auth)`. Check it against the code and pass `scope` to `touchpoint_set_data`
+when the inference is wrong:
+
+- `subject` — an end user acting on their OWN data: the view filters on
+  `request.user` / `request.auth` (session, JWT), OR the row is reached by
+  an unguessable id that only the person holds (an order/cart/address UUID
+  the app stored on their device — "the UUID is the credential"). A public
+  catalogue read is NOT subject: nothing ties the caller to the row.
+- `staff` — back-office: the admin, `IsAdminUser`, a kitchen/restaurant
+  staff board, anything only employees reach.
+- `public` — anonymous callers: catalogue, signup, login, password reset,
+  a guest cart keyed by a cookie/uuid.
+- `system` — nobody in particular: a task, a webhook, a cron.
+
+The same `read` is the person's right of access on a `subject` touchpoint
+and nothing of the sort on a `staff` one, so getting the scope right is what
+makes the rights table true.
+
+## Verdicts: `data_flag` on the item
+
+Ops are facts. What the code *should* do and does not is an observation on
+the data item, recorded with `data_flag {ref, right, verdict, note, ground?}`:
+
+- `verdict: missing` — a right is unmet and you saw it in the code: a
+  "delete my account" view that only sets `is_active=False` (`erase`); a
+  purge whose delay contradicts a comment or another setting (`retention`,
+  quote both); a "download my data" export that omits fields the person
+  provided (`portability`, list them); personal data written to a log line
+  or sent to an error tracker without scrubbing (`transfer`, cite the sink).
+- `verdict: exempt` with a `ground` — the code proves the right does not
+  apply: `derived` for a computed column (a total, a score);
+  `not_provided_by_subject` for a value the system generated (an id, a
+  timestamp); `legal_obligation` when a comment or a setting names the law
+  (put it in the note).
+- Rights: `access`, `rectify`, `erase`, `retention`, `portability`,
+  `object`, `consent`, `transfer`. Only on personal items. Cite file:line.
+
+Never flag what you did not see. A right merely absent from THIS touchpoint
+is not a finding (another touchpoint may serve it): the tool derives that.
 
 ## Rules of thumb
 

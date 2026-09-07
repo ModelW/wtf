@@ -20,14 +20,16 @@ read the code) or ``declared`` (a human's ``!missing``).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from model_wtf.compliance.ops import Op
+from model_wtf.compliance.ops import Op, RetentionPurge
 from model_wtf.compliance.report import Diagnostic, Severity
+from model_wtf.compliance.touchpoints import Kind, Scope
 from model_wtf.compliance.yaml_io import Marker, Missing
 
 if TYPE_CHECKING:
@@ -80,7 +82,8 @@ class Ground(StrEnum):
     """Art. 20 scope: portability only covers data the subject provided."""
 
     DERIVED = "derived"
-    """Computed from other data: nothing to rectify or port on its own."""
+    """Computed from other data (a total, a "who did it" reference): nothing
+    to rectify, port or show on its own; the source data carries the right."""
 
     STAFF_ONLY = "staff_only"
     """Served by staff on request; verified against a ``by: staff`` op."""
@@ -107,9 +110,12 @@ EXEMPT_NOTE_REQUIRED = frozenset(
 
 _GROUND_RIGHTS: dict[Ground, frozenset[Right]] = {
     Ground.NOT_PROVIDED_BY_SUBJECT: frozenset({Right.PORTABILITY}),
-    Ground.DERIVED: frozenset({Right.RECTIFY, Right.PORTABILITY}),
+    Ground.DERIVED: frozenset({Right.ACCESS, Right.RECTIFY, Right.PORTABILITY}),
 }
 """Grounds that only make sense for some rights; the others apply to any."""
+
+_CASCADE_NOTE = re.compile(r"CASCADE|SET_NULL|cascad|nulled|deleted with", re.I)
+"""A ``contract_active`` note naming the database path that ends the row."""
 
 AGENT_PREFIX = "[agent]"
 """Note prefix an agent writes; ``check`` shows such findings as *claimed*."""
@@ -178,6 +184,8 @@ class RightStatus(StrEnum):
     SATISFIED = "satisfied"
     EXEMPT = "exempt"
     MISSING = "missing"
+    UNKNOWN = "unknown"
+    """Cannot be decided yet: a question for a human (a party's country)."""
     NOT_APPLICABLE = "n/a"
 
 
@@ -255,12 +263,15 @@ _ARTICLE = {
     Right.CONSENT: "Art. 7",
     Right.TRANSFER: "Ch. V",
 }
-_OP_FOR = {
-    Right.ACCESS: Op.ACCESS,
-    Right.RECTIFY: Op.RECTIFY,
-    Right.ERASE: Op.ERASE,
+_FACT_FOR = {
+    Right.ACCESS: Op.READ,
+    Right.RECTIFY: Op.UPDATE,
+    Right.ERASE: Op.DELETE,
     Right.PORTABILITY: Op.PORTABILITY,
 }
+"""The fact that, performed on a *subject* touchpoint, serves each right: the
+person reading their own data is access, changing it is rectification,
+removing it is erasure."""
 
 
 class _Derivation:
@@ -268,6 +279,7 @@ class _Derivation:
         self.ws = ws
         self.rows = ws.rows
         self.adequacy = ws.knowledge.adequacy
+        self.subject_scopes: frozenset[Scope] = frozenset({Scope.SUBJECT})
         # ref -> [(touchpoint, op)] for every op declared on it.
         self.ops: dict[str, list[tuple[Touchpoint, OpSpec]]] = {}
         for tp in ws.all_touchpoints.values():
@@ -288,26 +300,42 @@ class _Derivation:
                 items[ref] = self.item(ref)
         for ref, item in sorted(items.items()):
             row = self.rows[ref]
-            spec = row.rights
-            if spec is not None:
-                for right in Right:
-                    value = spec.get(right)
-                    if isinstance(value, Exemption) and value.exempt is Ground.MANUAL:
-                        diagnostics.append(
-                            Diagnostic(
-                                Severity.WARNING,
-                                "manual-exemption",
-                                f"{ref}: {right.value} handled outside the code "
-                                f"({value.note})",
-                                row.unit,
-                                self._path(row),
-                                subject=f"{ref}#{right.value}",
-                                hint="confirm the process still exists",
-                            )
+            diagnostics.extend(self._manual_reviews(row))
+            for finding in item.findings:
+                if finding.status is RightStatus.MISSING:
+                    diagnostics.append(self._diagnostic(row, finding))
+                elif finding.status is RightStatus.UNKNOWN:
+                    diagnostics.append(
+                        Diagnostic(
+                            Severity.WARNING,
+                            "todo",
+                            f"{ref}: {finding.detail}",
+                            row.unit,
+                            self._path(row),
+                            subject=f"{ref}#{finding.right.value}",
+                            hint="fill the party's country in compliance/parties/",
                         )
-            for finding in item.missing():
-                diagnostics.append(self._diagnostic(row, finding))
+                    )
         return diagnostics, items
+
+    def _manual_reviews(self, row: Row) -> list[Diagnostic]:
+        """One Review line per right resting on a ``manual`` ground."""
+        if row.rights is None:
+            return []
+        return [
+            Diagnostic(
+                Severity.WARNING,
+                "manual-exemption",
+                f"{row.full_id}: {right.value} handled outside the code ({value.note})",
+                row.unit,
+                self._path(row),
+                subject=f"{row.full_id}#{right.value}",
+                hint="confirm the process still exists",
+            )
+            for right in Right
+            if isinstance(value := row.rights.get(right), Exemption)
+            and value.exempt is Ground.MANUAL
+        ]
 
     def item(self, ref: str) -> ItemRights:
         row = self.rows[ref]
@@ -320,10 +348,29 @@ class _Derivation:
         out = ItemRights(ref)
         if not row.pii or not activities or bases == {"no_pii"}:
             return out
-        for right in (Right.ACCESS, Right.RECTIFY, Right.ERASE, Right.RETENTION):
-            out.findings.append(self._simple(row, right, bases))
-        if _portability_applies(bases, self.ops.get(ref, [])):
-            out.findings.append(self._simple(row, Right.PORTABILITY, bases))
+        # Whose data is it? When every activity holding the item is about
+        # staff (audit trails, editing sessions, CMS comments), the back-office
+        # IS the person's own interface: a staff read is the subject's access.
+        self.subject_scopes = _subject_scopes(activities)
+        if not row.transient:
+            # Nothing is kept for a transient item: storage-side rights do
+            # not arise, only what leaves (transfers) does.
+            provided = _provided_by_subject(self.ops.get(ref, []), self.subject_scopes)
+            for right in (Right.ACCESS, Right.ERASE, Right.RETENTION):
+                out.findings.append(self._simple(row, right, bases))
+            # Rectification and portability are about what the person gave:
+            # a total the system computed or an operator's note is not theirs
+            # to correct or take away (Art. 16 "inaccurate", Art. 20 "provided").
+            if provided:
+                out.findings.append(self._simple(row, Right.RECTIFY, bases))
+            access = next(f for f in out.findings if f.right is Right.ACCESS)
+            if (
+                provided
+                and bases & {"consent", "contract"}
+                # Portability presupposes access: one gap, not two.
+                and access.status is not RightStatus.MISSING
+            ):
+                out.findings.append(self._simple(row, Right.PORTABILITY, bases))
         transfer = self._transfer(row)
         if transfer is not None:
             out.findings.append(transfer)
@@ -348,6 +395,11 @@ class _Derivation:
                 declared.note,
             )
         if isinstance(declared, Exemption):
+            # An exemption explains why the right is *not* served; when the
+            # code does serve it, the fact wins over the excuse.
+            served = self._from_ops(row, right, article)
+            if served.status is RightStatus.SATISFIED:
+                return served
             return self._exempt(row, right, declared, article)
         # 2. exemptions by construction
         if right is Right.ERASE and "legal_obligation" in bases:
@@ -373,11 +425,11 @@ class _Derivation:
         ref = row.full_id
         detail = f"exempt: {ex.exempt.value}" + (f" ({ex.note})" if ex.note else "")
         if ex.exempt is Ground.STAFF_ONLY:
-            op = _OP_FOR.get(right)
+            op = _FACT_FOR.get(right)
             staff = [
                 tp
                 for tp, o in self.ops.get(ref, [])
-                if op is not None and o.op is op and o.payload().get("by") == "staff"
+                if op is not None and o.op is op and tp.scope is Scope.STAFF
             ]
             if not staff:
                 return Finding(
@@ -390,57 +442,50 @@ class _Derivation:
                 )
             detail += f", served by {', '.join(t.full_id for t in staff)}"
         if ex.exempt is Ground.CONTRACT_ACTIVE and right is Right.ERASE:
-            triggered = [
+            # The contract ends somewhere: a system/staff delete, a purge, or
+            # a database cascade from the parent row (what a library note
+            # describes; the framework's FK is the code path).
+            closing = [
                 tp
                 for tp, o in self.ops.get(ref, [])
-                if o.op is Op.ERASE and o.payload().get("on")
+                if (o.op is Op.DELETE and tp.scope is not Scope.SUBJECT)
+                or o.op is Op.RETENTION_PURGE
             ]
-            if not triggered:
+            cascade = bool(
+                re.search(
+                    r"CASCADE|SET_NULL|cascad|nulled|deleted with", ex.note or "", re.I
+                )
+            )
+            if not closing and not cascade:
                 return Finding(
                     ref,
                     right,
                     RightStatus.MISSING,
                     article,
-                    "exempt contract_active but no `erase` with `on: <event>` "
-                    "closes the contract",
+                    "exempt contract_active but nothing deletes the data when the "
+                    "contract ends (no system/staff delete, no purge)",
                     "derived",
                 )
-            detail += f", erased on event by {', '.join(t.full_id for t in triggered)}"
+            if closing:
+                names = ", ".join(t.full_id for t in closing)
+                detail += f", removed at end of contract by {names}"
         return Finding(ref, right, RightStatus.EXEMPT, article, detail)
 
     def _from_ops(self, row: Row, right: Right, article: str) -> Finding:
         ref = row.full_id
         declared = self.ops.get(ref, [])
         if right is Right.RETENTION:
-            purges = [tp for tp, o in declared if o.op is Op.RETENTION_PURGE]
-            events = [
-                tp for tp, o in declared if o.op is Op.ERASE and o.payload().get("on")
-            ]
-            if purges or events:
-                by = ", ".join(t.full_id for t in purges + events)
-                return Finding(
-                    ref, right, RightStatus.SATISFIED, article, f"satisfied by {by}"
-                )
-            return Finding(
-                ref,
-                right,
-                RightStatus.MISSING,
-                article,
-                "no retention_purge and no event-driven erase",
-                "derived",
-            )
-        op = _OP_FOR[right]
-        hits = [(tp, o) for tp, o in declared if o.op is op]
-        if right is Right.ERASE:
-            anonymised = [
-                tp for tp, o in hits if o.payload().get("mode") == "anonymise"
-            ]
+            return self._retention(ref, article, declared)
+        fact = _FACT_FOR[right]
+        subject = [
+            (tp, o)
+            for tp, o in declared
+            if o.op is fact and tp.scope in self.subject_scopes
+        ]
+        if right is Right.ERASE and subject:
+            modes = {o.payload().get("mode", "delete") for _, o in subject}
             grounds = row.rights.get(Right.ERASE) if row.rights is not None else None
-            if (
-                anonymised
-                and len(anonymised) == len(hits)
-                and not isinstance(grounds, Exemption)
-            ):
+            if modes == {"anonymise"} and not isinstance(grounds, Exemption):
                 return Finding(
                     ref,
                     right,
@@ -450,17 +495,115 @@ class _Derivation:
                     "(add rights.erase exempt legal_obligation|legal_claims)",
                     "derived",
                 )
-        if hits:
-            by = ", ".join(tp.full_id for tp, _ in hits)
+        if subject:
+            by = ", ".join(tp.full_id for tp, _ in subject)
+            return Finding(ref, right, RightStatus.SATISFIED, article, f"by {by}")
+        if right is Right.PORTABILITY:
+            # Art. 20 asks for a structured, machine-readable copy: a JSON
+            # API the person calls on their own data is exactly that.
+            api_reads = [
+                tp
+                for tp, o in declared
+                if o.op is Op.READ
+                and tp.scope in self.subject_scopes
+                and tp.facts.kind is Kind.ROUTE
+                and tp.facts.framework in ("ninja", "drf")
+            ]
+            if api_reads:
+                return Finding(
+                    ref,
+                    right,
+                    RightStatus.SATISFIED,
+                    article,
+                    "as JSON via " + ", ".join(t.full_id for t in api_reads),
+                )
+        if right is Right.RECTIFY:
+            # Immutable records the person can delete and re-create (an
+            # address book, a saved card): correcting = replacing.
+            mine = [(tp, o) for tp, o in declared if tp.scope in self.subject_scopes]
+            creates = [tp.full_id for tp, o in mine if o.op is Op.CREATE]
+            deletes = [tp.full_id for tp, o in mine if o.op is Op.DELETE]
+            if creates and deletes:
+                return Finding(
+                    ref,
+                    right,
+                    RightStatus.SATISFIED,
+                    article,
+                    f"by re-creation: delete via {', '.join(deletes)}, create via "
+                    f"{', '.join(creates)}",
+                )
+        staff = [
+            tp
+            for tp, o in declared
+            if o.op is fact
+            and tp.scope is Scope.STAFF
+            and Scope.STAFF not in self.subject_scopes
+        ]
+        if staff:
+            # Staff can do it on request: acceptable, but say so — the human
+            # confirms there is a process (or marks it exempt staff_only).
+            by = ", ".join(t.full_id for t in staff)
             return Finding(
-                ref, right, RightStatus.SATISFIED, article, f"satisfied by {by}"
+                ref,
+                right,
+                RightStatus.MISSING,
+                article,
+                f"no self-service; staff can via {by} (exempt staff_only if a "
+                "request process exists)",
+                "derived",
+            )
+        verb = {
+            Right.ACCESS: "shows it to the person",
+            Right.RECTIFY: "lets the person change it",
+            Right.ERASE: "lets the person delete it",
+            Right.PORTABILITY: "hands the person a copy",
+        }[right]
+        return Finding(
+            ref, right, RightStatus.MISSING, article, f"nothing {verb}", "derived"
+        )
+
+    def _retention(
+        self, ref: str, article: str, declared: list[tuple[Touchpoint, OpSpec]]
+    ) -> Finding:
+        """Storage limitation: every row must have an end of life.
+
+        Purge cases (``when``) cover some rows; a system/staff delete or a
+        subject delete ends the others when the account or the order goes.
+        With only partial cases the finding names what is still unbounded.
+        """
+        purges = [(tp, o) for tp, o in declared if isinstance(o, RetentionPurge)]
+        deletes = [tp for tp, o in declared if o.op is Op.DELETE]
+        cases = [f"{o.sentence()} ({tp.full_id})" for tp, o in purges]
+        general = [tp for tp, o in purges if not o.when]
+        if general or (purges and deletes):
+            return Finding(
+                ref, Right.RETENTION, RightStatus.SATISFIED, article, "; ".join(cases)
+            )
+        if purges:
+            return Finding(
+                ref,
+                Right.RETENTION,
+                RightStatus.MISSING,
+                article,
+                "; ".join(cases)
+                + "; the other rows are kept forever (no purge, no delete)",
+                "derived",
+            )
+        if deletes:
+            by = ", ".join(t.full_id for t in deletes)
+            return Finding(
+                ref,
+                Right.RETENTION,
+                RightStatus.SATISFIED,
+                article,
+                f"removed on request/event by {by}; no time-based purge",
             )
         return Finding(
             ref,
-            right,
+            Right.RETENTION,
             RightStatus.MISSING,
             article,
-            f"no {op.value} op reaches it",
+            "kept forever: no purge task, nothing deletes it",
             "derived",
         )
 
@@ -475,9 +618,9 @@ class _Derivation:
                 if ref in t.data
             }
         )
-        if not sent_to:
-            return None
         declared = row.rights.get(Right.TRANSFER) if row.rights is not None else None
+        if not sent_to and not isinstance(declared, Missing):
+            return None
         if isinstance(declared, Missing):
             origin: Origin = "claimed" if _is_agent(declared.note) else "declared"
             return Finding(
@@ -490,12 +633,16 @@ class _Derivation:
                 declared.note,
             )
         unsafe: list[str] = []
+        unknown: list[str] = []
         for slug in sent_to:
             party = parties.get(slug)
             if party is None:
                 continue
             country = party.country if isinstance(party.country, str) else None
-            if country is None or country.upper() in self.adequacy:
+            if country is None:
+                unknown.append(slug)
+                continue
+            if country.upper() in self.adequacy:
                 continue
             safeguard = getattr(party, "safeguard", None)
             if safeguard is None or (
@@ -512,6 +659,14 @@ class _Derivation:
                 + ", ".join(unsafe)
                 + " (set safeguard: sccs|bcr|dpf|derogation on the party)",
                 "derived",
+            )
+        if unknown:
+            return Finding(
+                ref,
+                Right.TRANSFER,
+                RightStatus.UNKNOWN,
+                "Ch. V",
+                "sent to " + ", ".join(unknown) + " whose country is !todo",
             )
         return Finding(
             ref,
@@ -611,8 +766,12 @@ class _Derivation:
         refs = activity.derived.pii_data
         if not refs:
             return []
+        # An opt-out is a subject-facing update or delete on one of the items.
         objections = [
-            tp for ref in refs for tp, o in self.ops.get(ref, []) if o.op is Op.OBJECT
+            tp
+            for ref in refs
+            for tp, o in self.ops.get(ref, [])
+            if o.op in (Op.UPDATE, Op.DELETE) and tp.scope is Scope.SUBJECT
         ]
         manual = any(
             isinstance(row.rights.get(Right.OBJECT), Exemption)
@@ -625,21 +784,38 @@ class _Derivation:
             self._activity_diag(
                 activity,
                 "objection-missing",
-                "legitimate_interests but no `object` op on any of its items (Art. 21)",
+                "legitimate_interests but nothing lets the person opt out "
+                "(no subject-facing update/delete on its items, Art. 21)",
             )
         ]
 
     def _dpia_check(self, activity: Activity) -> list[Diagnostic]:
+        """Art. 35: ``always`` (special categories) is a gap; ``large_scale``
+        depends on volume the code cannot tell — a question for a human."""
         dpia = activity.derived.dpia
-        if dpia is None or dpia.value not in ("always", "large_scale"):
+        if dpia is None or dpia.value == "never":
             return []
         if activity.spec.dpia_reference is not None:
             return []
+        if dpia.value == "always":
+            return [
+                self._activity_diag(
+                    activity,
+                    "dpia-missing",
+                    "special-category data (Art. 35) but no `dpia_reference`",
+                )
+            ]
         return [
-            self._activity_diag(
-                activity,
-                "dpia-missing",
-                f"DPIA trigger `{dpia.value}` (Art. 35) but no `dpia_reference`",
+            Diagnostic(
+                Severity.WARNING,
+                "todo",
+                f"{activity.path.name}: dpia_reference is not set — confidential "
+                "data; a DPIA is due if the processing is large-scale (Art. 35)",
+                "shared",
+                activity.path,
+                subject=f"{activity.path.name}#dpia_reference",
+                hint="Is this processing large-scale? If so, where is the DPIA? "
+                "Else set `dpia_reference: not-required` with the reason",
             )
         ]
 
@@ -688,20 +864,31 @@ class _Derivation:
         )
 
 
-def _portability_applies(bases: set[str], ops: list[tuple[Touchpoint, OpSpec]]) -> bool:
-    """Art. 20: consent/contract bases, and data the subject provided.
+STAFF_SUBJECTS = frozenset({"staff", "employees", "operators", "editors", "admins"})
+"""``data_subjects`` values meaning the people are the organisation's own
+workers, whose interface to their data is the back-office."""
 
-    "Provided by the subject" is read from the code: a ``create`` op on a
-    subject-facing touchpoint (not an admin screen, not a task).
-    """
-    if not bases & {"consent", "contract"}:
-        return False
-    return any(
-        o.op is Op.CREATE
-        and tp.facts.kind.value == "route"
-        and not tp.id.startswith("admin:")
-        for tp, o in ops
-    )
+
+def _subject_scopes(activities: list[Activity]) -> frozenset[Scope]:
+    """Which touchpoint scopes act *as the person* for these activities."""
+    subjects = {
+        s.lower()
+        for a in activities
+        if not isinstance(a.spec.data_subjects, Marker)
+        for s in a.spec.data_subjects
+    }
+    if subjects and subjects <= STAFF_SUBJECTS:
+        return frozenset({Scope.SUBJECT, Scope.STAFF})
+    return frozenset({Scope.SUBJECT})
+
+
+def _provided_by_subject(
+    ops: list[tuple[Touchpoint, OpSpec]], subject_scopes: frozenset[Scope]
+) -> bool:
+    """Whether the person typed the value in: a ``create`` (or ``update``) on a
+    touchpoint they use themselves — not an admin screen, not a task."""
+    scopes = subject_scopes | {Scope.PUBLIC}
+    return any(o.op in (Op.CREATE, Op.UPDATE) and tp.scope in scopes for tp, o in ops)
 
 
 def _is_agent(note: str | None) -> bool:

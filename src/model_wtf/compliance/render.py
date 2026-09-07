@@ -137,26 +137,81 @@ def _lines(report: Report, diags: list[Diagnostic]) -> list[tuple[Text, str | No
     """One printable line per thing to do.
 
     Marker diagnostics about the same file collapse into one line listing
-    the fields (notes are kept, one per field, since they are the useful
-    part); everything else is printed as-is with its scope.
+    the fields; rights findings collapse per item, and per model when the
+    same note covers every field; everything else is printed as-is.
     """
     out: list[tuple[Text, str | None]] = []
     grouped: dict[str, list[Diagnostic]] = defaultdict(list)
-    rights: dict[str, list[Diagnostic]] = defaultdict(list)
+    rights: list[Diagnostic] = []
+    manual: list[Diagnostic] = []
     for diag in diags:
         if diag.code in {"todo", "missing"} and diag.path is not None:
             grouped[report.display_path(diag.path)].append(diag)
         elif diag.code in RIGHTS_CODES and diag.subject and "#" in diag.subject:
-            rights[diag.subject.split("#", 1)[0]].append(diag)
+            rights.append(diag)
+        elif diag.code == "manual-exemption" and diag.subject:
+            manual.append(diag)
         else:
             where = f"{diag.scope_id}: " if diag.scope_id else ""
             out.append((Text.assemble((where, "bold"), diag.message), diag.hint))
     for file, group in grouped.items():
         fields = ", ".join(_field_with_note(d) for d in group)
         out.append((Text.assemble((file, "bold"), ": ", fields), None))
-    for ref, group in rights.items():
-        out.append((_rights_line(ref, group), f"data why {ref}"))
+    out.extend(_rights_lines(rights))
+    out.extend(_manual_lines(manual))
     return out
+
+
+def _rights_lines(diags: list[Diagnostic]) -> list[tuple[Text, str | None]]:
+    """Derived findings one line per item; noted ones one line per note."""
+    out: list[tuple[Text, str | None]] = []
+    plain: dict[str, list[Diagnostic]] = defaultdict(list)
+    by_note: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for d in diags:
+        ref, _, right = (d.subject or "").partition("#")
+        if d.note:
+            by_note[(d.note, right)].append(ref)
+        else:
+            plain[ref].append(d)
+    for ref, group in plain.items():
+        out.append((_rights_line(ref, group), f"data why {ref}"))
+    for (note, right), refs in by_note.items():
+        text = note.removeprefix("[agent]").strip()
+        line = Text.assemble(
+            (_shown(refs), "bold"), f": {right} ", (f'"{text}"', "italic")
+        )
+        out.append((line, f"data why {refs[0]}"))
+    return out
+
+
+def _manual_lines(diags: list[Diagnostic]) -> list[tuple[Text, str | None]]:
+    """Same ``manual`` note on many fields (a glob rights file): one line."""
+    out: list[tuple[Text, str | None]] = []
+    manual: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for d in diags:
+        note = d.message.split("(", 1)[-1].rstrip(")")
+        ref, _, right = (d.subject or "").partition("#")
+        manual[(note, right)].append(ref)
+    for (note, right), refs in manual.items():
+        line = Text.assemble(
+            (_shown(refs), "bold"),
+            f": {right} handled outside the code ",
+            (f"({note})", "dim"),
+        )
+        out.append((line, "confirm the process still exists"))
+    return out
+
+
+def _shown(refs: list[str]) -> str:
+    """``api:orders.Order.*`` when every ref is a field of that model."""
+    model = _common_model(refs)
+    return model + ".*" if model and len(refs) > 1 else ", ".join(refs)
+
+
+def _common_model(refs: list[str]) -> str | None:
+    """``api:orders.Order`` when every ref is a field of that model."""
+    models = {r.rsplit(".", 1)[0] for r in refs}
+    return models.pop() if len(models) == 1 else None
 
 
 RIGHTS_CODES = frozenset(

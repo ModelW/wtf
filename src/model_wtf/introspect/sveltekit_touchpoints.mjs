@@ -242,13 +242,13 @@ for (const typeFile of typeFiles) {
     // action names say what they do. The reviewer confirms against the code.
     const hints = [];
     if (handlers.includes("POST")) hints.push("create: POST handler");
-    if (handlers.includes("PUT") || handlers.includes("PATCH")) hints.push("update|rectify: PUT/PATCH handler");
-    if (handlers.includes("DELETE")) hints.push("delete|erase: DELETE handler");
+    if (handlers.includes("PUT") || handlers.includes("PATCH")) hints.push("update: PUT/PATCH handler");
+    if (handlers.includes("DELETE")) hints.push("delete: DELETE handler");
     for (const a of actions) {
-        if (/delete|remove|erase|forget|close/i.test(a)) hints.push(`delete|erase: action ${a}`);
-        else if (/update|edit|change|rename|save/i.test(a)) hints.push(`update|rectify: action ${a}`);
+        if (/delete|remove|erase|forget|close/i.test(a)) hints.push(`delete: action ${a}`);
+        else if (/update|edit|change|rename|save/i.test(a)) hints.push(`update: action ${a}`);
         else if (/export|download/i.test(a)) hints.push(`portability: action ${a}`);
-        else if (/unsubscribe|withdraw|optout|opt_out/i.test(a)) hints.push(`consent_withdraw|object: action ${a}`);
+        else if (/unsubscribe|withdraw|optout|opt_out/i.test(a)) hints.push(`consent_withdraw: action ${a}`);
         else hints.push(`create: action ${a}`);
     }
 

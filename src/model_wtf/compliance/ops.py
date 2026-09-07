@@ -1,9 +1,9 @@
-"""Operations: what a touchpoint *does* to a data item.
+r"""Operations: what a touchpoint *does* to a data item.
 
-``read | write`` says nothing about rights. A touchpoint declares its
-handling of each item with a closed verb set, and each verb carries only the
-metadata that verb needs. Ops state facts about the code — nothing about
-policy lives here; the rights derivation (KFF-208) reads them.
+Touchpoints state **facts about the code**, never a legal qualification:
+the closed verb set is what a reviewer can read off a view or a task,
+and the rights derivation (:mod:`rights`) turns those facts into Art. 15-21
+answers using who the touchpoint serves (:attr:`Touchpoint.scope`).
 
 Manifest forms, all equivalent to a list of ops per ref::
 
@@ -11,41 +11,56 @@ Manifest forms, all equivalent to a list of ops per ref::
       - api:people.User.email                                  # bare = read
       - api:orders.Order.user: create                          # one verb
       - api:orders.Order.total: [create, read]                 # several
-      - api:people.User.email: {rectify: {by: subject}}        # with metadata
-      - api:people.User.*: {erase: {by: subject, mode: anonymise}}   # glob
-      - api:cart.Cart.*: {retention_purge: {after: {days: 30},
-                                            from: api:cart.Cart.last_used_at}}
+      - api:people.User.*: {delete: {mode: anonymise}}         # with metadata
+      - api:geo.Address.*: {retention_purge: {after: settings.ANONYMOUS_ADDRESS_MAX_AGE,
+                                              since: last use, when: anonymous only}}
+      - api:people.User.*: {portability: {format: json}}
       - api:people.User.opt_in: {create: {consent_for: newsletter}}
 
-``write`` is accepted as a deprecated alias for ``[create, update]``
-(``op-ambiguous`` warning) so older manifests keep working until re-reviewed.
+| verb | metadata | fact |
+| -- | -- | -- |
+| ``create`` | ``consent_for``? | the value enters the system here |
+| ``read`` | — | displayed, listed, used, mailed |
+| ``update`` | — | the value is changed here |
+| ``delete`` | ``mode: delete\|anonymise`` | the row / value goes away here |
+| ``retention_purge`` | ``after``, ``since``, ``when`` | removed after a delay |
+| ``portability`` | ``format`` | a machine-readable copy is handed out |
+| ``consent_withdraw`` | ``for`` | revokes a consent for that activity |
+
+Older verbs (``write``, ``rectify``, ``access``, ``erase``, ``object``,
+``restrict``) still parse: they are folded onto the facts above with an
+``op-ambiguous`` warning so existing manifests keep loading.
 """
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 __all__ = [
+    "LEGACY_VERBS",
     "OPS_HELP",
     "WRITE_ALIAS",
-    "Access",
     "AnyOp",
     "ConsentWithdraw",
     "Create",
     "Delete",
     "Duration",
-    "Erase",
-    "Object",
     "Op",
     "OpError",
     "OpSpec",
     "Portability",
     "Read",
-    "Rectify",
-    "Restrict",
     "RetentionPurge",
     "Update",
     "describe",
@@ -56,49 +71,42 @@ __all__ = [
 
 
 class Op(StrEnum):
-    """The closed verb set."""
+    """The closed verb set: facts a reviewer reads off the code."""
 
     CREATE = "create"
-    """The item enters the system here (collection point)."""
+    """The value enters the system here."""
 
     READ = "read"
-    """Displayed, listed, used."""
+    """Displayed, listed, used, mailed."""
 
     UPDATE = "update"
-    """Staff or system change with no rights meaning (an order status)."""
-
-    RECTIFY = "rectify"
-    """The subject corrects their data, or staff does on request (Art. 16)."""
-
-    ACCESS = "access"
-    """The subject sees what is held about them (Art. 15)."""
-
-    PORTABILITY = "portability"
-    """Machine-readable copy of subject-provided data (Art. 20)."""
-
-    ERASE = "erase"
-    """Erasure on request or on an event (Art. 17)."""
-
-    RETENTION_PURGE = "retention_purge"
-    """Automatic expiry after a duration (Art. 5(1)(e)); the code is the policy."""
+    """The value is changed here."""
 
     DELETE = "delete"
-    """Plain deletion with no compliance meaning (a cart line removed)."""
+    """The row or value goes away here (``mode: anonymise`` keeps the row)."""
+
+    RETENTION_PURGE = "retention_purge"
+    """A task removes it after a delay (Art. 5(1)(e)); the code is the policy."""
+
+    PORTABILITY = "portability"
+    """A machine-readable copy is handed out (Art. 20)."""
 
     CONSENT_WITHDRAW = "consent_withdraw"
-    """Consent for an activity can be withdrawn here (Art. 7(3))."""
-
-    OBJECT = "object"
-    """Opt-out recorded (Art. 21)."""
-
-    RESTRICT = "restrict"
-    """Processing restriction flagged (Art. 18)."""
+    """Revokes the consent recorded for an activity (Art. 7(3))."""
 
 
 WRITE_ALIAS = "write"
 """Deprecated verb, expanded to ``create`` + ``update``."""
 
-By = Literal["subject", "staff"]
+LEGACY_VERBS: dict[str, tuple[str, str]] = {
+    "rectify": ("update", "a subject-facing update IS rectification"),
+    "access": ("read", "a subject-facing read IS access"),
+    "erase": ("delete", "a subject-facing delete IS erasure"),
+    "object": ("update", "an opt-out is an update of the flag"),
+    "restrict": ("update", "a restriction is an update of the flag"),
+}
+"""Verbs that qualified the code legally; folded onto the fact they imply.
+The right is derived from who the touchpoint serves, not from the verb."""
 
 
 class OpSpec(BaseModel):
@@ -108,7 +116,7 @@ class OpSpec(BaseModel):
     op: Op
 
     def payload(self) -> dict[str, Any]:
-        """The metadata alone, by alias (``from``, ``for``), defaults dropped."""
+        """The metadata alone, by alias (``for``), defaults dropped."""
         return self.model_dump(
             exclude={"op"}, exclude_none=True, exclude_defaults=True, by_alias=True
         )
@@ -119,7 +127,7 @@ class OpSpec(BaseModel):
         return self.op.value if not payload else {self.op.value: payload}
 
     def label(self) -> str:
-        """Short human form: ``erase(by=subject, mode=anonymise)``."""
+        """Short human form: ``delete(mode=anonymise)``."""
         payload = self.payload()
         if not payload:
             return self.op.value
@@ -149,49 +157,16 @@ class Read(OpSpec):
 
 
 class Update(OpSpec):
-    """Change with no rights meaning."""
+    """The value is changed here."""
 
     op: Literal[Op.UPDATE] = Op.UPDATE
 
 
-class Rectify(OpSpec):
-    """Art. 16: the subject, or staff on request, corrects the value."""
+class Delete(OpSpec):
+    """The row or value goes away; ``anonymise`` keeps the row, blanks the value."""
 
-    op: Literal[Op.RECTIFY] = Op.RECTIFY
-    by: By
-
-
-class Access(OpSpec):
-    """Art. 15: the subject sees what is held about them."""
-
-    op: Literal[Op.ACCESS] = Op.ACCESS
-    by: Literal["subject"] = "subject"
-    format: str | None = None
-
-
-class Portability(OpSpec):
-    """Art. 20: machine-readable copy handed to the subject."""
-
-    op: Literal[Op.PORTABILITY] = Op.PORTABILITY
-    format: str = Field(description="Machine-readable format: json, csv, ...")
-
-
-class Erase(OpSpec):
-    """Art. 17: erasure on request (``by``) and/or on an event (``on``)."""
-
-    op: Literal[Op.ERASE] = Op.ERASE
-    by: By | None = Field(default=None, description="Who triggers it (on request)")
+    op: Literal[Op.DELETE] = Op.DELETE
     mode: Literal["delete", "anonymise"] = "delete"
-    on: str | None = Field(
-        default=None, description="Event that triggers it: account_closed, ..."
-    )
-
-    @model_validator(mode="after")
-    def _trigger(self) -> Erase:
-        if self.by is None and self.on is None:
-            msg = "erase needs `by` (on request) or `on` (an event), or both"
-            raise ValueError(msg)
-        return self
 
 
 class Duration(BaseModel):
@@ -217,20 +192,44 @@ class Duration(BaseModel):
 
 
 class RetentionPurge(OpSpec):
-    """Art. 5(1)(e): automatic expiry; the code is the retention policy."""
+    """Art. 5(1)(e): automatic removal after a delay; the code is the policy.
+
+    ``after`` is the delay as the code states it: a duration
+    (``{days: 30}``) or the name of the setting holding it
+    (``settings.ANONYMOUS_ADDRESS_MAX_AGE``). ``since`` names the clock in
+    plain words ("last use", "creation"); ``when`` the case, if the purge
+    only covers some rows ("anonymous addresses only"). Several purge ops on
+    one item are several cases.
+    """
 
     op: Literal[Op.RETENTION_PURGE] = Op.RETENTION_PURGE
-    after: Duration
-    from_: str = Field(
-        alias="from",
-        description="Full data ref of the timestamp the duration counts from",
+    after: Duration | str = Field(
+        description="A duration ({days: 30}) or the setting name that holds it"
+    )
+    since: str = Field(description="What starts the clock: last use, creation, ...")
+    when: str | None = Field(
+        default=None, description="Which rows, when not all: anonymous only, ..."
     )
 
+    @field_validator("after")
+    @classmethod
+    def _setting_name(cls, value: Duration | str) -> Duration | str:
+        if isinstance(value, str) and not re.fullmatch(r"[A-Za-z_][\w.]*", value):
+            msg = "after: a duration ({days: N}) or a setting name (settings.X)"
+            raise ValueError(msg)
+        return value
 
-class Delete(OpSpec):
-    """Plain deletion with no compliance meaning."""
+    def sentence(self) -> str:
+        """``7 days after last use, anonymous only``."""
+        text = f"{self.after} after {self.since}"
+        return f"{text}, {self.when}" if self.when else text
 
-    op: Literal[Op.DELETE] = Op.DELETE
+
+class Portability(OpSpec):
+    """Art. 20: machine-readable copy handed to the subject."""
+
+    op: Literal[Op.PORTABILITY] = Op.PORTABILITY
+    format: str = Field(description="Machine-readable format: json, csv, ...")
 
 
 class ConsentWithdraw(OpSpec):
@@ -240,33 +239,8 @@ class ConsentWithdraw(OpSpec):
     for_: str = Field(alias="for", description="Activity slug")
 
 
-class Object(OpSpec):
-    """Art. 21: the subject's objection is recorded."""
-
-    op: Literal[Op.OBJECT] = Op.OBJECT
-    by: Literal["subject"] = "subject"
-
-
-class Restrict(OpSpec):
-    """Art. 18: processing restriction flagged."""
-
-    op: Literal[Op.RESTRICT] = Op.RESTRICT
-    by: By
-
-
 AnyOp = Annotated[
-    Create
-    | Read
-    | Update
-    | Rectify
-    | Access
-    | Portability
-    | Erase
-    | RetentionPurge
-    | Delete
-    | ConsentWithdraw
-    | Object
-    | Restrict,
+    Create | Read | Update | Delete | RetentionPurge | Portability | ConsentWithdraw,
     Field(discriminator="op"),
 ]
 
@@ -274,22 +248,16 @@ _CLASSES: dict[str, type[OpSpec]] = {
     Op.CREATE: Create,
     Op.READ: Read,
     Op.UPDATE: Update,
-    Op.RECTIFY: Rectify,
-    Op.ACCESS: Access,
-    Op.PORTABILITY: Portability,
-    Op.ERASE: Erase,
-    Op.RETENTION_PURGE: RetentionPurge,
     Op.DELETE: Delete,
+    Op.RETENTION_PURGE: RetentionPurge,
+    Op.PORTABILITY: Portability,
     Op.CONSENT_WITHDRAW: ConsentWithdraw,
-    Op.OBJECT: Object,
-    Op.RESTRICT: Restrict,
 }
 
 OPS_HELP = (
-    "create[{consent_for}] | read | update | rectify{by: subject|staff} | "
-    "access | portability{format} | erase{by?, mode: delete|anonymise, on?} | "
-    "retention_purge{after: {days|months|years}, from: <full ref>} | delete | "
-    "consent_withdraw{for} | object | restrict{by}"
+    "create[{consent_for}] | read | update | delete[{mode: delete|anonymise}] | "
+    "retention_purge{after: {days|months|years} or settings.NAME, since, when?} | "
+    "portability{format} | consent_withdraw{for}"
 )
 """One-line vocabulary reminder for error messages and tool descriptions."""
 
@@ -354,6 +322,11 @@ def _expand(verb: str, meta: dict[Any, Any], warnings: list[str]) -> list[OpSpec
             "— restate what the code does"
         )
         return [Create(), Update()]
+    if verb in LEGACY_VERBS:
+        fact, why = LEGACY_VERBS[verb]
+        warnings.append(f"`{verb}` is read as `{fact}` ({why}); restate the fact")
+        kept = {"mode": meta["mode"]} if verb == "erase" and "mode" in meta else {}
+        return [_CLASSES[fact].model_validate(kept)]
     cls = _CLASSES.get(verb)
     if cls is None:
         msg = f"unknown op {verb!r}; use one of: {OPS_HELP}"

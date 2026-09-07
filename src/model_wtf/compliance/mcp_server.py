@@ -55,7 +55,7 @@ from model_wtf.compliance.rights import (
     Right,
     set_right,
 )
-from model_wtf.compliance.touchpoints import Transfer, write_manifest
+from model_wtf.compliance.touchpoints import Scope, Transfer, write_manifest
 from model_wtf.compliance.workspace import Workspace, load_workspace
 from model_wtf.compliance.yaml_io import Missing, todo_text
 from model_wtf.introspect.runner import IntrospectionFailed
@@ -447,8 +447,15 @@ class Tools:
         category: str,
         reason: str,
         store: str | None = None,
+        transient: bool = True,
     ) -> str:
-        """``data_add_manual``: declare transient data the ORM never persists."""
+        """``data_add_manual``: declare data the ORM has no row for.
+
+        ``transient`` (the default) means the project never keeps the value:
+        storage-side rights (access, rectification, erasure, retention) do
+        not apply, only transfers. Pass ``False`` with a ``store`` for data
+        kept outside the ORM (a cache, a queue payload).
+        """
         unit = self.unit(unit_id)
         kn = self.knowledge
         if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", item_id):
@@ -487,6 +494,11 @@ class Tools:
         ]
         if store:
             lines.append(f"store: {store}")
+        if transient and store:
+            msg = "a transient item has no store; pass transient=False for kept data"
+            raise ValueError(msg)
+        if transient:
+            lines.append("transient: true")
         lines.append(f"reason: {_yaml_str(reason.strip())}")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -560,8 +572,20 @@ class Tools:
         data: list[DataRef],
         reason: str,
         transfers: list[ExportDecision] | None = None,
+        scope: str | None = None,
     ) -> str:
-        """``touchpoint_set_data``: write a touchpoint's manifest."""
+        """``touchpoint_set_data``: write a touchpoint's manifest.
+
+        ``scope`` (subject | staff | public | system) says who the touchpoint
+        serves; when omitted the inference from auth classes stands.
+        """
+        scope_value: Scope | None = None
+        if scope is not None:
+            try:
+                scope_value = Scope(scope)
+            except ValueError:
+                msg = "scope must be subject, staff, public or system"
+                raise ValueError(msg) from None
         ws = self.workspace()
         tp = ws.all_touchpoints.get(ref)
         if tp is None:
@@ -619,6 +643,7 @@ class Tools:
             ops=ops,
             transfers=exports,
             note=reason.strip(),
+            scope=scope_value,
         )
         self.workspace(refresh=True)
         _log_activity(
@@ -1151,7 +1176,9 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
             "query) or kept outside the ORM (cache, queue payload). Processing "
             "personal data counts even without storage; non-personal transient "
             "values are not tracked. {unit, id, description, pii, sensitivity, "
-            "category, reason, store?}; returns the ref for touchpoint_set_data."
+            "category, reason, store?, transient?=true}; transient=false with a "
+            "store for data kept outside the ORM. Returns the ref for "
+            "touchpoint_set_data."
         ),
     )
     def data_add_manual(
@@ -1163,10 +1190,19 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
         category: str,
         reason: str,
         store: str | None = None,
+        transient: bool = True,
     ) -> str:
         return _guard(
             lambda: tools.data_add_manual(
-                unit, id, description, pii, sensitivity, category, reason, store
+                unit,
+                id,
+                description,
+                pii,
+                sensitivity,
+                category,
+                reason,
+                store,
+                transient,
             )
         )
 
@@ -1180,7 +1216,10 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
             "model. An empty list means 'checked, touches no item'. `transfers` "
             "lists what leaves to another organisation: [{party, data[], "
             "purpose?}] for every external API/provider the code calls (party "
-            "must exist: parties_list / party_add). `reason` cites file:line."
+            "must exist: parties_list / party_add). `reason` cites file:line. "
+            "`scope` = who the touchpoint serves: subject (an authenticated end "
+            "user on their own data), staff (back-office), public (anonymous), "
+            "system (task); give it when touchpoint_show's inference is wrong."
         ),
     )
     def touchpoint_set_data(
@@ -1188,9 +1227,12 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
         data: list[DataRef],
         reason: str,
         transfers: list[ExportDecision] | None = None,
+        scope: str | None = None,
     ) -> str:
         return _guard(
-            lambda: tools.touchpoint_set_data(touchpoint, data, reason, transfers)
+            lambda: tools.touchpoint_set_data(
+                touchpoint, data, reason, transfers, scope
+            )
         )
 
     @server.tool(

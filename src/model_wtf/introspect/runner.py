@@ -101,6 +101,8 @@ class ModelInfo(BaseModel):
     file: str | None = None
     database: DatabaseInfo | None = None
     fields: list[FieldInfo] = Field(default_factory=list)
+    bases: list[str] = Field(default_factory=list)
+    """Library models in the MRO (``wagtailcore.Page``), nearest first."""
 
     @property
     def label(self) -> str:
