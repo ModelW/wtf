@@ -1,0 +1,157 @@
+"""``threats gen``: import pytm's threat library into ``knowledge/threats/``.
+
+pytm ships ``threatlib/threats.json``: one hundred and some CAPEC-derived
+threats, each with the pytm element types it targets and a Python condition
+over pytm control attributes. This command writes one YAML file per threat
+next to our own ``_mapping.yaml``, which says how model-wtf treats each SID
+(``never``, ``review``, or dismissed by simple rules).
+
+The mapping is the model-wtf developer's knowledge; ``gen`` **refuses** a
+SID it does not know, so a pytm bump that adds threats is a decision, never
+a silent gap. Stale mapping entries (SIDs pytm dropped) are reported too.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from importlib import resources
+from pathlib import Path
+from typing import Any
+
+import httpx
+import yaml
+
+from model_wtf.compliance.yaml_io import load_yaml
+
+THREATS_DIR = "threats"
+MAPPING_FILE = "_mapping.yaml"
+RULES_FILE = "_rules.yaml"
+PYTM_RAW = (
+    "https://raw.githubusercontent.com/OWASP/pytm/{ref}/pytm/threatlib/threats.json"
+)
+# pytm element types → ours. Lambda/LLM/Agent have no counterpart: a project
+# adding one declares it as a party with transfers, and the LLM threats are
+# `never` in the mapping until that changes.
+ELEMENT_OF = {
+    "Process": "process",
+    "Server": "process",
+    "Datastore": "store",
+    "ExternalEntity": "party",
+    "Dataflow": "flow",
+}
+
+
+class GenError(Exception):
+    """The catalogue cannot be generated as is."""
+
+
+@dataclass
+class GenResult:
+    """What ``gen`` did."""
+
+    written: list[Path] = field(default_factory=list)
+    unmapped: list[str] = field(default_factory=list)
+    """SIDs pytm has and the mapping does not: the developer's to classify."""
+    stale: list[str] = field(default_factory=list)
+    """SIDs the mapping has and pytm no longer ships."""
+    version: str = ""
+
+
+def builtin_threats_dir() -> Path:
+    """``model_wtf/knowledge/threats`` inside the installed package."""
+    return Path(str(resources.files("model_wtf.knowledge").joinpath(THREATS_DIR)))
+
+
+def load_pytm_threats(source: str) -> tuple[list[dict[str, Any]], str]:
+    """``(threats, version label)`` from a local ``threats.json`` or a git ref.
+
+    ``source`` is a path to the file, or a pytm git ref (``master``,
+    ``v1.3.1``) fetched from GitHub.
+    """
+    path = Path(source)
+    if path.is_file():
+        return json.loads(path.read_text(encoding="utf-8")), f"pytm {path}"
+    url = PYTM_RAW.format(ref=source)
+    try:
+        response = httpx.get(url, timeout=30.0, follow_redirects=True)
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        msg = f"cannot fetch pytm threats from {url}: {exc}"
+        raise GenError(msg) from exc
+    return response.json(), f"pytm {source}"
+
+
+def generate(
+    source: str, *, out_dir: Path | None = None, write: bool = True
+) -> GenResult:
+    """Write ``<SID>.yaml`` per pytm threat; report mapping gaps.
+
+    Raises
+    ------
+    GenError
+        On unmapped SIDs (after writing nothing), or an unreadable source.
+    """
+    out_dir = out_dir or builtin_threats_dir()
+    threats, version = load_pytm_threats(source)
+    mapping = load_yaml(out_dir / MAPPING_FILE) or {}
+    if not isinstance(mapping, dict):
+        msg = f"{out_dir / MAPPING_FILE} must be a mapping of SID → treatment"
+        raise GenError(msg)
+    result = GenResult(version=version)
+    sids = {t["SID"] for t in threats}
+    result.unmapped = sorted(sids - set(mapping))
+    result.stale = sorted(set(mapping) - sids)
+    if result.unmapped:
+        names = ", ".join(result.unmapped)
+        msg = (
+            f"{len(result.unmapped)} pytm threat(s) not in {MAPPING_FILE}: {names}. "
+            "Classify each (never / review / dismiss rules) and run again."
+        )
+        raise GenError(msg)
+    if not write:
+        return result
+    for threat in threats:
+        path = out_dir / f"{threat['SID']}.yaml"
+        path.write_text(_threat_yaml(threat, version), encoding="utf-8")
+        result.written.append(path)
+    return result
+
+
+def _threat_yaml(threat: dict[str, Any], version: str) -> str:
+    targets = threat["target"]
+    if isinstance(targets, str):
+        targets = [targets]
+    elements = sorted({ELEMENT_OF[t] for t in targets if t in ELEMENT_OF})
+    doc: dict[str, Any] = {
+        "sid": threat["SID"],
+        "title": threat["description"],
+        "source": version,
+        "pytm_targets": targets,
+        "elements": elements,
+        "condition": threat["condition"],
+        "severity": threat.get("severity"),
+        "likelihood": threat.get("likelihood"),
+        "details": threat.get("details", ""),
+        "mitigations": threat.get("mitigations", ""),
+        "example": threat.get("example", ""),
+        "references": threat.get("references", ""),
+        "prerequisites": threat.get("prerequisites", ""),
+    }
+    header = (
+        "# Generated by `model-wtf threats gen` from pytm's threat library.\n"
+        "# Do not edit: model-wtf's treatment of this threat is in _mapping.yaml.\n"
+    )
+    return header + yaml.safe_dump(
+        doc, sort_keys=False, allow_unicode=True, width=88, default_style=None
+    )
+
+
+__all__ = [
+    "ELEMENT_OF",
+    "GenError",
+    "GenResult",
+    "builtin_threats_dir",
+    "generate",
+    "load_pytm_threats",
+]

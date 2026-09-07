@@ -145,6 +145,7 @@ REVIEW_CODES = frozenset(
         "touchpoint-orphan",
         "touchpoint-stale-form",
         "manual-exemption",
+        "threat-open",
     }
 )
 """Warning codes that ask for a review round and fail the check."""

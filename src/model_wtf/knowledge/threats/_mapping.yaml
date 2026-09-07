@@ -1,0 +1,162 @@
+# How model-wtf treats each pytm threat (SID). `threats gen` refuses to run
+# when a SID in pytm's library is missing here: a pytm bump is a decision for
+# the model-wtf developer, not a silent gap.
+#
+# One entry per SID:
+#   never: <why>                — impossible in the stacks we generate
+#                                 (memory-safe runtimes, no PHP/LDAP/SOAP...),
+#                                 or about infra we do not model. Kept in the
+#                                 catalogue so the matrix says why.
+#   review: <topic>             — an agent (or a human) has to look. `topic`
+#                                 groups cells for the swarm.
+#   dismiss:                    — deterministic, SIMPLE facts; any one of them
+#     - <rule id>                 dismisses the cell for that element. Rules
+#                                 are defined in `_rules.yaml`. When no rule
+#                                 fires the cell is `review` under `topic`.
+#   topic: <topic>
+#   element: [process|store|party|flow]   which of our elements the threat
+#                                 applies to (pytm targets translated: Process
+#                                 and Server → process (touchpoint), Datastore
+#                                 → store, ExternalEntity → party, Dataflow →
+#                                 flow, Lambda/LLM/Agent → dropped).
+#   note: <text>                — anything a reader should know.
+
+# --- memory / native / not our runtimes -----------------------------------
+INP01: {never: "memory-safe runtimes (Python, Node); no buffer arithmetic on env vars"}
+INP02: {never: "memory-safe runtimes; buffer overflows are the interpreter's problem, patched by dependency updates, not per touchpoint"}
+INP07: {never: "memory-safe runtimes"}
+INP12: {never: "memory-safe runtimes"}
+INP24: {never: "memory-safe runtimes; oversize input is DO02 (excessive allocation) here"}
+INP34: {never: "no SOAP"}
+INP08: {never: "Python str formatting and JS template literals do not interpret user data as format directives; logging uses %-style with arguments"}
+INP13: {never: "no shell command built from input in the generated stacks (subprocess with a list is the rule); a touchpoint that shells out is INP31"}
+
+# --- technologies absent from the stacks ------------------------------------
+INP03: {never: "no Server Side Includes: Django templates and SvelteKit render on the app server"}
+INP06: {never: "no SOAP"}
+INP09: {never: "no LDAP"}
+INP15: {never: "no IMAP/SMTP command built from input; mail goes through Django's mail backend with header validation (BadHeaderError)"}
+INP16: {never: "no PHP"}
+AC08: {never: "no registry"}
+AC14: {never: "no privileged block / signal handling exposed to input"}
+AC13: {never: "no privileged process to hijack inside the app"}
+INP20: {never: "clickjacking is a response-header concern handled once by XFrameOptionsMiddleware / SvelteKit CSP, not per touchpoint; covered by the security-settings review (out of the matrix)"}
+
+# --- XML (only when a parser is actually used) -------------------------------
+AC04: {element: [flow], dismiss: [no_xml], topic: input, note: "XML on a flow only if the touchpoint parses XML"}
+DO03: {element: [flow], dismiss: [no_xml], topic: dos}
+DO04: {element: [flow], dismiss: [no_xml], topic: dos}
+CR07: {element: [flow], dismiss: [no_xml], topic: input}
+INP19: {element: [process], dismiss: [no_xml], topic: input}
+INP21: {element: [process], dismiss: [no_xml], topic: input}
+INP22: {element: [process], dismiss: [no_xml], topic: input}
+INP32: {element: [process], dismiss: [no_xml], topic: input}
+DO05: {element: [process], dismiss: [no_xml], topic: dos}
+AC15: {element: [process], dismiss: [no_xml], topic: input, note: "schema poisoning: XML/JSON schema loaded from input; JSON schemas here are code"}
+
+# --- transport / infra (out of scope: hosting is another layer) --------------
+CR01: {never: "TLS termination and HSTS are infra; the application never serves HTTP"}
+CR02: {never: "TRACE is refused by the front proxy; infra"}
+DE01: {never: "encryption in transit is infra (TLS everywhere between units and to backing services)"}
+DE03: {never: "infra: encryption in transit"}
+CR06: {never: "infra: channel configuration"}
+CR08: {never: "infra: TLS versions"}
+AC10: {never: "infra: TLS configuration"}
+AC05: {never: "content spoofing on the wire is infra (TLS); in-app integrity is INP14/AA04"}
+INP04: {never: "request splitting/smuggling is the HTTP server's and proxy's business (gunicorn/uvicorn behind the platform proxy), not the application's"}
+INP36: {never: "response smuggling: HTTP server / proxy layer"}
+INP37: {never: "request smuggling: HTTP server / proxy layer"}
+DS02: {never: "'try all common switches' targets CLI binaries; the app exposes no switches"}
+HA02: {never: "reverse engineering of a party's software: not ours to model"}
+HA04: {never: "reverse engineering of a party's software: not ours to model"}
+CR05: {never: "encryption at rest is the platform's (managed Postgres/S3); the app chooses no cipher"}
+AC02: {element: [store], dismiss: [store_not_shared], topic: store, note: "a cache or queue shared between units: who trusts what it reads"}
+DE04: {element: [store], dismiss: [store_not_audit], topic: store, note: "audit-trail stores: can the app rewrite its own trail"}
+
+# --- LLM / agents / lambda: not in the stacks --------------------------------
+LLM01: {never: "no LLM in the generated stacks; a project that adds one declares it as a party with transfers"}
+LLM02: {never: "no LLM"}
+LLM03: {never: "no LLM"}
+LLM04: {never: "no LLM"}
+LLM05: {never: "no LLM"}
+LLM06: {never: "no LLM"}
+LLM07: {never: "no LLM"}
+LLM08: {never: "no LLM"}
+LLM09: {never: "no agent harness"}
+
+# --- environment variables: a deployment fact, not a request ------------------
+AC03: {never: "env vars come from the platform, never from the request; the app cannot be made to read attacker-controlled ones"}
+
+# --- injection through the frameworks ----------------------------------------
+INP05: {element: [process], dismiss: [no_request, no_raw_sql], topic: input, note: "the ORM parameterises; raw SQL keeps the cell"}
+INP10: {element: [process], dismiss: [no_request], topic: input, note: "parameter injection: request data reaching a query/filter/URL/command unchecked"}
+INP14: {element: [process], dismiss: [no_request], topic: input, note: "input data manipulation: schema/serializer validation covers the shape, not the meaning"}
+INP25: {element: [process], dismiss: [no_request, no_resource_from_input], topic: input, note: "resource identifiers from input (file name, bucket key, URL fetched)"}
+INP26: {element: [process], dismiss: [no_request, no_dynamic_code], topic: input, note: "eval/exec/import from input"}
+INP33: {element: [process], dismiss: [no_request, no_dynamic_code], topic: input}
+INP31: {element: [process], dismiss: [no_request, no_shell], topic: input}
+INP41: {element: [process], dismiss: [no_request, no_shell], topic: input}
+INP35: {element: [process], dismiss: [no_request], topic: input, note: "alternate encodings: only matters where the touchpoint filters strings itself"}
+INP23: {element: [process], dismiss: [no_file_input], topic: files}
+HA01: {element: [process], dismiss: [no_request, no_path_from_input], topic: files}
+INP11: {element: [process], dismiss: [no_request, no_path_from_input], topic: files}
+AC06: {element: [process], dismiss: [no_file_input], topic: files, note: "uploaded files served back: content-type, size, storage location"}
+INP17: {element: [process], dismiss: [no_file_input], topic: files, note: "MIME type mismatch on served uploads"}
+DE02: {element: [process], dismiss: [no_request], topic: input, note: "double encoding: only where the touchpoint decodes/filters itself"}
+LB01: {element: [process], dismiss: [no_request], topic: input}
+API02: {element: [process], dismiss: [no_request, no_dynamic_code], topic: input}
+API01: {element: [process], dismiss: [not_debug_route], topic: surface, note: "test/demo endpoints left on"}
+
+# --- XSS: templates escape by default; unsafe marks keep the cell -------------
+SC02: {element: [process], dismiss: [no_html_output, no_unsafe_html], topic: xss}
+SC03: {element: [process], dismiss: [no_html_output, no_unsafe_html], topic: xss}
+SC04: {element: [process], dismiss: [no_html_output, no_unsafe_html], topic: xss}
+DS04: {element: [process], dismiss: [no_html_output, no_unsafe_html], topic: xss, note: "error pages: DEBUG off is a settings check, not per touchpoint"}
+INP27: {element: [process], dismiss: [no_html_output, no_unsafe_html], topic: xss}
+INP28: {element: [process], dismiss: [no_html_output, no_unsafe_html], topic: xss}
+INP29: {element: [process], dismiss: [no_html_output, no_unsafe_html], topic: xss}
+INP30: {element: [process], dismiss: [no_html_output, no_unsafe_html], topic: xss}
+INP38: {element: [process], dismiss: [no_html_output, no_unsafe_html], topic: xss}
+INP39: {element: [process], dismiss: [no_html_output, no_unsafe_html], topic: xss}
+INP40: {element: [process], dismiss: [no_html_output, no_unsafe_html], topic: xss, note: "stored XSS: content typed by one person rendered to another"}
+SC01: {element: [process], dismiss: [no_json_get_with_session], topic: sessions, note: "JSON hijacking: legacy browsers; a GET JSON API authenticated by cookie"}
+SC05: {never: "client-side functionality removal: the server validates everything it relies on (AA04 covers trusting the client)"}
+
+# --- authentication, sessions, CSRF -------------------------------------------
+AA01: {element: [process], dismiss: [no_request, public_by_design], topic: auth, note: "does the touchpoint actually enforce the auth its scope implies"}
+AA02: {element: [process], dismiss: [no_request, public_by_design], topic: auth}
+AA03: {element: [process], dismiss: [no_request, no_ids_from_input], topic: access, note: "resource ids taken from the client trusted without ownership check"}
+AA04: {element: [process], dismiss: [no_request], topic: input, note: "server-side validation of what the client asserts (prices, roles, totals)"}
+CR03: {element: [process], dismiss: [not_login], topic: auth, note: "login endpoints: throttling, lockout"}
+CR04: {never: "session ids are signed/random by the framework (django.contrib.sessions, SvelteKit adapters); a custom token scheme is declared as a login touchpoint (CR03/AC11)"}
+AC11: {element: [process], dismiss: [not_login], topic: auth, note: "custom credentials/tokens forged or manipulated"}
+AC16: {never: "framework session ids are unpredictable"}
+AC17: {never: "server-side session handling is the framework's"}
+AC18: {never: "cookie flags (Secure/HttpOnly/SameSite) are settings, checked once, not per touchpoint"}
+AC19: {never: "session replay server-side: framework sessions, logout invalidates"}
+AC20: {never: "client-side session replay: cookie settings, checked once"}
+AC21: {element: [process], dismiss: [no_request, no_cookie_auth, safe_method_only], topic: csrf, note: "CSRF: cookie-authenticated state change without the middleware (csrf_exempt, Ninja with SessionAuth and csrf=False, SvelteKit actions with checkOrigin off)"}
+
+# --- access control ------------------------------------------------------------
+AC01: {element: [process, store], dismiss: [no_request, public_by_design], topic: access, note: "privilege abuse: subject-scoped touchpoint acting on objects it does not own; staff screens without permission checks"}
+AC07: {element: [process], dismiss: [no_request, public_by_design], topic: access}
+AC09: {element: [process], dismiss: [no_request], topic: access, note: "functionality misuse: legitimate feature used at scale or out of intent (mass signup, coupon replay)"}
+AC12: {element: [process], dismiss: [no_request, public_by_design], topic: access, note: "privilege escalation: a subject reaching staff-only behaviour through this touchpoint"}
+
+# --- disclosure ----------------------------------------------------------------
+DS01: {element: [process], dismiss: [no_request], topic: disclosure, note: "excavation: error messages, enumeration (user exists?), verbose 4xx"}
+DS03: {never: "footprinting/hardening of the host is infra"}
+HA03: {never: "fingerprinting: server headers are infra/proxy"}
+INP18: {element: [process], dismiss: [no_request], topic: disclosure, note: "what errors/logs the touchpoint returns on bad input"}
+DS05: {element: [process], dismiss: [no_cache_use], topic: disclosure, note: "personal data cached under a key another person can hit"}
+DS06: {element: [flow], dismiss: [flow_not_personal], topic: disclosure, note: "the flow carries more than the receiver should see (response leaks fields, logs, transfers)"}
+DR01: {element: [flow], dismiss: [flow_not_personal], topic: disclosure, note: "sensitive data on a flow without protection: plaintext credentials, secrets in URLs, personal data in GET params"}
+
+# --- denial of service ----------------------------------------------------------
+DO01: {element: [process], dismiss: [no_request], topic: dos, note: "flooding: unthrottled expensive endpoint (signup, password reset, search, geocoding calls)"}
+DO02: {element: [process, store], dismiss: [no_request], topic: dos, note: "excessive allocation: unbounded list, upload size, unpaginated query, N+1 by input"}
+
+# --- credentials on flows ------------------------------------------------------------
+AC22: {element: [flow], dismiss: [flow_no_credentials], topic: credentials}
+AC23: {element: [flow], dismiss: [flow_no_credentials], topic: credentials}
+AC24: {element: [flow], dismiss: [flow_no_credentials], topic: credentials, note: "hardcoded credentials in the touchpoint's files (grep for keys/tokens)"}

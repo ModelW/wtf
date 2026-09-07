@@ -338,6 +338,7 @@ def test_activities_derivation_and_check(repo: Path) -> None:
     # counts when node and its fixture modules are around.
     assert sorted(sections[Section.REVIEW]) == [
         "pending-review",
+        "threat-open",
         *["touchpoint-pending"] * (2 if HAS_NODE else 1),
     ]
     assert report.exit_code is ExitCode.DECLARATION_ERROR

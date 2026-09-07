@@ -23,8 +23,9 @@ from model_wtf.compliance.report import (
 )
 from model_wtf.compliance.review import LOCK_FILE, Lock, ReviewStatus
 from model_wtf.compliance.rights import check_rights
+from model_wtf.compliance.threats import CatalogueError, Element, build_matrix
 from model_wtf.compliance.touchpoints import TOUCHPOINTS_DIR
-from model_wtf.compliance.workspace import load_workspace
+from model_wtf.compliance.workspace import Workspace, load_workspace
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -158,7 +159,57 @@ def _check_data(
     diagnostics.extend(ws.activities.diagnostics)
     rights_diagnostics, _ = check_rights(ws)
     diagnostics.extend(rights_diagnostics)
+    _check_threats(ws, units, diagnostics)
     return counts
+
+
+def _check_threats(
+    ws: Workspace, units: list[Unit], diagnostics: list[Diagnostic]
+) -> None:
+    """One Review line per unit: the threat cells no rule closed.
+
+    The cells themselves ride on ``items`` (``unit:id#SID``) so the gate
+    can tell a PR that opens new cells from one that touches nothing.
+    Only meaningful once touchpoints are declared: an undeclared touchpoint
+    has no flows yet, its cells would move once it is reviewed.
+    """
+    try:
+        matrix = build_matrix(ws)
+    except CatalogueError as exc:
+        diagnostics.append(
+            Diagnostic(Severity.ERROR, "threats-catalogue", str(exc), SHARED_SCOPE_ID)
+        )
+        return
+    for unit in units:
+        cells = [
+            c
+            for c in matrix.open()
+            if matrix.elements[c.element].unit == unit.id
+            and _declared(matrix.elements[c.element])
+        ]
+        if not cells:
+            continue
+        elements = {c.element for c in cells}
+        topics = Counter(c.topic or "review" for c in cells)
+        summary = ", ".join(f"{n} {t}" for t, n in topics.most_common(4))
+        diagnostics.append(
+            Diagnostic(
+                Severity.WARNING,
+                "threat-open",
+                f"{len(cells)} threat check(s) open on {len(elements)} element(s) "
+                f"({summary})",
+                unit.id,
+                unit.folder,
+                subject=f"{unit.id}:threats",
+                hint=f"threats matrix --unit {unit.id} --open",
+                items=tuple(sorted(f"{c.element}#{c.sid}" for c in cells)),
+            )
+        )
+
+
+def _declared(element: Element) -> bool:
+    tp = element.touchpoint
+    return tp is None or tp.data is not None
 
 
 def _check_reviews(unit: Unit, rows: list[Row], diagnostics: list[Diagnostic]) -> None:
