@@ -708,19 +708,7 @@ def narrate(  # noqa: C901 - one branch per tool, flat on purpose
             closing_tool == "touchpoint_set_data",
         )
     if name == "threat_stamp":
-        element = str(event.args.get("element") or "")
-        sid = str(event.args.get("sid") or "")
-        status = event.args.get("status") or (
-            "missing" if event.args.get("missing") else "?"
-        )
-        mark = ("  ! ", "red") if status == "missing" else ("  ✓ ", "green")
-        detail = str(event.args.get("missing") or event.args.get("note") or "")[:100]
-        return (
-            Text.assemble(
-                mark, (element, "bold"), f" {sid} {status}", (f"  {detail}", "dim")
-            ),
-            False,
-        )
+        return None  # narrated from the activity log, with the threat title
     if name in ("threat_cells", "threat_topic"):
         what = event.args.get("element") or event.args.get("topic") or ""
         return Text.assemble(("    threats of ", "dim"), (str(what), "dim")), False
@@ -819,6 +807,26 @@ def narrate_write(  # noqa: C901 - one branch per kind
             ("  ★ ", "magenta"),
             f"{entry.get('touchpoints', 0)} touchpoint(s) added to ",
             (ident, "bold"),
+        )
+    if kind == "threat_stamp":
+        status = str(entry.get("status", ""))
+        sid = str(entry.get("sid", ""))
+        title = str(entry.get("title") or sid)
+        note = str(entry.get("note") or "")
+        if len(note) > 110:
+            note = note[:107] + "..."
+        mark, colour = {
+            "missing": ("  ! ", "red"),
+            "mitigated": ("  ✓ ", "green"),
+            "accepted": ("  ~ ", "yellow"),
+            "n/a": ("  - ", "dim"),
+        }.get(status, ("  ? ", "dim"))
+        return Text.assemble(
+            (mark, colour),
+            (ident, "bold"),
+            f" {sid} ({title}) ",
+            (status, colour),
+            (f"  {note}", "dim") if note else "",
         )
     return Text(f"  {kind}: {ident}", style="dim")
 

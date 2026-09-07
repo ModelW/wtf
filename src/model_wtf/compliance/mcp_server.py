@@ -508,10 +508,23 @@ class Tools:
         except StampError as exc:
             raise ValueError(str(exc)) from exc
         _log_activity(
-            "threat_stamp", element=element, sid=sid, status=status or "missing"
+            "threat_stamp",
+            id=element,
+            sid=sid,
+            status=status or "missing",
+            note=(missing or note or "").strip(),
+            title=self._threat_title(sid),
         )
         self._workspace = None
         return f"Stamped {element} {sid} in {self._rel(path)}."
+
+    def _threat_title(self, sid: str) -> str:
+        from model_wtf.compliance.threats import load_catalogue
+
+        try:
+            return load_catalogue().threats[sid].title
+        except Exception:
+            return sid
 
     def threat_cells(self, element: str) -> str:
         """``threat_cells``: the open cells of one element with the threat's
