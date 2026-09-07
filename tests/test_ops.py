@@ -9,6 +9,7 @@ from model_wtf.compliance.ops import (
     Duration,
     OpError,
     Read,
+    RetentionPurge,
     Update,
     describe,
     parse_ops,
@@ -38,23 +39,27 @@ def test_every_form_parses_to_the_same_ops() -> None:
 
 
 PURGE = {
-    "retention_purge": {"after": {"days": 30}, "from": "api:cart.Cart.last_used_at"}
+    "retention_purge": {
+        "after": "settings.ANONYMOUS_ADDRESS_MAX_AGE",
+        "since": "last use",
+        "when": "anonymous only",
+    }
 }
 ROUND_TRIPS: list[tuple[object, str, object]] = [
-    ({"rectify": {"by": "subject"}}, "rectify(by=subject)", None),
+    ({"delete": {"mode": "anonymise"}}, "delete(mode=anonymise)", None),
+    # Defaults are dropped from the written form.
+    ({"delete": {"mode": "delete"}}, "delete", "delete"),
     (
-        {"erase": {"by": "subject", "mode": "anonymise"}},
-        "erase(by=subject, mode=anonymise)",
+        PURGE,
+        "retention_purge(after=settings.ANONYMOUS_ADDRESS_MAX_AGE, since=last use, "
+        "when=anonymous only)",
         None,
     ),
-    # Defaults are dropped from the written form.
     (
-        {"erase": {"by": "staff", "mode": "delete"}},
-        "erase(by=staff)",
-        {"erase": {"by": "staff"}},
+        {"retention_purge": {"after": {"days": 7}, "since": "creation"}},
+        "retention_purge(after=7 days, since=creation)",
+        None,
     ),
-    ({"erase": {"on": "account_closed"}}, "erase(on=account_closed)", None),
-    (PURGE, "retention_purge(after=days 30, from=api:cart.Cart.last_used_at)", None),
     ({"portability": {"format": "json"}}, "portability(format=json)", None),
     ({"create": {"consent_for": "newsletter"}}, "create(consent_for=newsletter)", None),
     (
@@ -62,11 +67,8 @@ ROUND_TRIPS: list[tuple[object, str, object]] = [
         "consent_withdraw(for=newsletter)",
         None,
     ),
-    ("access", "access", None),
-    ("object", "object", None),
-    ({"restrict": {"by": "staff"}}, "restrict(by=staff)", None),
-    ("delete", "delete", None),
     ("update", "update", None),
+    ("delete", "delete", None),
 ]
 
 
@@ -82,21 +84,31 @@ def test_metadata_round_trips(value: object, label: str, written: object) -> Non
     assert parse_ops(expected)[0] == ops
 
 
+def test_purge_sentence() -> None:
+    (op,), _ = parse_ops(PURGE)
+    assert isinstance(op, RetentionPurge)
+    assert op.sentence() == (
+        "settings.ANONYMOUS_ADDRESS_MAX_AGE after last use, anonymous only"
+    )
+    (op,), _ = parse_ops({"retention_purge": {"after": {"days": 7}, "since": "x"}})
+    assert isinstance(op, RetentionPurge)
+    assert op.sentence() == "7 days after x"
+
+
 @pytest.mark.parametrize(
     ("value", "match"),
     [
         ("frobnicate", "unknown op 'frobnicate'"),
         ({"read": {"by": "subject"}}, "read: by: Extra inputs"),
-        ({"erase": {}}, "erase needs"),
-        ({"erase": {"by": "robot"}}, "erase: by"),
+        ({"delete": {"mode": "vanish"}}, "delete: mode"),
         ({"portability": {}}, "portability: format: Field required"),
-        ({"retention_purge": {"after": {"days": 30}}}, "from: Field required"),
+        ({"retention_purge": {"after": {"days": 30}}}, "since: Field required"),
         (
-            {"retention_purge": {"after": {"days": 30, "years": 1}, "from": "x"}},
+            {"retention_purge": {"after": {"days": 30, "years": 1}, "since": "x"}},
             "exactly one",
         ),
-        ({"retention_purge": {"after": {"days": 0}, "from": "x"}}, "greater than 0"),
-        ({"rectify": {}}, "rectify: by: Field required"),
+        ({"retention_purge": {"after": {"days": 0}, "since": "x"}}, "greater than 0"),
+        ({"retention_purge": {"after": "30 days", "since": "x"}}, "setting name"),
         ({"write": {"by": "x"}}, "write takes no metadata"),
         ({"create": "yes"}, "metadata must be a mapping"),
         ([], "empty op list"),
@@ -107,6 +119,18 @@ def test_metadata_round_trips(value: object, label: str, written: object) -> Non
 def test_vocabulary_is_closed(value: object, match: str) -> None:
     with pytest.raises(OpError, match=match):
         parse_ops(value)
+
+
+def test_legacy_legal_verbs_fold_onto_facts() -> None:
+    """``rectify``/``access``/``erase`` qualified the code legally; they are
+    read as the fact they imply, with a warning, so old manifests load."""
+    ops, warnings = parse_ops(["access", {"rectify": {"by": "staff"}}])
+    assert ops == [Read(), Update()]
+    assert len(warnings) == 2
+    assert "read" in warnings[0]
+    ops, warnings = parse_ops({"erase": {"by": "subject", "mode": "anonymise"}})
+    assert describe(ops) == "delete(mode=anonymise)"
+    assert warnings
 
 
 def test_write_alias_expands_and_warns() -> None:

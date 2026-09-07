@@ -29,6 +29,8 @@ if TYPE_CHECKING:
     from model_wtf.compliance.data import Row
     from model_wtf.compliance.knowledge import Knowledge
     from model_wtf.compliance.report import Diagnostic, Unit
+    from model_wtf.compliance.schemas import App, Party
+    from model_wtf.compliance.yaml_io import Marker
 
 SHARED_FOLDER = "compliance"
 
@@ -43,6 +45,17 @@ class Workspace:
     data: dict[str, UnitData] = field(default_factory=dict)
     touchpoints: dict[str, UnitTouchpoints] = field(default_factory=dict)
     activities: Activities = field(default_factory=Activities)
+    parties: dict[str, Party] = field(default_factory=dict)
+    """Declared organisations by id (``country``, ``safeguard`` feed Ch. V)."""
+    app: App | None = None
+    """``compliance/app.yaml`` when it parsed."""
+
+    @property
+    def large_scale(self) -> bool | Marker:
+        """Art. 35(3)(b) answer; absent means not large scale."""
+        if self.app is None or self.app.large_scale is None:
+            return False
+        return self.app.large_scale
 
     @property
     def shared(self) -> Path:
@@ -100,7 +113,10 @@ def load_workspace(
     if not with_touchpoints:
         return ws
     known = data_index({uid: d.rows for uid, d in ws.data.items()})
-    parties = set(load_declarations(ws.shared).parties)
+    declarations = load_declarations(ws.shared)
+    ws.parties = declarations.parties
+    ws.app = declarations.app
+    parties = set(ws.parties)
     for unit in selected:
         ws.touchpoints[unit.id] = collect_touchpoints(
             unit, python=python, known_data=known, known_parties=parties

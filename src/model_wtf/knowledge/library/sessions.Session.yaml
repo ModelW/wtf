@@ -12,3 +12,8 @@ fields:
   session_key: {pii: true, sensitivity: confidential, category: credentials, fixed: true}
   session_data: {pii: true, sensitivity: personal, category: connection, fixed: false}
   expire_date: {pii: false, sensitivity: internal, category: technical, fixed: true}
+rights:
+  # The session store: the framework expires rows (SESSION_COOKIE_AGE) and
+  # `clearsessions` purges them; the person ends it by logging out.
+  rectify: {exempt: derived}
+  retention: {exempt: legal_obligation, note: "expires with SESSION_COOKIE_AGE; purged by `manage.py clearsessions` (schedule it)"}

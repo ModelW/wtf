@@ -91,7 +91,10 @@ IGNORED_BY_DEFAULT = (
     re.compile(r"^admin:\w+_\w+_(changelist|add|change|delete|history)$"),
     re.compile(r"^ANY /(?:[^ ]*/)?admin/"),
     re.compile(r"^wagtailadmin_(sprite|javascript_catalog|api:|icons)"),
-    re.compile(r"^wagtailadmin_(home|dashboard|login|logout|account|userbar)"),
+    # ``wagtailadmin_account`` (the staff member's own profile: avatar,
+    # language, password) and ``logout`` are where a staff user exercises
+    # rights on their own data: not plumbing.
+    re.compile(r"^wagtailadmin_(home|dashboard|login|userbar)"),
     re.compile(r"^django\.views\.static\.serve$"),
     re.compile(r"^ANY /[^ ]*\$$"),  # regex catch-alls (admin app index, wagtail)
 )
@@ -107,6 +110,59 @@ class Kind(StrEnum):
     ROUTE = "route"
     TASK = "task"
     ADMIN = "admin"
+
+
+class Scope(StrEnum):
+    """Who a touchpoint serves; the rights derivation reads ops through it.
+
+    A ``read`` on a ``subject`` touchpoint is the person seeing their own
+    data (Art. 15); the same ``read`` on a ``staff`` screen is not.
+    """
+
+    SUBJECT = "subject"
+    """An authenticated end user acting on their own data (session/JWT auth,
+    not the admin)."""
+
+    STAFF = "staff"
+    """Back-office: the admin, an ``IsAdminUser``/staff-only view."""
+
+    PUBLIC = "public"
+    """Anonymous callers: catalogue, signup, login, health."""
+
+    SYSTEM = "system"
+    """Nobody in particular: a task, a webhook, a cron."""
+
+
+_STAFF_AUTH = re.compile(r"admin|staff|superuser", re.I)
+_STAFF_ROUTE = re.compile(
+    r"^(admin:|wagtail(admin|users|docs|images|embeds|forms|redirects|snippets|sites|"
+    r"search|locales|core_)|wagtail_)"
+)
+"""Route-name namespaces that only exist inside a back-office (Django admin,
+Wagtail admin and its apps' management views)."""
+_USER_AUTH = re.compile(r"session|jwt|token|authenticated|login|bearer|user", re.I)
+
+
+def infer_scope(facts: Introspected) -> Scope:
+    """Best guess from kind and auth classes; a manifest ``scope`` overrides it.
+
+    Heuristics only: DRF/Ninja auth class names are read for "staff"
+    (``IsAdminUser``) and "user" (``SessionAuth``, ``IsAuthenticated``)
+    markers; a route without any auth is public.
+    """
+    if facts.kind is Kind.TASK:
+        return Scope.SYSTEM
+    if facts.kind is Kind.ADMIN or _STAFF_ROUTE.match(facts.id):
+        return Scope.STAFF
+    if facts.file and "/wagtail/admin/" in facts.file.replace("\\", "/"):
+        return Scope.STAFF
+    auth = " ".join(facts.auth)
+    body = " ".join(facts.hints)
+    if _STAFF_AUTH.search(auth) or "scope staff" in body:
+        return Scope.STAFF
+    if _USER_AUTH.search(auth) or "scope subject" in body:
+        return Scope.SUBJECT
+    return Scope.PUBLIC
 
 
 class Transfer(StrictModel):
@@ -131,6 +187,11 @@ class Manifest(StrictModel):
     transfers: list[Transfer] = Field(default_factory=list)
     exporting: list[Transfer] | None = Field(
         default=None, description="Deprecated spelling of `transfers`"
+    )
+    scope: Scope | None = Field(
+        default=None,
+        description="Who this touchpoint serves (subject | staff | public | "
+        "system); inferred from auth when absent",
     )
     ignore: bool = False
     note: str | None = None
@@ -230,6 +291,9 @@ class Touchpoint:
     """Per full ref, what this touchpoint does to it (globs expanded)."""
     transfers: tuple[Transfer, ...] = ()
     """Outbound flows to other organisations, refs resolved to full ids."""
+    scope: Scope = Scope.PUBLIC
+    """Who it serves (see :class:`Scope`); declared or inferred."""
+    scope_declared: bool = False
     ignore: bool = False
     note: str | None = None
     calls: tuple[str, ...] = ()
@@ -332,6 +396,7 @@ class Touchpoint:
             "data": list(self.data) if self.data is not None else None,
             "ops": {ref: [op.to_yaml() for op in ops] for ref, ops in self.ops.items()},
             "transfers": [e.model_dump() for e in self.transfers],
+            "scope": self.scope.value,
             "ignore": self.ignore,
             "pending": self.pending,
             "note": self.note,
@@ -557,6 +622,7 @@ def _apply(
         return Touchpoint(
             unit=unit.id,
             facts=facts,
+            scope=infer_scope(facts),
             ignore=ignored_by_default,
             calls=tuple(facts.calls),
         )
@@ -621,6 +687,8 @@ def _apply(
         data=data,
         ops={ref: tuple(o) for ref, o in ops.items()},
         transfers=transfers,
+        scope=manifest.scope or infer_scope(facts),
+        scope_declared=manifest.scope is not None,
         ignore=manifest.ignore,
         note=manifest.note,
         calls=tuple(facts.calls),
@@ -692,6 +760,7 @@ def write_manifest(
     transfers: list[Transfer] | None = None,
     note: str | None = None,
     ignore: bool = False,
+    scope: Scope | None = None,
 ) -> Path:
     """Create or replace the manifest of ``touchpoint``; return its path.
 
@@ -705,6 +774,8 @@ def write_manifest(
     lines: list[str] = []
     if ignore:
         lines.append("ignore: true")
+    if scope is not None:
+        lines.append(f"scope: {scope.value}")
     lines.append("data:" if data else "data: []")
     for ref in data:
         lines.extend(_entry_lines(ref, list(ops.get(ref, ()))))

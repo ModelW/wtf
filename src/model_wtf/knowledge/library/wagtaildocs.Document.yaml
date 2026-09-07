@@ -13,3 +13,9 @@ fields:
   description: {pii: false, sensitivity: internal, category: technical, fixed: false}
   uploaded_by_user: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
 fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}
+rights:
+  # Who uploaded: shown to staff in listings; nulled when the account goes.
+  access: {exempt: derived}
+  rectify: {exempt: derived}
+  erase: {exempt: contract_active, note: "nulled when the staff account is deleted (SET_NULL)"}
+  retention: {exempt: contract_active, note: "lives with the media it documents"}

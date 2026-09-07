@@ -69,6 +69,8 @@ class PartySpec:
     phone: str | None = None
     website: str | None = None
     registration: str | None = None
+    safeguard: str | None = None
+    dpf_certified: bool | None = None
 
     @property
     def slug(self) -> str:
@@ -81,10 +83,12 @@ class PartySpec:
         for key in ("country", "address", "email"):
             value = getattr(self, key)
             lines.append(f"{key}: {_scalar(value) if value else todo_text()}")
-        for key in ("phone", "website", "registration"):
+        for key in ("phone", "website", "registration", "safeguard"):
             value = getattr(self, key)
             if value:
                 lines.append(f"{key}: {_scalar(value)}")
+        if self.dpf_certified is not None:
+            lines.append(f"dpf_certified: {'true' if self.dpf_certified else 'false'}")
         return "\n".join(lines) + "\n"
 
 
@@ -130,8 +134,27 @@ def load_default_processor() -> PartySpec | None:
     block = data.get("default_processor") if isinstance(data, dict) else None
     if not isinstance(block, dict) or not block.get("name"):
         return None
-    known = {k: str(v) for k, v in block.items() if k in PartySpec.__dataclass_fields__}
-    return PartySpec(**known)
+    text = {k: str(v) for k, v in block.items() if k in _CONFIG_KEYS}
+    return PartySpec(
+        name=text["name"],
+        country=text.get("country"),
+        address=text.get("address"),
+        email=text.get("email"),
+        phone=text.get("phone"),
+        website=text.get("website"),
+        registration=text.get("registration"),
+    )
+
+
+_CONFIG_KEYS = (
+    "name",
+    "country",
+    "address",
+    "email",
+    "phone",
+    "website",
+    "registration",
+)
 
 
 def run_init(

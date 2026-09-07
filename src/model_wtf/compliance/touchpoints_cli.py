@@ -28,7 +28,8 @@ from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.ops import Op, OpError, OpSpec, describe, parse_ops
 from model_wtf.compliance.options import ROOT_OPTION
 from model_wtf.compliance.report import Severity
-from model_wtf.compliance.touchpoints import Kind, Transfer, write_manifest
+from model_wtf.compliance.rights import ItemRights, RightStatus, rights_of
+from model_wtf.compliance.touchpoints import Kind, Scope, Transfer, write_manifest
 from model_wtf.compliance.workspace import Workspace, load_workspace
 from model_wtf.compliance.yaml_io import Marker
 from model_wtf.introspect.runner import IntrospectionFailed
@@ -226,6 +227,8 @@ def render_touchpoint(tp: Touchpoint, ws: Workspace) -> Text:
         else None,
     )
     line("route name", f.route_name)
+    origin = "declared" if tp.scope_declared else "inferred from auth"
+    line("scope", f"{tp.scope.value} ({origin})")
     line("view", f.view)
     line("location", tp.location(ws.root))
     line("auth", ", ".join(f.auth))
@@ -768,6 +771,8 @@ class Why:
     ref: str
     touchpoints: list[Touchpoint]
     activities: list[Activity]
+    rights: ItemRights | None = None
+    """Per-right status (personal items held by an activity only)."""
 
     @property
     def verdict(self) -> str:
@@ -786,40 +791,81 @@ class Why:
             return "referenced by touchpoints in no activity (orphan)"
         return "not referenced by any touchpoint"
 
-    def lifecycle(self) -> str:
-        """One sentence from the ops: where it is created, read, corrected, erased.
+    def lifecycle(self) -> Text:
+        """The item's life as the code tells it, one phrase per fact.
 
-        This is the item's life as the code tells it, without any judgement
-        (the rights derivation adds that): *created by api:signup, read by
-        6, rectified by admin:people.User (staff), never erased, purged
-        after 30 days by api:task:cart.purge, sent to mapbox*.
+        Facts are grouped by verb and by who performs them (the person, the
+        staff, the system), so the sentence reads *created by the person via
+        api:signup; read by the person via 9 touchpoints, by staff via
+        admin:people.User; deleted by the person via api:deleteAddress; purged
+        7 days after last use, anonymous only (api:task:geo.purge); sent to
+        mapbox*. No judgement here — the rights table adds it.
         """
-        by_op: dict[Op, list[tuple[Touchpoint, OpSpec]]] = {}
+        out = Text()
+        groups: dict[tuple[Op, Scope], list[tuple[Touchpoint, OpSpec]]] = {}
         for tp in self.touchpoints:
             for op in tp.ops_of(self.ref):
-                by_op.setdefault(op.op, []).append((tp, op))
-        parts = [
-            _lifecycle_part(verb, by_op.get(kind, []), detail=detail)
-            for kind, verb, detail in _LIFECYCLE
-            if kind in by_op
-        ]
-        if Op.ERASE not in by_op:
-            parts.insert(min(len(parts), 4), "never erased")
+                groups.setdefault((op.op, tp.scope), []).append((tp, op))
+        first = True
+        for verb, wording in _LIFECYCLE:
+            actors = [
+                (scope, groups[(verb, scope)])
+                for scope in _SCOPE_ORDER
+                if (verb, scope) in groups
+            ]
+            if not actors:
+                continue
+            if not first:
+                out.append("; ", style="dim")
+            first = False
+            out.append(wording, style="bold")
+            if verb is Op.RETENTION_PURGE:
+                cases = [
+                    f" {o.sentence()} ({tp.full_id})"  # type: ignore[attr-defined]
+                    for _, items in actors
+                    for tp, o in items
+                ]
+                out.append(";".join(cases), style="cyan")
+                continue
+            for index, (scope, items) in enumerate(actors):
+                out.append(", " if index else " ", style="dim")
+                out.append(_ACTOR[scope], style=_SCOPE_STYLE[scope])
+                out.append(" via ", style="dim")
+                out.append(_names(items), style="cyan")
         parties = sorted(
-            t.party
-            for tp in self.touchpoints
-            for t in tp.transfers
-            if self.ref in t.data
+            {
+                t.party
+                for tp in self.touchpoints
+                for t in tp.transfers
+                if self.ref in t.data
+            }
         )
         if parties:
-            parts.append(f"sent to {', '.join(dict.fromkeys(parties))}")
-        return ", ".join(parts)
+            if not first:
+                out.append("; ", style="dim")
+            out.append("sent to ", style="bold")
+            out.append(", ".join(parties), style="red")
+        return out
+
+    def lifecycle_text(self) -> str:
+        """Plain form of :meth:`lifecycle` for JSON and tools."""
+        return self.lifecycle().plain
 
     def to_dict(self, ws: Workspace) -> dict[str, Any]:
         """JSON form."""
         return {
             "id": self.ref,
-            "lifecycle": self.lifecycle(),
+            "lifecycle": self.lifecycle_text(),
+            "rights": [
+                {
+                    "right": f.right.value,
+                    "status": f.status.value,
+                    "article": f.article,
+                    "detail": f.detail,
+                    "origin": f.origin,
+                }
+                for f in (self.rights.findings if self.rights else [])
+            ],
             "touchpoints": [
                 {
                     "id": t.full_id,
@@ -850,48 +896,64 @@ def _plain(value: object) -> str | None:
 
 
 def _meta(op: OpSpec) -> str:
-    return ", ".join(f"{k} {v}" for k, v in op.payload().items())
+    return ", ".join(f"{k} {_flat(v)}" for k, v in op.payload().items())
 
 
-_LIFECYCLE: list[tuple[Op, str, bool]] = [
-    (Op.CREATE, "created by", False),
-    (Op.READ, "read by", False),
-    (Op.UPDATE, "updated by", False),
-    (Op.RECTIFY, "rectified by", True),
-    (Op.ACCESS, "accessible via", False),
-    (Op.PORTABILITY, "portable via", True),
-    (Op.ERASE, "erased by", True),
-    (Op.RETENTION_PURGE, "purged by", True),
-    (Op.CONSENT_WITHDRAW, "consent withdrawable via", True),
-    (Op.OBJECT, "objection via", False),
-    (Op.RESTRICT, "restriction via", True),
-    (Op.DELETE, "deleted by", False),
+def _flat(value: object) -> str:
+    """``{'days': 7}`` → ``7 days``; scalars as-is."""
+    if isinstance(value, dict):
+        return " ".join(f"{v} {k}" for k, v in value.items())
+    return str(value)
+
+
+_LIFECYCLE: list[tuple[Op, str]] = [
+    (Op.CREATE, "created by"),
+    (Op.READ, "read by"),
+    (Op.UPDATE, "updated by"),
+    (Op.DELETE, "deleted by"),
+    (Op.PORTABILITY, "exported by"),
+    (Op.CONSENT_WITHDRAW, "consent withdrawn by"),
+    (Op.RETENTION_PURGE, "purged"),
 ]
-"""Order and wording of the lifecycle sentence; the flag says whether the
-op's metadata is worth printing next to the touchpoint."""
+"""Order and wording of the lifecycle sentence."""
+
+_SCOPE_ORDER = (Scope.SUBJECT, Scope.PUBLIC, Scope.STAFF, Scope.SYSTEM)
+_ACTOR = {
+    Scope.SUBJECT: "the person",
+    Scope.PUBLIC: "anyone",
+    Scope.STAFF: "staff",
+    Scope.SYSTEM: "the system",
+}
+_SCOPE_STYLE = {
+    Scope.SUBJECT: "green",
+    Scope.PUBLIC: "yellow",
+    Scope.STAFF: "magenta",
+    Scope.SYSTEM: "blue",
+}
 
 
-def _lifecycle_part(
-    verb: str, items: list[tuple[Touchpoint, OpSpec]], *, detail: bool
-) -> str:
+def _names(items: list[tuple[Touchpoint, OpSpec]]) -> str:
     if len(items) > 3:
-        return f"{verb} {len(items)} touchpoints"
-    names = [
-        t.full_id + (f" ({_meta(o)})" if detail and o.payload() else "")
-        for t, o in items
-    ]
-    return f"{verb} {', '.join(names)}"
+        return f"{len(items)} touchpoints"
+    return ", ".join(
+        tp.full_id + (f" ({_meta(o)})" if o.payload() else "") for tp, o in items
+    )
 
 
 def why(ref: str, ws: Workspace) -> Why:
     """Compute :class:`Why` for a data full id."""
-    return Why(ref, ws.touchpoints_using(ref), ws.activities.holding(ref))
+    return Why(
+        ref, ws.touchpoints_using(ref), ws.activities.holding(ref), rights_of(ref, ws)
+    )
 
 
 @data.command("why")
 @click.argument("patterns", nargs=-1, required=False)
 @click.option("--model", "model", default=None, help="unit:app.Model — every field.")
 @click.option("--manifests", is_flag=True, help="Print the activity files in full.")
+@click.option(
+    "--verbose", "-v", is_flag=True, help="List every touchpoint with its location."
+)
 @click.option(
     "--format",
     "output_format",
@@ -908,6 +970,7 @@ def data_why(
     patterns: tuple[str, ...],
     model: str | None,
     manifests: bool,
+    verbose: bool,
     output_format: str,
     python: str | None,
     root: Path | None,
@@ -939,15 +1002,29 @@ def data_why(
         click.echo(json.dumps([w.to_dict(ws) for w in results], indent=2))
     else:
         for entry in results:
-            console.print(render_why(entry, ws, manifests=manifests))
+            console.print(render_why(entry, ws, manifests=manifests, verbose=verbose))
     ctx.exit(0)
 
 
 VERDICT_STYLE = {"held": "green", "orphan": "red", "unreferenced": "yellow"}
+RIGHT_STYLE = {
+    RightStatus.SATISFIED: "green",
+    RightStatus.EXEMPT: "dim",
+    RightStatus.MISSING: "red",
+    RightStatus.UNKNOWN: "yellow",
+    RightStatus.NOT_APPLICABLE: "dim",
+}
 
 
-def render_why(entry: Why, ws: Workspace, *, manifests: bool) -> Text:
-    """Text block for one ``data why`` result."""
+def render_why(
+    entry: Why, ws: Workspace, *, manifests: bool, verbose: bool = False
+) -> Text:
+    """Text block for one ``data why`` result.
+
+    Header, lifecycle sentence, the activities holding the item, then the
+    rights table. The per-touchpoint list (with locations) is detail, shown
+    with ``verbose`` or when the sentence had to summarise ("9 touchpoints").
+    """
     row = ws.rows[entry.ref]
     out = Text.assemble((entry.ref, "bold"), "  ")
     out.append(
@@ -956,21 +1033,31 @@ def render_why(entry: Why, ws: Workspace, *, manifests: bool) -> Text:
     )
     out.append(f"  store {row.store or '?'}\n", style="dim")
     if entry.touchpoints:
-        out.append(f"  {entry.lifecycle()}\n", style="italic")
-    for tp in entry.touchpoints:
-        out.append("  touchpoint ")
-        out.append(tp.full_id, style="cyan")
         out.append("  ")
-        out.append(describe(list(tp.ops_of(entry.ref))), style="cyan")
-        out.append("  ")
-        out.append(f"{tp.location(ws.root) or ''}\n", style="dim")
+        out.append_text(entry.lifecycle())
+        out.append("\n")
+    if verbose or len(entry.touchpoints) > 3:
+        for tp in entry.touchpoints:
+            out.append("    ")
+            out.append(f"{tp.full_id:<48}", style="cyan")
+            out.append(f"{_ACTOR[tp.scope]:<11}", style=_SCOPE_STYLE[tp.scope])
+            out.append(f"{describe(list(tp.ops_of(entry.ref))):<28}")
+            out.append(f"{tp.location(ws.root) or ''}\n", style="dim")
     for act in entry.activities:
         out.append("  activity ")
-        out.append(act.slug, style="bold green")
-        out.append(f"  {_plain(act.spec.purpose) or '!todo'}  ")
+        out.append(f"{act.slug:<24}", style="bold green")
         basis = _plain(act.spec.legal_basis) or "!todo"
-        retention = _plain(act.spec.retention) or "!todo"
-        out.append(f"{basis}; retention {retention}\n", style="dim")
+        out.append(f"{basis:<22}", style="dim" if basis != "!todo" else "yellow")
+        out.append(f"{_plain(act.spec.purpose) or '!todo'}\n", style="dim")
+    for finding in entry.rights.findings if entry.rights else []:
+        style = RIGHT_STYLE[finding.status]
+        out.append(f"  {finding.right.value:<12}", style=style)
+        out.append(f"{finding.article:<13}", style="dim")
+        out.append(f"{finding.status.value:<10}", style=style)
+        out.append(finding.detail)
+        if finding.origin and finding.status is RightStatus.MISSING:
+            out.append(f" [{finding.origin}]", style="dim")
+        out.append("\n")
     out.append(f"  -> {entry.verdict_text}\n", style=VERDICT_STYLE[entry.verdict])
     if manifests:
         for act in entry.activities:

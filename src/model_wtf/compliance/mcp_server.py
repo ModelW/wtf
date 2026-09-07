@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from mcp.server.mcpserver import MCPServer
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from model_wtf.compliance.data import (
     CONTENT_NAME,
@@ -48,9 +48,16 @@ from model_wtf.compliance.discovery import find_repo_root, load_units, select_ma
 from model_wtf.compliance.knowledge import Knowledge, load_knowledge
 from model_wtf.compliance.ops import OPS_HELP, OpError, OpSpec, parse_ops_json
 from model_wtf.compliance.review import Lock
-from model_wtf.compliance.touchpoints import Transfer, write_manifest
+from model_wtf.compliance.rights import (
+    AGENT_PREFIX,
+    Exemption,
+    Ground,
+    Right,
+    set_right,
+)
+from model_wtf.compliance.touchpoints import Scope, Transfer, write_manifest
 from model_wtf.compliance.workspace import Workspace, load_workspace
-from model_wtf.compliance.yaml_io import todo_text
+from model_wtf.compliance.yaml_io import Missing, todo_text
 from model_wtf.introspect.runner import IntrospectionFailed
 
 if TYPE_CHECKING:
@@ -440,8 +447,15 @@ class Tools:
         category: str,
         reason: str,
         store: str | None = None,
+        transient: bool = True,
     ) -> str:
-        """``data_add_manual``: declare transient data the ORM never persists."""
+        """``data_add_manual``: declare data the ORM has no row for.
+
+        ``transient`` (the default) means the project never keeps the value:
+        storage-side rights (access, rectification, erasure, retention) do
+        not apply, only transfers. Pass ``False`` with a ``store`` for data
+        kept outside the ORM (a cache, a queue payload).
+        """
         unit = self.unit(unit_id)
         kn = self.knowledge
         if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", item_id):
@@ -480,6 +494,11 @@ class Tools:
         ]
         if store:
             lines.append(f"store: {store}")
+        if transient and store:
+            msg = "a transient item has no store; pass transient=False for kept data"
+            raise ValueError(msg)
+        if transient:
+            lines.append("transient: true")
         lines.append(f"reason: {_yaml_str(reason.strip())}")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -488,14 +507,85 @@ class Tools:
         _log_activity("manual", id=f"{unit_id}:{item_id}", category=category)
         return f"created {unit_id}:{item_id} ({path.relative_to(self.root)})"
 
+    def data_flag(
+        self,
+        ref: str,
+        right: str,
+        verdict: str,
+        note: str,
+        ground: str | None = None,
+    ) -> str:
+        """``data_flag``: record what the code says about one right of one item.
+
+        ``verdict: missing`` writes ``rights.<right>: !missing "[agent] note"``;
+        ``verdict: exempt`` writes ``{exempt: <ground>, note}``. Both land in
+        the item's data file, other keys untouched.
+        """
+        ws = self.workspace()
+        row = ws.rows.get(ref)
+        if row is None:
+            msg = f"no data item {ref!r}; data_search finds ids"
+            raise ValueError(msg)
+        if not row.pii:
+            msg = f"{ref} is not personal data; rights do not apply"
+            raise ValueError(msg)
+        try:
+            right_value = Right(right)
+        except ValueError:
+            names = ", ".join(r.value for r in Right)
+            msg = f"unknown right {right!r}; one of {names}"
+            raise ValueError(msg) from None
+        if not note.strip():
+            msg = "a note citing file:line is required"
+            raise ValueError(msg)
+        value: Exemption | Missing
+        if verdict == "missing":
+            value = Missing(f"{AGENT_PREFIX} {note.strip()}")
+        elif verdict == "exempt":
+            if ground is None:
+                names = ", ".join(g.value for g in Ground)
+                msg = f"verdict exempt needs a ground: {names}"
+                raise ValueError(msg)
+            try:
+                value = Exemption(exempt=Ground(ground), note=note.strip())
+            except ValueError as exc:
+                msg = f"{ref}: {exc}"
+                raise ValueError(msg) from exc
+        else:
+            msg = "verdict must be missing or exempt"
+            raise ValueError(msg)
+        unit = self.unit(row.unit)
+        path = unit.folder / DATA_DIR / f"{row.id}.yaml"
+        try:
+            set_right(path, right_value, value)
+        except ValidationError as exc:
+            msg = f"{ref}: {exc.errors()[0]['msg']}"
+            raise ValueError(msg) from exc
+        self.data(unit, refresh=True)
+        self.workspace(refresh=True)
+        _log_activity("flag", id=ref, right=right, verdict=verdict, ground=ground)
+        return f"{ref}: {right} {verdict}" + (f" ({ground})" if ground else "")
+
     def touchpoint_set_data(  # noqa: C901 - validation of two lists, flat
         self,
         ref: str,
         data: list[DataRef],
         reason: str,
         transfers: list[ExportDecision] | None = None,
+        scope: str | None = None,
     ) -> str:
-        """``touchpoint_set_data``: write a touchpoint's manifest."""
+        """``touchpoint_set_data``: write a touchpoint's manifest.
+
+        ``scope`` (subject | staff | public | system) says who the touchpoint
+        serves; when omitted the inference from auth classes stands.
+        """
+        scope_value: Scope | None = None
+        if scope is not None:
+            try:
+                scope_value = Scope(scope)
+            except ValueError:
+                msg = "scope must be subject, staff, public or system"
+                raise ValueError(msg) from None
         ws = self.workspace()
         tp = ws.all_touchpoints.get(ref)
         if tp is None:
@@ -553,6 +643,7 @@ class Tools:
             ops=ops,
             transfers=exports,
             note=reason.strip(),
+            scope=scope_value,
         )
         self.workspace(refresh=True)
         _log_activity(
@@ -618,9 +709,23 @@ class Tools:
         name: str,
         website: str | None = None,
         country: str | None = None,
+        safeguard: str | None = None,
+        dpf_certified: bool | None = None,
     ) -> str:
         """``party_add``: a new external party with ``!todo`` contact details."""
         from model_wtf.compliance.init_cmd import PartySpec
+
+        if safeguard is not None and safeguard not in (
+            "sccs",
+            "bcr",
+            "dpf",
+            "derogation",
+        ):
+            msg = "safeguard must be sccs, bcr, dpf or derogation"
+            raise ValueError(msg)
+        if safeguard == "dpf" and not dpf_certified:
+            msg = "safeguard dpf needs dpf_certified: true (check the DPF list)"
+            raise ValueError(msg)
 
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", party_id):
             msg = f"party id {party_id!r} must be kebab-case (e.g. `mapbox`)"
@@ -632,7 +737,13 @@ class Tools:
         if country is not None and not re.fullmatch(r"[A-Z]{2}", country):
             msg = "country must be ISO 3166-1 alpha-2 (e.g. US); omit when unsure"
             raise ValueError(msg)
-        spec = PartySpec(name=name.strip(), country=country, website=website)
+        spec = PartySpec(
+            name=name.strip(),
+            country=country,
+            website=website,
+            safeguard=safeguard,
+            dpf_certified=dpf_certified,
+        )
         folder.mkdir(parents=True, exist_ok=True)
         path.write_text(spec.to_yaml(), encoding="utf-8")
         _log_activity("party", id=party_id, name=name.strip())
@@ -682,13 +793,21 @@ class Tools:
         self,
         slug: str,
         name: str,
-        purpose: str,
+        purpose: Verdict,
         touchpoints: list[str],
         reason: str,
-        legal_basis: str | None = None,
+        legal_basis: Verdict | None = None,
         data_subjects: list[str] | None = None,
+        basis_note: str | None = None,
+        consent_record: Verdict | None = None,
+        interest: str | None = None,
     ) -> str:
-        """``activity_create``: a new activity file; unknown fields stay !todo."""
+        """``activity_create``: a new activity file; unknown fields stay !todo.
+
+        ``purpose``, ``legal_basis`` and ``consent_record`` accept a
+        ``{"missing": "why"}`` verdict when the agent established that
+        nothing lawful applies (no basis fits, no proof of consent exists).
+        """
         from model_wtf.compliance.activities import LegalBasis, write_activity
 
         ws = self.workspace()
@@ -698,8 +817,9 @@ class Tools:
         if slug in ws.activities.items:
             msg = f"activity {slug!r} exists; use activity_add_touchpoints"
             raise ValueError(msg)
-        if legal_basis is not None and legal_basis not in {b.value for b in LegalBasis}:
-            msg = f"unknown legal_basis {legal_basis!r}; use " + ", ".join(
+        basis = _verdict(legal_basis)
+        if isinstance(basis, str) and basis not in {b.value for b in LegalBasis}:
+            msg = f"unknown legal_basis {basis!r}; use " + ", ".join(
                 b.value for b in LegalBasis
             )
             raise ValueError(msg)
@@ -707,22 +827,33 @@ class Tools:
         if unknown:
             msg = f"unknown touchpoints: {', '.join(unknown)}"
             raise ValueError(msg)
-        if not (name.strip() and purpose.strip() and reason.strip()):
+        purpose_value = _verdict(purpose)
+        if not (name.strip() and purpose_value and reason.strip()):
             msg = "name, purpose and reason are required"
+            raise ValueError(msg)
+        record = _verdict(consent_record)
+        if isinstance(record, str) and record not in ws.rows:
+            msg = f"consent_record {record!r} is not a data item"
             raise ValueError(msg)
         path = write_activity(
             ws.shared,
             slug,
             name=name.strip(),
-            purpose=purpose.strip(),
-            legal_basis=legal_basis,
+            purpose=purpose_value,
+            legal_basis=basis,
             touchpoints=touchpoints,
             data_subjects=data_subjects,
+            basis_note=basis_note,
+            consent_record=record,
+            interest=interest,
         )
         assert path is not None  # noqa: S101 - existence checked above
         self.workspace(refresh=True)
         _log_activity(
-            "activity", id=slug, touchpoints=len(touchpoints), basis=legal_basis
+            "activity",
+            id=slug,
+            touchpoints=len(touchpoints),
+            basis=basis if isinstance(basis, str) else repr(basis),
         )
         return f"created activity {slug} with {len(touchpoints)} touchpoint(s)"
 
@@ -1045,7 +1176,9 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
             "query) or kept outside the ORM (cache, queue payload). Processing "
             "personal data counts even without storage; non-personal transient "
             "values are not tracked. {unit, id, description, pii, sensitivity, "
-            "category, reason, store?}; returns the ref for touchpoint_set_data."
+            "category, reason, store?, transient?=true}; transient=false with a "
+            "store for data kept outside the ORM. Returns the ref for "
+            "touchpoint_set_data."
         ),
     )
     def data_add_manual(
@@ -1057,10 +1190,19 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
         category: str,
         reason: str,
         store: str | None = None,
+        transient: bool = True,
     ) -> str:
         return _guard(
             lambda: tools.data_add_manual(
-                unit, id, description, pii, sensitivity, category, reason, store
+                unit,
+                id,
+                description,
+                pii,
+                sensitivity,
+                category,
+                reason,
+                store,
+                transient,
             )
         )
 
@@ -1074,7 +1216,10 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
             "model. An empty list means 'checked, touches no item'. `transfers` "
             "lists what leaves to another organisation: [{party, data[], "
             "purpose?}] for every external API/provider the code calls (party "
-            "must exist: parties_list / party_add). `reason` cites file:line."
+            "must exist: parties_list / party_add). `reason` cites file:line. "
+            "`scope` = who the touchpoint serves: subject (an authenticated end "
+            "user on their own data), staff (back-office), public (anonymous), "
+            "system (task); give it when touchpoint_show's inference is wrong."
         ),
     )
     def touchpoint_set_data(
@@ -1082,10 +1227,36 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
         data: list[DataRef],
         reason: str,
         transfers: list[ExportDecision] | None = None,
+        scope: str | None = None,
     ) -> str:
         return _guard(
-            lambda: tools.touchpoint_set_data(touchpoint, data, reason, transfers)
+            lambda: tools.touchpoint_set_data(
+                touchpoint, data, reason, transfers, scope
+            )
         )
+
+    @server.tool(
+        name="data_flag",
+        description=(
+            "Record what the code says about one right of one PERSONAL item. "
+            "verdict=missing: the right is unmet (a deletion view that only "
+            "deactivates; a purge whose duration contradicts a setting) — writes "
+            "`rights.<right>: !missing` with your note. verdict=exempt: the code "
+            "proves a ground (`derived` for a computed column, "
+            "`not_provided_by_subject` for a system-generated value, "
+            "`legal_obligation` with the law in the note). right: access, "
+            "rectify, erase, retention, portability, object, consent, transfer. "
+            "`note` cites file:line."
+        ),
+    )
+    def data_flag(
+        ref: str,
+        right: str,
+        verdict: str,
+        note: str,
+        ground: str | None = None,
+    ) -> str:
+        return _guard(lambda: tools.data_flag(ref, right, verdict, note, ground))
 
     @server.tool(
         name="parties_list",
@@ -1107,8 +1278,14 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
         name: str,
         website: str | None = None,
         country: str | None = None,
+        safeguard: str | None = None,
+        dpf_certified: bool | None = None,
     ) -> str:
-        return _guard(lambda: tools.party_add(id, name, website, country))
+        return _guard(
+            lambda: tools.party_add(
+                id, name, website, country, safeguard, dpf_certified
+            )
+        )
 
     @server.tool(
         name="activities_graph",
@@ -1126,22 +1303,39 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
         name="activity_create",
         description=(
             "Create a GDPR processing activity: {slug (kebab), name, purpose, "
-            "touchpoints[], reason, legal_basis?, data_subjects?}. Leave out what "
-            "you do not know (it becomes !todo); never invent retention or basis."
+            "touchpoints[], reason, legal_basis?, data_subjects?, basis_note?, "
+            "consent_record?, interest?}. legal_basis: contract, consent, "
+            "legal_obligation, legitimate_interests, no_pii (handles no personal "
+            "item; verified). purpose, legal_basis and consent_record accept "
+            '{"missing": "why, citing code"} when you established that nothing '
+            "lawful applies. Leave out what you could not establish (it becomes "
+            "!todo); never invent."
         ),
     )
     def activity_create(
         slug: str,
         name: str,
-        purpose: str,
+        purpose: Verdict,
         touchpoints: list[str],
         reason: str,
-        legal_basis: str | None = None,
+        legal_basis: Verdict | None = None,
         data_subjects: list[str] | None = None,
+        basis_note: str | None = None,
+        consent_record: Verdict | None = None,
+        interest: str | None = None,
     ) -> str:
         return _guard(
             lambda: tools.activity_create(
-                slug, name, purpose, touchpoints, reason, legal_basis, data_subjects
+                slug,
+                name,
+                purpose,
+                touchpoints,
+                reason,
+                legal_basis,
+                data_subjects,
+                basis_note,
+                consent_record,
+                interest,
             )
         )
 
@@ -1201,6 +1395,23 @@ def _guard(call: Callable[[], str]) -> str:
 
 def _yn(value: bool | None) -> str:
     return todo_text() if value is None else ("yes" if value else "no")
+
+
+Verdict = str | dict[str, str]
+"""A value, or ``{"missing": "why"}`` when the agent established there is none."""
+
+
+def _verdict(value: Verdict | None) -> str | Missing | None:
+    """Turn a tool argument into the value to write (a str or a ``!missing``)."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value.strip()
+    why = (value.get("missing") or "").strip()
+    if set(value) != {"missing"} or not why:
+        msg = 'a verdict is a string or {"missing": "why, citing code"}'
+        raise ValueError(msg)
+    return Missing(f"{AGENT_PREFIX} {why}")
 
 
 def _yaml_str(value: str) -> str:

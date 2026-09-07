@@ -13,3 +13,12 @@ fields:
   description: {pii: false, sensitivity: internal, category: technical, fixed: false}
   uploaded_by_user: {pii: true, sensitivity: personal, category: behavioural, fixed: true}
 fields_default: {pii: false, sensitivity: internal, category: technical, fixed: true}
+rights:
+  access: {exempt: derived}
+  # Editorial metadata of the CMS: who authored, locked, requested or
+  # approved. It documents the content's history; the user reference is
+  # nulled when the account goes (on_delete=SET_NULL), which is the
+  # erasure path.
+  rectify: {exempt: derived}
+  erase: {exempt: contract_active, note: "follows the staff account: the FK is nulled when the user is deleted"}
+  retention: {exempt: contract_active, note: "lives with the content it documents and with the staff account"}

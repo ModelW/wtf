@@ -329,7 +329,9 @@ def _route_touchpoints():
                         "params": facts.get("params", []),
                         "summary": facts.get("summary"),
                         "defers": _defers(fn),
-                        "hints": _method_hints([method]) + _body_hints(fn),
+                        "hints": _method_hints([method])
+                        + _body_hints(fn)
+                        + _scope_hints(fn),
                     }
                 )
             continue
@@ -361,7 +363,9 @@ def _route_touchpoints():
                 "params": params,
                 "summary": None,
                 "defers": _defers(target),
-                "hints": _method_hints(methods) + _body_hints(target),
+                "hints": _method_hints(methods)
+                + _body_hints(target)
+                + _scope_hints(target),
             }
         )
     return out
@@ -403,7 +407,7 @@ def _defers(func):
 
 TASK_NAME_HINTS = (
     (re.compile(r"purge|clean|expire|prune|retention", re.I), "retention_purge"),
-    (re.compile(r"anonymi[sz]e|erase|forget|gdpr", re.I), "erase"),
+    (re.compile(r"anonymi[sz]e|erase|forget|gdpr", re.I), "delete(mode=anonymise?)"),
     (re.compile(r"export|portab|download_data|takeout", re.I), "portability"),
     (re.compile(r"delete|remove", re.I), "delete"),
 )
@@ -445,8 +449,38 @@ def _body_hints(func):
         elif name in ("timedelta", "relativedelta"):
             hints.append(f"after: `{ast.unparse(node)}`")
         elif re.search(r"anonymi[sz]e|scrub|redact|forget", name, re.I):
-            hints.append(f"erase: `{name}()` called (anonymise?)")
+            hints.append(f"delete(mode=anonymise): `{name}()` called")
+    # ``settings.SOME_MAX_AGE`` read in the body: the real retention policy
+    # lives in that setting, not in a literal.
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "settings"
+            and re.search(r"AGE|TTL|RETENTION|EXPIR|DAYS|KEEP", node.attr)
+        ):
+            hints.append(f"after: `settings.{node.attr}`")
     return sorted(set(hints))
+
+
+USER_ACCESS = re.compile(r"request\.(user|auth)\b|self\.request\.user\b")
+STAFF_ACCESS = re.compile(r"is_staff|is_superuser|staff_member_required|IsAdminUser")
+
+
+def _scope_hints(func):
+    """Who the view serves, from its body: ``request.user`` means the caller
+    is an authenticated person acting on their own data (``subject``) unless a
+    staff check appears too. Complements the auth-class inference."""
+    try:
+        src = inspect.getsource(inspect.unwrap(func))
+    except (OSError, TypeError):
+        return []
+    hints = []
+    if STAFF_ACCESS.search(src):
+        hints.append("scope staff: staff check in the body")
+    elif USER_ACCESS.search(src):
+        hints.append("scope subject: request.user read in the body")
+    return hints
 
 
 def _method_hints(methods):
@@ -454,9 +488,9 @@ def _method_hints(methods):
     if "POST" in methods:
         out.append("create: POST")
     if "PUT" in methods or "PATCH" in methods:
-        out.append("update|rectify: PUT/PATCH")
+        out.append("update: PUT/PATCH")
     if "DELETE" in methods:
-        out.append("delete|erase: DELETE")
+        out.append("delete: DELETE")
     return out
 
 
@@ -469,8 +503,8 @@ def _admin_hints(model_admin):
     hints = []
     for perm, op in (
         ("has_add_permission", "create"),
-        ("has_change_permission", "rectify(by=staff)|update"),
-        ("has_delete_permission", "erase(by=staff)|delete"),
+        ("has_change_permission", "update"),
+        ("has_delete_permission", "delete"),
     ):
         method = getattr(type(model_admin), perm, None)
         overridden = method is not None and perm in vars(type(model_admin))
