@@ -77,6 +77,11 @@ class Party(StrictModel):
         description="Whether the party is on the EU-US Data Privacy Framework list "
         "(required for safeguard: dpf)",
     )
+    dpa: NonEmpty | None = Field(
+        default=None,
+        description="Where the data processing agreement with this party lives "
+        "(URL or document reference)",
+    )
 
 
 class App(StrictModel):
@@ -94,6 +99,12 @@ class App(StrictModel):
     controller: Slug | Marker = Field(description="Party id of the controller")
     processor: Slug | Marker | None = Field(
         default=None, description="Party id of the processor, if any"
+    )
+    large_scale: bool | Marker | None = Field(
+        default=None,
+        description="Whether the product processes personal data at large scale "
+        "(Art. 35(3)(b)): true, false, or !todo while unknown. Absent means "
+        "false: a DPIA is then only required for special-category data",
     )
 
 

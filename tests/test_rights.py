@@ -507,6 +507,7 @@ def test_third_country_transfer_needs_a_safeguard(repo: Path) -> None:
     report = run_check(repo, strict=False)
     todo = {d.subject for d in report.by_section()[Section.TODO]}
     assert f"{EMAIL}#transfer" in todo
+
     party.write_text(party.read_text().replace("country: !todo", "country: US"))
     assert "transfer-safeguard-missing" in {
         d.code for d in run_check(repo, strict=False).diagnostics
@@ -523,9 +524,23 @@ def test_third_country_transfer_needs_a_safeguard(repo: Path) -> None:
     assert _status(repo, EMAIL)[Right.TRANSFER][0] is RightStatus.SATISFIED
 
 
+def test_party_nothing_refers_to_is_a_question(repo: Path) -> None:
+    """A vendor listed "just in case" is a Todo: declare the transfer or
+    delete the file. Controller, processor, recipients and transfer
+    parties are in use."""
+    tools = Tools(repo)
+    tools.party_add("youtube", "YouTube", country="US")
+    report = run_check(repo, strict=False)
+    todo = {d.subject for d in report.by_section()[Section.TODO]}
+    assert "parties/youtube.yaml" in todo
+    assert "parties/acme.yaml" not in todo
+    assert "parties/with-madrid.yaml" not in todo
+
+
 def test_dpia_reference_when_the_trigger_fires(repo: Path) -> None:
     """Special-category data (``always``) is a gap; ``large_scale`` (merely
-    confidential data) is a question for a human, not a finding."""
+    confidential data) only matters when app.yaml says the product is
+    large scale — a product-level answer, not one question per activity."""
     _tp(repo, "getCustomer", f"data: [{IBAN}]\n")
     _activity(
         repo,
@@ -535,7 +550,16 @@ def test_dpia_reference_when_the_trigger_fires(repo: Path) -> None:
     )
     report = run_check(repo, strict=False)
     assert "dpia-missing" not in {d.code for d in report.diagnostics}
-    assert "billing.yaml#dpia_reference" in {d.subject for d in report.diagnostics}
+    assert "billing.yaml#dpia_reference" not in {d.subject for d in report.diagnostics}
+    app = repo / "compliance" / "app.yaml"
+    app.write_text(app.read_text() + "large_scale: true\n")
+    assert "dpia-missing" in {d.code for d in run_check(repo, strict=False).diagnostics}
+    app.write_text(app.read_text().replace("large_scale: true", "large_scale: !todo"))
+    report = run_check(repo, strict=False)
+    assert "dpia-missing" not in {d.code for d in report.diagnostics}
+    # The open question shows once, on app.yaml.
+    assert "app.yaml#large_scale" in {d.subject for d in report.diagnostics}
+    app.write_text(app.read_text().replace("large_scale: !todo\n", ""))
     _tp(repo, "checkout", "data: [api:shop.Customer.allergies]\n")
     _activity(
         repo,

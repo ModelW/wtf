@@ -40,7 +40,13 @@ Repository: `{repo}`. Paths in tool output are relative to it.
    Scaleway FR, OVH FR, Brevo FR, Mailgun US; give it, the transfer check
    needs it). Then list it under `transfers` with the refs that
    are actually sent (an address geocoded, an email address mailed to) and
-   a one-line `purpose`.
+   a one-line `purpose`. Only organisations the code you read actually
+   calls: never a party for every provider a library *could* talk to (the
+   oEmbed provider list, a payment SDK's bank list).
+   NOT a transfer: writing to the project's own database, file storage,
+   cache or queue — whoever hosts them (S3-compatible bucket, managed
+   Postgres) is the hosting layer, covered elsewhere; that is a `store`,
+   already known from the inventory. Do not dig up the hosting provider.
 6. Call `touchpoint_set_data` once with every ref and its `ops`, `transfers`
    when anything leaves, and a `reason` citing file:line.
    - An endpoint that touches no inventory item at all (a health check that
@@ -150,9 +156,10 @@ is not a finding (another touchpoint may serve it): the tool derives that.
   serializers, forms, services and templates. Only when the code is a
   framework view you genuinely cannot trace, declare what the shapes and the
   model prove and say `partial` in the reason.
-- `transfers` is for the project's data sent to another organisation
-  (personal or not). Map tiles, fonts, CDN assets loaded by a browser are
-  not transfers of the project's data; do not declare them.
+- `transfers` is for the project's data sent to another organisation's
+  API (personal or not). Map tiles, fonts, CDN assets loaded by a browser
+  are not transfers of the project's data; neither is the project's own
+  storage/database/cache, wherever it is hosted. Do not declare them.
 - A request field that lands in a model field IS that model field: declare
   the model field, not a manual item.
 - A response that serialises a model exposes its fields: declare the

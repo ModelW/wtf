@@ -316,7 +316,41 @@ class _Derivation:
                             hint="fill the party's country in compliance/parties/",
                         )
                     )
+        diagnostics.extend(self._unused_parties())
         return diagnostics, items
+
+    def _unused_parties(self) -> list[Diagnostic]:
+        """A party file nothing refers to is a question: a transfer the
+        reviewer forgot to declare, or a vendor listed "just in case"
+        (every oEmbed provider a library knows about) to delete."""
+        used: set[str] = set()
+        app = self.ws.app
+        if app is not None:
+            used.update(
+                ref for ref in (app.controller, app.processor) if isinstance(ref, str)
+            )
+        for tp in self.ws.all_touchpoints.values():
+            used.update(t.party for t in tp.transfers)
+        for activity in self.ws.activities.items.values():
+            spec = activity.spec
+            used.update(spec.recipients)
+            used.update(
+                ref for ref in (spec.controller, spec.processor) if isinstance(ref, str)
+            )
+        parties_dir = self.ws.shared / "parties"
+        return [
+            Diagnostic(
+                Severity.WARNING,
+                "todo",
+                f"parties/{party_id}.yaml: no transfer, activity or role refers "
+                "to this party",
+                "shared",
+                parties_dir / f"{party_id}.yaml",
+                subject=f"parties/{party_id}.yaml",
+                hint="declare the transfer that sends it data, or delete the file",
+            )
+            for party_id in sorted(set(self.ws.parties) - used)
+        ]
 
     def _manual_reviews(self, row: Row) -> list[Diagnostic]:
         """One Review line per right resting on a ``manual`` ground."""
@@ -805,19 +839,22 @@ class _Derivation:
                     "special-category data (Art. 35) but no `dpia_reference`",
                 )
             ]
-        return [
-            Diagnostic(
-                Severity.WARNING,
-                "todo",
-                f"{activity.path.name}: dpia_reference is not set — confidential "
-                "data; a DPIA is due if the processing is large-scale (Art. 35)",
-                "shared",
-                activity.path,
-                subject=f"{activity.path.name}#dpia_reference",
-                hint="Is this processing large-scale? If so, where is the DPIA? "
-                "Else set `dpia_reference: not-required` with the reason",
-            )
-        ]
+        # Confidential data only triggers a DPIA at large scale, which is
+        # a product-level answer (app.yaml), not one per activity.
+        large_scale = self.ws.large_scale
+        if large_scale is False:
+            return []
+        if large_scale is True:
+            return [
+                self._activity_diag(
+                    activity,
+                    "dpia-missing",
+                    "confidential data processed at large scale (app.yaml "
+                    "large_scale: true, Art. 35) but no `dpia_reference`",
+                )
+            ]
+        # ``!todo``: the question is already asked once on app.yaml.
+        return []
 
     def _activity_diag(
         self,

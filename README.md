@@ -54,11 +54,15 @@ established non-compliance, which always fails the gate).
 ### Files
 
 - `compliance/app.yaml` — `name`, `description`, `controller` (party id, the
-  client) and optional `processor` (party id, the agency).
+  client), optional `processor` (party id, the agency) and `large_scale`
+  (Art. 35(3)(b); absent means no: a DPIA is then only required for
+  special-category data; `!todo` asks the question once).
 - `compliance/parties/<id>.yaml` — `name`, `country` (ISO alpha-2),
-  `address`, `email`; optional `phone`, `website`, `registration`, `dpo` and
-  `representative` contact blocks. A party is role-less: controller, processor
-  or recipient is decided per processing activity.
+  `address`, `email`; optional `phone`, `website`, `registration`, `dpa`
+  (where the processing agreement lives), `safeguard`/`dpf_certified`,
+  `dpo` and `representative` contact blocks. A party is role-less:
+  controller, processor or recipient is decided per processing activity. A
+  party nothing refers to (no transfer, no role, no `recipients`) is a Todo.
 
 ### Unit discovery
 
@@ -278,10 +282,12 @@ from auth classes, `request.user` in the body and admin namespaces, or
 declared in the manifest). `write`, `rectify`, `access`, `erase`, `object`,
 `restrict` still load, folded onto the fact they imply with an
 `op-ambiguous` warning. `transfers:`
-lists what leaves to another organisation — `- {party: mapbox, data: [...],
-purpose: ...}`, the party being a `compliance/parties/` id, which is where
-the register's recipients come from (`exporting:` still loads, with a
-deprecation warning); plus `ignore`, `note`. Every inventory item the code
+lists what leaves to another organisation's API — `- {party: mapbox, data:
+[...], purpose: ...}`, the party being a `compliance/parties/` id, which is
+where the register's recipients come from (`exporting:` still loads, with a
+deprecation warning); plus `ignore`, `note`. The project's own database,
+file storage, cache and queue are *stores*, not transfers, whoever hosts
+them: hosting is a separate layer, taken as adequate here. Every inventory item the code
 touches is listed, personal or not: the register filters on `pii`
 downstream, the data-flow model needs all of it. A touchpoint is
 **pending** until it has a `data` key — an explicit `[]` means "touches no
@@ -366,7 +372,7 @@ item in every activity that handles it**, whether each right is served
 | objection (Art. 21) | legitimate-interests activities: a `subject` update/delete on one of its items (an opt-out) | `objection-missing` |
 | consent (Art. 7) | consent activities: `consent.record` created with `consent_for`, and a `consent_withdraw: {for: slug}` op | `consent-proof-missing`, `consent-withdrawal-missing` |
 | transfers (Ch. V) | party outside the EEA / adequacy list (`knowledge/adequacy.yaml`) carries `safeguard: sccs|bcr|dpf|derogation` (`dpf` with `dpf_certified: true`); an unknown country is a Todo | `transfer-safeguard-missing` |
-| DPIA (Art. 35) | special-category data (`always`) → `dpia_reference` on the activity; `large_scale` (confidential data) is a Todo question | `dpia-missing` |
+| DPIA (Art. 35) | special-category data (`always`) → `dpia_reference` on the activity; confidential data (`large_scale`) only when `app.yaml` says `large_scale: true` | `dpia-missing` |
 
 When a staff screen performs the op but no self-service does, the finding
 says so (*no self-service; staff can via admin:people.User — exempt

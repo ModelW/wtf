@@ -326,14 +326,12 @@ def test_activities_derivation_and_check(repo: Path) -> None:
     # retention (bare reads: nobody typed them in, so no rectification).
     missing = sections[Section.MISSING]
     assert missing.count("missing") == 1
-    # Confidential data is a DPIA *question* (large scale?), not a finding.
+    # Confidential data only calls for a DPIA at large scale (app.yaml).
     assert "dpia-missing" not in missing
-    assert "ordering.yaml#dpia_reference" in {d.subject for d in report.diagnostics}
     assert {"access-missing", "erasure-missing", "retention-missing"} <= set(missing)
     assert "rectification-missing" not in missing
     assert "portability-missing" not in missing  # no subject-facing create
-    # The hand-written !todo plus the DPIA question on ``ordering``.
-    assert sections[Section.TODO] == ["todo", "todo"]
+    assert sections[Section.TODO] == ["todo"]
     # admin:shop.Customer now belongs to ``support``; the front unit's
     # touchpoints and the api data are still pending.
     assert sorted(sections[Section.REVIEW]) == [
