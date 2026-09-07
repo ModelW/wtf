@@ -116,6 +116,32 @@ def slugify(value: str) -> str:
     return slug or "party"
 
 
+WORKFLOW = """\
+# The compliance gate: a pull request may not introduce compliance findings.
+# Pre-existing ones are listed, not failed. Locally: `model-wtf compliance
+# ghate --merge-into develop`.
+
+name: compliance
+
+on: [pull_request]
+
+jobs:
+    gate:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+                  # The PR branch itself (not the merge ref): the challenger
+                  # commits what it re-opens onto it.
+                  ref: ${{ github.event.pull_request.head.ref }}
+            - uses: ModelW/wtf@v1
+              with:
+                  # Optional: enables the challenger agent.
+                  openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
+"""
+
+
 def load_default_processor() -> PartySpec | None:
     """The agency's own party from the user-level config, if configured.
 
@@ -166,6 +192,7 @@ def run_init(
     manifest_units: list[tuple[str, str]] | None = None,
     custom_sensitivity: bool = False,
     custom_categories: bool = False,
+    workflow: bool = True,
 ) -> InitResult:
     """Scaffold ``root``; see module docstring for the exact file set.
 
@@ -177,6 +204,9 @@ def run_init(
     custom_sensitivity, custom_categories
         Copy the built-in knowledge folder into ``compliance/`` so the repo
         can edit, rename or extend it (see ``replaces`` in the README).
+    workflow
+        Also write ``.github/workflows/compliance.yml`` running the gate on
+        pull requests (never overwrites an existing file).
     """
     result = InitResult()
     shared = root / SHARED_FOLDER
@@ -188,6 +218,8 @@ def run_init(
     if processor is not None and processor.slug != controller.slug:
         _write(parties / f"{processor.slug}.yaml", processor.to_yaml(), result)
 
+    if workflow:
+        _write(root / ".github" / "workflows" / "compliance.yml", WORKFLOW, result)
     if custom_sensitivity:
         _copy_knowledge(SENSITIVITY_DIR, shared, result)
     if custom_categories:

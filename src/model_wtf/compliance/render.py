@@ -12,17 +12,19 @@ per thing to do, with the command that resolves it after an arrow.
 from __future__ import annotations
 
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import TYPE_CHECKING
 
 from rich.table import Table
 from rich.text import Text
 
+from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.report import ScopeStatus, Section, Severity
 
 if TYPE_CHECKING:
     from rich.console import Console
 
+    from model_wtf.compliance.gate import Finding, GateResult
     from model_wtf.compliance.report import Diagnostic, Report
 
 _STATUS_STYLE = {
@@ -323,4 +325,143 @@ def _escape(value: str) -> str:
     return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
-__all__ = ["Severity", "render_github", "render_json", "render_text", "render_todo"]
+__all__ = [
+    "Severity",
+    "render_gate_github",
+    "render_gate_json",
+    "render_gate_text",
+    "render_github",
+    "render_json",
+    "render_text",
+    "render_todo",
+]
+
+
+# ---------------------------------------------------------------------------
+# gate
+# ---------------------------------------------------------------------------
+
+
+def render_gate_text(result: GateResult, console: Console) -> None:
+    """The gate's verdict for a terminal: introduced, fixed, then the rest.
+
+    Pre-existing findings are folded per check code (they were already in
+    the to-do list; this run is about the change), introduced ones are
+    listed one per line with the file and the hint.
+    """
+    console.print(
+        Text.assemble(
+            ("Compliance gate", "bold"),
+            f"  base {result.base_ref}",
+        )
+    )
+    for warning in result.warnings:
+        console.print(Text.assemble(("  approximate: ", "yellow"), warning))
+    console.print()
+    if result.head.by_section()[Section.ERRORS]:
+        console.print(Text("Errors — fix the files", style="bold red"))
+        for line, hint in _lines(result.head, result.head.by_section()[Section.ERRORS]):
+            console.print(
+                Text.assemble("  ", line, (f"  → {hint}", "dim") if hint else "")
+            )
+        console.print()
+    if result.introduced:
+        console.print(
+            Text(
+                f"Introduced — {len(result.introduced)} finding(s) this change adds",
+                style="bold red",
+            )
+        )
+        for finding in result.introduced:
+            console.print(_gate_line(result, finding))
+        console.print()
+    if result.fixed:
+        console.print(Text(f"Fixed — {len(result.fixed)}", style="bold green"))
+        for finding in result.fixed:
+            console.print(
+                Text.assemble(
+                    "  ",
+                    (finding.scope, "bold"),
+                    f" {finding.code} {finding.subject}",
+                    style="dim",
+                )
+            )
+        console.print()
+    if result.pre_existing:
+        counts = Counter(f.code for f in result.pre_existing)
+        folded = ", ".join(f"{n} {code}" for code, n in sorted(counts.items()))
+        console.print(
+            Text.assemble(
+                (f"Pre-existing — {len(result.pre_existing)}", "bold dim"),
+                (f"  ({folded}); `compliance check` lists them", "dim"),
+            )
+        )
+        console.print()
+    console.print(_gate_verdict(result))
+
+
+def _gate_verdict(result: GateResult) -> Text:
+    code = result.exit_code
+    if code is ExitCode.DECLARATION_ERROR:
+        verdict, style = "declaration errors", "red"
+    elif result.introduced:
+        verdict, style = f"{len(result.introduced)} introduced", "red"
+    else:
+        verdict, style = "nothing introduced", "green"
+    return Text.assemble((verdict, style), (f"  (exit {int(code)})", "dim"))
+
+
+def _gate_line(result: GateResult, finding: Finding) -> Text:
+    diag = finding.diagnostic
+    where = result.head.display_path(diag.path) if diag.path else ""
+    line = Text.assemble(
+        "  ",
+        (finding.scope, "bold"),
+        f" {finding.code} ",
+        (finding.subject, "bold"),
+    )
+    if where:
+        line.append(f"  {where}", style="dim")
+    line.append(f"\n      {diag.message}")
+    if diag.hint:
+        line.append(f"  → {diag.hint}", style="cyan")
+    return line
+
+
+def render_gate_github(result: GateResult, console: Console) -> None:
+    """One annotation per introduced finding on the head's files, a notice
+    for the verdict; pre-existing findings stay in the step summary."""
+    for finding in result.introduced:
+        diag = finding.diagnostic
+        props = [f"title={_escape(finding.code)}"]
+        if diag.path:
+            props.insert(0, f"file={_escape(result.head.display_path(diag.path))}")
+        message = f"{finding.subject}: {diag.message}"
+        if diag.hint:
+            message += f" → {diag.hint}"
+        console.print(
+            f"::{_GITHUB_LEVEL[finding.section]} {','.join(props)}::{_escape(message)}",
+            markup=False,
+            highlight=False,
+        )
+    for diag in result.head.by_section()[Section.ERRORS]:
+        props = [f"title={_escape(diag.code)}"]
+        if diag.path:
+            props.insert(0, f"file={_escape(result.head.display_path(diag.path))}")
+        console.print(
+            f"::error {','.join(props)}::{_escape(diag.message)}",
+            markup=False,
+            highlight=False,
+        )
+    summary = (
+        f"compliance gate: {len(result.introduced)} introduced, "
+        f"{len(result.fixed)} fixed, {len(result.pre_existing)} pre-existing"
+    )
+    console.print(f"::notice title=compliance::{_escape(summary)}", markup=False)
+    for warning in result.warnings:
+        console.print(f"::warning title=compliance::{_escape(warning)}", markup=False)
+
+
+def render_gate_json(result: GateResult) -> str:
+    """The gate result as JSON."""
+    return json.dumps(result.to_dict(), indent=2)

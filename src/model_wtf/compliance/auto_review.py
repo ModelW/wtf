@@ -18,6 +18,7 @@ pending from disk, so a killed run resumes where it stopped.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -77,6 +78,7 @@ __all__ = [
 REVIEWER_STEPS = 80
 TP_REVIEWER_STEPS = 120
 GROUPER_STEPS = 200
+CHALLENGER_STEPS = 150
 NO_PROGRESS_LIMIT = 2
 ROUND_TIMEOUT = 1800
 
@@ -111,11 +113,13 @@ def sandbox(
     python: str | None,
     max_tokens: int | None,
     activity_log: Path | None = None,
+    base: str = "",
 ) -> Sandbox:
     """The OpenCode sandbox for a review run.
 
     ``activity_log`` is a file the MCP servers append one JSON line per
-    write to, so the driver can narrate what subagents do.
+    write to, so the driver can narrate what subagents do. ``base`` is the
+    git ref the challenger compares HEAD with.
     """
     mcp_cmd = [
         sys.executable,
@@ -221,23 +225,73 @@ def sandbox(
                     "model-wtf_data_flag": "deny",
                 },
             ),
+            "challenger": Agent(
+                description="Re-opens reviews a code change casts doubt on.",
+                mode="primary",
+                prompt=_prompt("challenger.md", repo, base=base or "HEAD~1"),
+                steps=CHALLENGER_STEPS,
+                # It works like a coding agent on the diff: git, grep, sed,
+                # head/tail through bash. Read-only; the only write is the
+                # `challenge` tool. Everything else on the server is denied.
+                permission={
+                    "bash": {
+                        "*": "deny",
+                        "git diff*": "allow",
+                        "git log*": "allow",
+                        "git show*": "allow",
+                        "git blame*": "allow",
+                        "git status*": "allow",
+                        "git rev-parse*": "allow",
+                        "git ls-files*": "allow",
+                        "grep *": "allow",
+                        "rg *": "allow",
+                        "cat *": "allow",
+                        "head *": "allow",
+                        "tail *": "allow",
+                        "sed -n*": "allow",
+                        "wc *": "allow",
+                        "ls*": "allow",
+                        "find *": "allow",
+                    },
+                    "task": "deny",
+                    "model-wtf_*": "deny",
+                    "model-wtf_reviews": "allow",
+                    "model-wtf_challenge": "allow",
+                    "model-wtf_data_search": "allow",
+                    "model-wtf_data_why": "allow",
+                    "model-wtf_touchpoint_show": "allow",
+                },
+            ),
         },
     )
 
 
-def _prompt(name: str, repo: str) -> str:
+def _prompt(name: str, repo: str, **extra: str) -> str:
     text = (
         resources.files("model_wtf.agents").joinpath(name).read_text(encoding="utf-8")
     )
-    return text.replace("{repo}", repo)
+    text = text.replace("{repo}", repo)
+    for key, value in extra.items():
+        text = text.replace("{" + key + "}", value)
+    return text
+
+
+_CI_SECRETS = (
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "ACTIONS_RUNTIME_TOKEN",
+    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+)
+"""Never handed to a subprocess of ours: the agent's shell runs with the
+OpenCode whitelist only, but the MCP server inherits the developer's/CI
+environment for Django to boot, and CI tokens are not project settings."""
 
 
 def _mcp_environment() -> dict[str, str]:
-
     env = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith(("OPENCODE", "XDG_"))
+        if not key.startswith(("OPENCODE", "XDG_")) and key not in _CI_SECRETS
     }
     env.setdefault("HOME", str(Path.home()))
     return env
@@ -888,3 +942,78 @@ def auto_review(
             oc.tokens(),
             oc.cost(),
         )
+
+
+@dataclass
+class ChallengeResult:
+    """What the challenger did."""
+
+    challenged: list[tuple[str, str]]
+    """``(ref, grounds)`` per challenge recorded."""
+    tokens: int
+    cost: float
+    final_text: str
+
+
+def challenge(
+    repo_root: Path,
+    units: list[Unit],
+    knowledge: Knowledge,
+    *,
+    base: str,
+    model: str,
+    python: str | None,
+    max_tokens: int | None,
+    console: Console,
+    keep_scratch: bool = False,
+) -> ChallengeResult:
+    """One challenger session over ``base..HEAD``.
+
+    The agent reads the diff with git, asks ``reviews`` what reviewers
+    asserted about the changed files, and calls ``challenge`` on what the
+    change undermines. Challenges land in the lock file / manifests; the
+    caller decides whether to commit them.
+
+    Raises
+    ------
+    OpenCodeUnavailable
+        Before anything runs, when ``opencode`` or the API key is missing.
+    """
+    _, readable = DATA_TARGET.pending(repo_root, units, knowledge, python)
+    activity_log = Path(
+        tempfile.mkstemp(prefix="model-wtf-activity-", suffix=".jsonl")[1]
+    )
+    box = sandbox(
+        repo_root,
+        model=model,
+        batch=1,
+        readable=readable,
+        python=python,
+        max_tokens=max_tokens,
+        activity_log=activity_log,
+        base=base,
+    )
+    with get_opencode(box, keep_scratch=keep_scratch) as oc:
+        console.print(Text(f"challenger: reading {base}..HEAD", style="dim"))
+        result = oc.run_task(
+            f"Challenge the reviews the change `{base}..HEAD` undermines.",
+            agent="challenger",
+            timeout=ROUND_TIMEOUT,
+        )
+    challenged: list[tuple[str, str]] = []
+    with contextlib.suppress(OSError):
+        for line in activity_log.read_text(encoding="utf-8").splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("kind") == "challenge":
+                challenged.append((str(event["ref"]), str(event["grounds"])))
+        activity_log.unlink()
+    for ref, grounds in challenged:
+        console.print(
+            Text.assemble(("challenged ", "yellow"), (ref, "bold"), f"  {grounds}")
+        )
+    if not challenged:
+        console.print(Text("challenger: no review undermined", style="green"))
+    return ChallengeResult(challenged, result.tokens, result.cost, result.final_text)

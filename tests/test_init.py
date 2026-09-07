@@ -76,6 +76,7 @@ def test_scaffold_is_complete_and_checkable(make_repo: MakeRepo) -> None:
 
     rel = sorted(str(p.relative_to(root)) for p in result.created)
     assert rel == [
+        ".github/workflows/compliance.yml",
         "api/compliance",
         "compliance/README.md",
         "compliance/app.yaml",
@@ -271,3 +272,21 @@ def test_cli_runs_with_all_options(make_repo: MakeRepo, tmp_path: Path) -> None:
     assert "created" in result.output
     assert "next:" in result.output
     assert load_yaml(root / "compliance/parties/acme.yaml")["country"] == "FR"
+
+
+def test_init_writes_the_gate_workflow_unless_told_not_to(make_repo: MakeRepo) -> None:
+    root = make_repo(snow=SNOW_FRONT_UNDECLARED)
+    spec = {
+        "app_name": "x",
+        "controller": PartySpec(name="A", country="FR"),
+        "processor": None,
+    }
+    workflow = root / ".github" / "workflows" / "compliance.yml"
+    run_init(root, **spec, workflow=False)
+    assert not workflow.exists()
+    run_init(root, **spec)
+    assert "uses: ModelW/wtf@v1" in workflow.read_text()
+    # Never overwritten.
+    workflow.write_text("mine\n")
+    run_init(root, **spec)
+    assert workflow.read_text() == "mine\n"

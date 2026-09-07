@@ -174,6 +174,7 @@ def _check_reviews(unit: Unit, rows: list[Row], diagnostics: list[Diagnostic]) -
     labels = {
         ReviewStatus.PENDING_NEW: "new",
         ReviewStatus.PENDING_CHANGED: "changed",
+        ReviewStatus.PENDING_CHALLENGED: "challenged",
         ReviewStatus.PENDING_ASSUMED: "assumed",
         ReviewStatus.PENDING_CONTENTS: "contents",
     }
@@ -189,6 +190,7 @@ def _check_reviews(unit: Unit, rows: list[Row], diagnostics: list[Diagnostic]) -
             unit.folder / LOCK_FILE,
             subject=f"{unit.id}:data",
             hint=f"data auto-review --unit {unit.id}",
+            items=tuple(sorted(r.row.full_id for r in pending)),
         )
     )
 
@@ -218,6 +220,7 @@ def _fold_deprecations(unit: Unit, diagnostics: list[Diagnostic]) -> list[Diagno
                 unit.folder / TOUCHPOINTS_DIR,
                 subject=f"{unit.id}:stale-manifests",
                 hint=f"touchpoints auto-review --unit {unit.id} --stale",
+                items=tuple(stale),
             )
         )
     return kept
@@ -242,6 +245,7 @@ def _check_touchpoints(
                 folder,
                 subject=f"{unit.id}:touchpoints",
                 hint=f"touchpoints auto-review --unit {unit.id}",
+                items=tuple(sorted(t.full_id for t in pending)),
             )
         )
     orphans = [
@@ -265,6 +269,7 @@ def _check_touchpoints(
                 folder,
                 subject=f"{unit.id}:orphans",
                 hint=f"touchpoints auto-review --unit {unit.id} --group-only",
+                items=tuple(sorted(t.full_id for t in orphans)),
             )
         )
     # Personal items nobody declares handling: informational, it usually
@@ -283,6 +288,7 @@ def _check_touchpoints(
                 unit.folder / DATA_DIR,
                 subject=f"{unit.id}:unreferenced",
                 hint="data why <unit:id>",
+                items=tuple(sorted(r.full_id for r in unreferenced)),
             )
         )
 
