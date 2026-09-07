@@ -430,9 +430,12 @@ def _heaviest(matrix: Matrix, holder_id: str, cell: Cell) -> Cell:
             _impact(other) == _impact(best) and other.element == holder_id
         ):
             best = other
-    # Report on the holder's id, whatever cell carried the weight.
-
-    return replace(best, element=holder_id)
+    # Report on the holder's id, with the flow that carried the weight when
+    # the stamp names one (`SID@sink`).
+    label = holder_id
+    if "@" in key:
+        label = f"{holder_id} → {key.split('@', 1)[1]}"
+    return replace(best, element=label)
 
 
 def _titles(sids: str, catalogue: Catalogue) -> str:

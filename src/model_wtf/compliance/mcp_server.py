@@ -501,12 +501,28 @@ class Tools:
 
         ws = self.workspace(refresh=True)
         matrix = build_matrix(ws)
+        # `SID@sink` names one flow of the element: stamp that flow.
+        target = element
+        if "@" in sid:
+            sid, _, sink = sid.partition("@")
+            flow = next(
+                (
+                    e
+                    for e in matrix.elements
+                    if e in (f"{element}->{sink}", f"{sink}->{element}")
+                ),
+                None,
+            )
+            if flow is None:
+                msg = f"{element} has no flow with {sink!r}"
+                raise ValueError(msg)
+            target = flow
         try:
             path, key, written = stamp_cell(
                 matrix,
                 {u.id: u for u in self.units},
                 self.root / "compliance",
-                element,
+                target,
                 sid,
                 status=status,
                 note=note,
@@ -571,18 +587,21 @@ class Tools:
         )
 
         catalogue = load_catalogue()
-        matrix = build_matrix(self.workspace(), catalogue)
+        matrix = build_matrix(self.workspace(), catalogue, register=False)
         if element not in matrix.elements:
             msg = f"no element {element!r}"
             raise ValueError(msg)
         lines = []
-        for cell in matrix.by_element(element):
+        for cell in _cells_carried_by(matrix, element):
             if not cell.verdict.needs_review and cell.verdict is not Verdict.MISSING:
                 continue
             spec = catalogue.threats[cell.sid]
             note = catalogue.mapping[cell.sid].note or ""
+            key = cell.sid
+            if cell.element != element:
+                key = f"{cell.sid}@{_other_end(cell.element, element)}"
             lines.append(
-                f"{cell.sid} [{cell.topic}] {spec.title}: {note}".rstrip(": ")
+                f"{key} [{cell.topic}] {spec.title}: {note}".rstrip(": ")
                 + (
                     f"  (currently {cell.verdict.value}: {cell.reason})"
                     if cell.verdict is not Verdict.OPEN
@@ -629,18 +648,16 @@ class Tools:
                     f"scope {element.touchpoint.scope.value}, "
                     f"auth {', '.join(facts.auth) or 'none'})"
                 )
-            sids: dict[str, list[str]] = {}
+            keys: list[str] = []
             for c in cells:
-                target = "" if c.element == eid else f"@{_other_end(c.element, eid)}"
-                sids.setdefault(c.sid, []).append(target)
+                key = c.sid
+                if c.element != eid:
+                    key = f"{c.sid}@{_other_end(c.element, eid)}"
+                if key not in keys:
+                    keys.append(key)
             listed = ", ".join(
-                f"{sid} ({catalogue.threats[sid].title})"
-                + (
-                    ""
-                    if targets == [""]
-                    else " on " + "/".join(t for t in targets if t)
-                )
-                for sid, targets in sorted(sids.items())
+                f"{k} ({catalogue.threats[k.split('@', 1)[0]].title})"
+                for k in sorted(keys)
             )
             lines.append(f"{eid}  {where}")
             lines.append(f"  open: {listed}")
@@ -1425,7 +1442,8 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
     @server.tool(
         name="threat_stamp",
         description=(
-            "Record your verdict on one threat (SID) of one element. Either "
+            "Record your verdict on one threat of one element: `sid` exactly as "
+            "listed (`DS06`, or `DS06@party:mapbox` for one flow). Either "
             "`status`: mitigated (note = the file:line that handles it), n/a "
             "(note = why it cannot happen here) or accepted (note = the comment "
             "or setting that accepts the risk); or `missing`: one line, file:line, "
@@ -1741,6 +1759,18 @@ def _rights_notes(row: Row) -> list[tuple[str, str]]:
             out.append((right.value, f"!missing {value.note or ''}".strip()))
         elif isinstance(value, Exemption) and value.note:
             out.append((right.value, f"exempt {value.exempt.value}: {value.note}"))
+    return out
+
+
+def _cells_carried_by(matrix: Any, element: str) -> list[Any]:
+    """The element's own cells plus those of the flows it carries stamps for."""
+    from model_wtf.compliance.threats import _stamp_holder
+
+    out = []
+    for cell in matrix.cells:
+        holder, _ = _stamp_holder(matrix.elements[cell.element], matrix.elements)
+        if holder.id == element:
+            out.append(cell)
     return out
 
 

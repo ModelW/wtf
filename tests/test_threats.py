@@ -685,3 +685,40 @@ def test_findings_get_stable_ids_that_survive_fixes_and_returns(repo: Path) -> N
     assert "api:getCustomer" in out.output
     assert "any id" in out.output
     assert "critical" in out.output
+
+
+def test_flow_keyed_stamps_are_listed_and_stamped_per_flow(repo: Path) -> None:
+    """The agent sees flow cells as `SID@sink` and stamps them so; a
+    declared, safeguarded transfer is not a leak at all."""
+    from model_wtf.compliance.mcp_server import Tools
+
+    (repo / "compliance" / "parties" / "mapbox.yaml").write_text(
+        "name: Mapbox\ncountry: US\naddress: a\nemail: e@x\n"
+        "safeguard: dpf\ndpf_certified: true\n"
+    )
+    _tp(
+        repo,
+        "checkout",
+        f"scope: subject\ndata:\n  - {EMAIL}: create\n"
+        f"transfers: [{{party: mapbox, data: [{EMAIL}]}}]\n",
+    )
+    tools = Tools(repo)
+    listing = tools.threat_cells("api:checkout")
+    # The transfer flow is dismissed (intended use); the store flow is open
+    # and shown with its key.
+    assert "DS06@party:mapbox" not in listing
+    assert "DS06@api:db-default" in listing
+    out = tools.threat_stamp(
+        "api:checkout", "DS06@api:db-default", missing="row visible to all staff"
+    )
+    assert out.startswith("Stamped")
+    text = (repo / "api" / "compliance" / "touchpoints" / "checkout.yaml").read_text()
+    assert "DS06@api:db-default:" in text
+    matrix = build_matrix(_ws(repo))
+    by = {(c.element, c.sid): c for c in matrix.cells}
+    assert by["api:checkout->api:db-default", "DS06"].verdict is Verdict.MISSING
+    assert by["actor:subject->api:checkout", "DS06"].verdict is Verdict.OPEN
+    assert by["api:checkout->party:mapbox", "DS06"].verdict is Verdict.DISMISSED
+    assert by["api:checkout->party:mapbox", "DS06"].reason == "declared_transfer"
+    with pytest.raises(ValueError, match="no flow"):
+        tools.threat_stamp("api:checkout", "DS06@party:nope", missing="x")
