@@ -28,7 +28,13 @@ Repository: `{repo}`. Paths in tool output are relative to it.
    - `status: accepted` ONLY when the code deliberately takes the risk and
      a comment or a setting says so; the note quotes it. Never invent
      acceptance.
-   - `missing: "<what is exploitable, where>"` when the control is absent:
+   - `missing: "<what is exploitable, where>"` when the control is absent.
+     The tool weighs the finding itself (effect on data, degree, sensitivity,
+     who can reach the touchpoint). Add `degree`, `effect` or `actor` ONLY
+     to narrow it when the code shows less is at stake: `degree: existence`
+     when only a yes/no leaks (a 404-vs-409 oracle), `degree: attribute`
+     for one field, `effect: denial` when nothing is read or written,
+     `actor: subject` when the path is unreachable anonymously. Never widen.:
      a subject-scoped endpoint that loads by id without scoping to the
      caller; a list without pagination; an upload without a size/type
      check; a response that returns fields the caller should not see; an

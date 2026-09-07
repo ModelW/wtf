@@ -16,7 +16,8 @@ from model_wtf.compliance.data_cli import load_context
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.options import ROOT_OPTION
 from model_wtf.compliance.review import git_head
-from model_wtf.compliance.stamps import STAMP_STATUSES, Stamp
+from model_wtf.compliance.severity import Degree, Effect
+from model_wtf.compliance.stamps import STAMP_STATUSES, Finding, Stamp
 from model_wtf.compliance.threats import (
     Catalogue,
     CatalogueError,
@@ -25,15 +26,23 @@ from model_wtf.compliance.threats import (
     Matrix,
     StampError,
     Verdict,
+    _stamp_holder,
     build_matrix,
     load_catalogue,
     stamp_cell,
 )
 from model_wtf.compliance.threats_gen import GenError, generate
-from model_wtf.compliance.workspace import SHARED_FOLDER, load_workspace
+from model_wtf.compliance.workspace import SHARED_FOLDER, Workspace, load_workspace
 from model_wtf.introspect.runner import IntrospectionFailed
 from model_wtf.opencode import DEFAULT_MODEL
 
+_SEVERITY_STYLE = {
+    "critical": "bold red",
+    "high": "red",
+    "medium": "yellow",
+    "low": "cyan",
+    "info": "dim",
+}
 _VERDICT_STYLE = {
     Verdict.NEVER: "dim",
     Verdict.DISMISSED: "green",
@@ -86,11 +95,18 @@ def gen_cmd(ctx: click.Context, *, source: str, check: bool) -> None:
 def _matrix(
     ctx: click.Context, root: Path | None, python: str | None, only: str | None
 ) -> tuple[Matrix, Catalogue, Path]:
+    matrix, catalogue, resolved, _ = _matrix_ws(ctx, root, python, only)
+    return matrix, catalogue, resolved
+
+
+def _matrix_ws(
+    ctx: click.Context, root: Path | None, python: str | None, only: str | None
+) -> tuple[Matrix, Catalogue, Path, Workspace]:
     resolved, units, knowledge = load_context(root)
     try:
         catalogue = load_catalogue()
         ws = load_workspace(resolved, units, knowledge, python=python, only=only)
-        return build_matrix(ws, catalogue), catalogue, resolved
+        return build_matrix(ws, catalogue), catalogue, resolved, ws
     except (IntrospectionFailed, CatalogueError) as exc:
         Console(stderr=True).print(Text.assemble(("Tool error: ", "red"), str(exc)))
         ctx.exit(int(ExitCode.TOOL_ERROR))
@@ -242,6 +258,148 @@ def _matrix_dict(
     return out
 
 
+_SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"]
+
+
+@threats.command("findings")
+@click.option("--unit", "only", default=None, help="Restrict to one unit.")
+@click.option(
+    "--min-severity",
+    type=click.Choice(_SEVERITY_ORDER),
+    default="info",
+    show_default=True,
+    help="Hide findings below this bucket.",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["table", "json"]),
+    default="table",
+    show_default=True,
+)
+@click.option("--python", default=None, help="Interpreter to use for introspection.")
+@ROOT_OPTION
+@click.pass_context
+def findings_cmd(
+    ctx: click.Context,
+    *,
+    only: str | None,
+    min_severity: str,
+    output_format: str,
+    python: str | None,
+    root: Path | None,
+) -> None:
+    """Every `!missing` threat stamp, most severe first.
+
+    Severity is impact (effect x degree x sensitivity) x likelihood (the
+    most feared actor who can reach the touchpoint); see the README.
+    Findings stamped before weighing existed show as `unweighed`.
+    """
+    matrix, catalogue, _ = _matrix(ctx, root, python, only)
+    cutoff = _SEVERITY_ORDER.index(min_severity)
+    rows: list[tuple[int, Cell, Finding | None]] = []
+    seen: set[tuple[str, str]] = set()
+    for cell in matrix.missing():
+        # One stamp covers the touchpoint and every flow of it: one row,
+        # on the element that carries the stamp, worst flow's weight.
+        holder, _ = _stamp_holder(matrix.elements[cell.element], matrix.elements)
+        cell = _heaviest(matrix, holder.id, cell)
+        if (holder.id, cell.stamp_key or cell.sid) in seen:
+            continue
+        seen.add((holder.id, cell.stamp_key or cell.sid))
+        finding = cell.stamp if isinstance(cell.stamp, Finding) else None
+        rank = (
+            _SEVERITY_ORDER.index(finding.severity)
+            if finding and finding.severity in _SEVERITY_ORDER
+            else len(_SEVERITY_ORDER)
+        )
+        if finding is not None and rank > cutoff:
+            continue
+        rows.append((rank, cell, finding))
+    rows.sort(key=lambda r: (r[0], -(r[2].impact or 0) if r[2] else 0, r[1].element))
+    if output_format == "json":
+        click.echo(
+            json.dumps(
+                [
+                    {
+                        "element": cell.element,
+                        "sid": cell.sid,
+                        "title": catalogue.threats[cell.sid].title,
+                        "topic": cell.topic,
+                        "note": cell.reason,
+                        **(finding.model_dump(exclude={"missing"}) if finding else {}),
+                    }
+                    for _, cell, finding in rows
+                ],
+                indent=2,
+            )
+        )
+        ctx.exit(0)
+    console = Console()
+    if not rows:
+        console.print(Text("no finding at or above this severity", style="green"))
+        ctx.exit(0)
+    table = Table(title=f"{len(rows)} finding(s)", title_justify="left")
+    table.add_column("Severity")
+    table.add_column("Element", no_wrap=True)
+    table.add_column("Threat")
+    table.add_column("Effect")
+    table.add_column("Who")
+    table.add_column("Data")
+    table.add_column("Evidence")
+    for _, cell, finding in rows:
+        sev = finding.severity if finding and finding.severity else "unweighed"
+        effect = ""
+        who = ""
+        data = ""
+        if finding is not None:
+            effect = finding.effect or ""
+            if finding.degree:
+                effect += f"/{finding.degree}"
+            who = ", ".join(finding.actors) or "-"
+            data = finding.sensitivity or ""
+        table.add_row(
+            Text(sev, style=_SEVERITY_STYLE.get(sev, "dim")),
+            cell.element,
+            f"{cell.sid} {catalogue.threats[cell.sid].title}",
+            effect,
+            who,
+            data,
+            _short(cell.reason.removeprefix("[agent]").strip()),
+        )
+    console.print(table)
+    ctx.exit(0)
+
+
+def _heaviest(matrix: Matrix, holder_id: str, cell: Cell) -> Cell:
+    """Among the cells the same stamp covers, the one with the highest impact
+    (a flow to the store may carry more than the request)."""
+    key = cell.stamp_key or cell.sid
+    best = cell
+    for other in matrix.missing():
+        if other.sid != cell.sid or (other.stamp_key or other.sid) != key:
+            continue
+        h, _ = _stamp_holder(matrix.elements[other.element], matrix.elements)
+        if h.id != holder_id:
+            continue
+        if _impact(other) > _impact(best) or (
+            _impact(other) == _impact(best) and other.element == holder_id
+        ):
+            best = other
+    # Report on the holder's id, whatever cell carried the weight.
+    from dataclasses import replace
+
+    return replace(best, element=holder_id)
+
+
+def _impact(cell: Cell) -> float:
+    return (cell.stamp.impact or 0.0) if isinstance(cell.stamp, Finding) else 0.0
+
+
+def _short(text: str, limit: int = 160) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 @threats.command("why")
 @click.argument("element_id")
 @click.argument("sids", nargs=-1)
@@ -308,23 +466,44 @@ def _cell_line(cell: Cell, catalogue: Catalogue) -> Text:
     elif cell.verdict is Verdict.NEVER:
         line.append(f"  ← {cell.reason}", style="dim")
     elif cell.verdict is Verdict.MISSING:
+        line.append_text(_finding_tag(cell))
         line.append(f'  !missing "{cell.reason}"', style="red")
-    elif cell.verdict is Verdict.STAMPED and isinstance(cell.stamp, Stamp):
-        line.append(f"  {cell.stamp.status}", style="green")
-        if cell.stamp.note:
-            line.append(f": {cell.stamp.note}", style="dim")
-        if cell.stamp_key and "@" in cell.stamp_key:
-            line.append(f"  ({cell.stamp_key})", style="dim")
-    elif cell.verdict is Verdict.STALE and isinstance(cell.stamp, Stamp):
-        line.append(f"  {cell.reason}", style="yellow")
-        if cell.stamp.note:
-            line.append(f"  was: {cell.stamp.note}", style="dim")
+    elif cell.verdict in (Verdict.STAMPED, Verdict.STALE):
+        line.append_text(_stamp_tag(cell))
     else:
         line.append(f"  [{cell.topic}]", style="yellow")
         note = catalogue.mapping[cell.sid].note
         if note:
             line.append(f"  {note}", style="dim")
     return line
+
+
+def _finding_tag(cell: Cell) -> Text:
+    f = cell.stamp
+    if not isinstance(f, Finding) or not f.severity:
+        return Text()
+    what = f"  [{f.severity}] {f.effect}"
+    if f.degree:
+        what += f"/{f.degree}"
+    what += f" by {', '.join(f.actors) or '-'}"
+    return Text(what, style=_SEVERITY_STYLE.get(f.severity, "red"))
+
+
+def _stamp_tag(cell: Cell) -> Text:
+    stamp = cell.stamp
+    if not isinstance(stamp, Stamp):
+        return Text()
+    if cell.verdict is Verdict.STALE:
+        out = Text(f"  {cell.reason}", style="yellow")
+        if stamp.note:
+            out.append(f"  was: {stamp.note}", style="dim")
+        return out
+    out = Text(f"  {stamp.status}", style="green")
+    if stamp.note:
+        out.append(f": {stamp.note}", style="dim")
+    if cell.stamp_key and "@" in cell.stamp_key:
+        out.append(f"  ({cell.stamp_key})", style="dim")
+    return out
 
 
 @threats.command("stamp")
@@ -344,6 +523,24 @@ def _cell_line(cell: Cell, catalogue: Catalogue) -> Text:
     default=None,
     help="Record a finding instead: what is exploitable and where.",
 )
+@click.option(
+    "--effect",
+    type=click.Choice([e.value for e in Effect]),
+    default=None,
+    help="Narrow the finding's effect (default: from the threat and the ops).",
+)
+@click.option(
+    "--degree",
+    type=click.Choice([d.value for d in Degree]),
+    default=None,
+    help="Narrow how much data is reached (default: inferred, record or bulk).",
+)
+@click.option(
+    "--actor",
+    type=click.Choice(["anonymous", "subject", "staff", "system"]),
+    default=None,
+    help="Narrow who can exploit it (default: whoever the scope lets in).",
+)
 @click.option("--python", default=None, help="Interpreter to use for introspection.")
 @ROOT_OPTION
 @click.pass_context
@@ -355,6 +552,9 @@ def stamp_cmd(
     status: str | None,
     note: str | None,
     missing_note: str | None,
+    effect: str | None,
+    degree: str | None,
+    actor: str | None,
     python: str | None,
     root: Path | None,
 ) -> None:
@@ -365,10 +565,10 @@ def stamp_cmd(
     fingerprint: when the code moves, the stamp goes stale and the cell
     reopens.
     """
-    matrix, _, resolved = _matrix(ctx, root, python, None)
+    matrix, _, resolved, ws = _matrix_ws(ctx, root, python, None)
     _, units, _ = load_context(root)
     try:
-        path = stamp_cell(
+        path, _, written = stamp_cell(
             matrix,
             {u.id: u for u in units},
             resolved / SHARED_FOLDER,
@@ -378,13 +578,24 @@ def stamp_cmd(
             note=note,
             missing=missing_note,
             commit=git_head(resolved),
+            ws=ws,
+            effect=effect,
+            degree=degree,
+            actor=actor,
         )
     except (StampError, ValueError) as exc:
         Console(stderr=True).print(Text.assemble(("Error: ", "red"), str(exc)))
         ctx.exit(int(ExitCode.TOOL_ERROR))
-    Console().print(
-        Text.assemble(("stamped", "green"), f"  {element_id} {sid}  → {path}")
-    )
+    line = Text.assemble(("stamped", "green"), f"  {element_id} {sid}  → {path}")
+    if isinstance(written, Finding):
+        line.append(
+            f"\n  {written.severity}: {written.effect}"
+            + (f" / {written.degree}" if written.degree else "")
+            + f" by {', '.join(written.actors) or 'nobody reachable'}"
+            + (f" on {written.sensitivity} data" if written.sensitivity else ""),
+            style=_SEVERITY_STYLE.get(written.severity or "", "yellow"),
+        )
+    Console().print(line)
     ctx.exit(0)
 
 

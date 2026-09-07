@@ -107,7 +107,7 @@ def test_gen_refuses_an_unmapped_sid(tmp_path: Path) -> None:
     with pytest.raises(GenError, match="ZZ99"):
         generate(str(library), out_dir=out)
     assert not list(out.glob("ZZ99.yaml"))
-    (out / "_mapping.yaml").write_text("ZZ99: {topic: input}\n")
+    (out / "_mapping.yaml").write_text("ZZ99: {topic: input, effect: tampering}\n")
     result = generate(str(library), out_dir=out)
     assert [p.name for p in result.written] == ["ZZ99.yaml"]
     assert result.stale == []
@@ -115,7 +115,9 @@ def test_gen_refuses_an_unmapped_sid(tmp_path: Path) -> None:
     assert "elements:\n- process" in generated
     # A mapping entry pointing at a rule that does not exist.
     (out / "_rules.yaml").write_text("")
-    (out / "_mapping.yaml").write_text("ZZ99: {topic: input, dismiss: [nope]}\n")
+    (out / "_mapping.yaml").write_text(
+        "ZZ99: {topic: input, effect: tampering, dismiss: [nope]}\n"
+    )
     with pytest.raises(CatalogueError, match="nope"):
         load_catalogue(out)
 
@@ -487,3 +489,156 @@ def test_topics_cover_every_open_topic_and_swarm_work_is_grouped(repo: Path) -> 
     assert "access" in by_topic
     assert "api:getCustomer" in by_topic["access"]
     assert {c.sid for c in by_topic["access"]["api:getCustomer"]} >= {"AA03", "AC01"}
+
+
+# ---------------------------------------------------------------------------
+# severity
+# ---------------------------------------------------------------------------
+
+IBAN = "api:shop.Customer.iban"
+
+
+def _finding(root: Path, element: str, sid: str) -> object:
+    from model_wtf.compliance.stamps import Finding
+
+    matrix = build_matrix(_ws(root))
+    cell = next(c for c in matrix.by_element(element) if c.sid == sid)
+    assert isinstance(cell.stamp, Finding), cell
+    return cell.stamp
+
+
+def test_a_finding_is_weighed_from_effect_data_and_actor(repo: Path) -> None:
+    """The getOrder IDOR pattern: public route, UUID-like single lookup,
+    confidential data -> high. The same on a subject route -> lower; as a
+    denial of service -> capped; stated as existence-only -> info."""
+    # A public GET by id returning a confidential item.
+    _tp(repo, "getCustomer", f"data:\n  - {IBAN}\n  - {EMAIL}\n")
+    out = _stamp(
+        repo, "api:getCustomer", "AA03", "--missing", "loads any customer by id"
+    )
+    assert out.exit_code == 0, out.output  # type: ignore[attr-defined]
+    f = _finding(repo, "api:getCustomer", "AA03")
+    assert f.effect == "disclosure"  # type: ignore[attr-defined]
+    # customer_id is an int path param: the id space is enumerable -> bulk.
+    assert f.degree == "bulk"  # type: ignore[attr-defined]
+    assert f.actors[0] == "anonymous"  # type: ignore[attr-defined]
+    assert f.sensitivity == "confidential"  # type: ignore[attr-defined]
+    assert f.data[0] == IBAN  # type: ignore[attr-defined]
+    assert f.severity == "critical"  # type: ignore[attr-defined]
+
+    # Narrowed by the reviewer: only existence leaks, so info/low.
+    _stamp(
+        repo,
+        "api:getCustomer",
+        "DS01",
+        "--missing",
+        "404 vs 403 reveals whether the id exists",
+        "--degree",
+        "existence",
+    )
+    f = _finding(repo, "api:getCustomer", "DS01")
+    assert f.degree == "existence"  # type: ignore[attr-defined]
+    assert f.severity in ("low", "info")  # type: ignore[attr-defined]
+
+    # A reviewer may lower the degree, never raise it above the inference.
+    _tp(repo, "checkout", f"scope: subject\ndata:\n  - {EMAIL}: create\n")
+    _stamp(repo, "api:checkout", "DO01", "--missing", "no throttle")
+    f = _finding(repo, "api:checkout", "DO01")
+    assert f.effect == "denial"  # type: ignore[attr-defined]
+    assert f.degree is None  # type: ignore[attr-defined]
+    assert f.impact <= 2.0  # type: ignore[attr-defined]
+    # Reach comes from the auth facts, not the declared scope: the fixture's
+    # checkout has no auth, so anonymous can call it even though its manifest
+    # says `scope: subject` (it reads request.user when there is one).
+    assert f.actors[0] == "anonymous"  # type: ignore[attr-defined]
+    assert f.severity == "medium"  # type: ignore[attr-defined]
+
+    # Escalation is the maximum impact whatever the data.
+    _stamp(repo, "api:checkout", "AA01", "--missing", "auth not enforced on PUT")
+    f = _finding(repo, "api:checkout", "AA01")
+    assert f.effect == "escalation"  # type: ignore[attr-defined]
+    assert f.impact == 4.0  # type: ignore[attr-defined]
+
+
+def test_entitled_actors_and_project_actor_overrides(repo: Path) -> None:
+    """Staff who already read the item through a declared staff touchpoint
+    are not a disclosure risk on it; a project can dial malice per actor."""
+    from model_wtf.compliance.severity import assess, load_actors
+    from model_wtf.compliance.threats import load_catalogue
+
+    _tp(repo, "admin__shop.Customer", f"scope: staff\ndata:\n  - {EMAIL}\n  - {IBAN}\n")
+    _tp(repo, "getCustomer", f"scope: staff\ndata:\n  - {EMAIL}\n  - {IBAN}\n")
+    ws = _ws(repo)
+    matrix = build_matrix(ws, load_catalogue())
+    element = matrix.elements["api:getCustomer"]
+    weighed = assess(ws, ws.knowledge, load_actors(ws.shared), element, "disclosure")
+    # The only reachable actor (staff) already reads both items in the admin.
+    assert weighed.actors == ()
+    assert weighed.severity.value == "info"
+
+    # Override: this project fears its staff.
+    (repo / "compliance" / "actors.yaml").write_text(
+        "staff: {malice: 1.0, reach: 1.0}\n"
+    )
+    actors = load_actors(repo / "compliance")
+    assert actors["staff"].malice == 1.0
+    assert actors["staff"].title  # the built-in title is kept
+    _tp(repo, "admin__shop.Customer", "scope: staff\ndata: []\n")
+    ws = _ws(repo)
+    matrix = build_matrix(ws, load_catalogue())
+    weighed = assess(
+        ws, ws.knowledge, actors, matrix.elements["api:getCustomer"], "disclosure"
+    )
+    assert weighed.actors == ("staff",)
+    assert weighed.likelihood == 1.0
+
+
+def test_check_tags_and_sorts_findings_by_risk(repo: Path) -> None:
+    _tp(repo, "getCustomer", f"data:\n  - {IBAN}\n")
+    _stamp(repo, "api:getCustomer", "AA03", "--missing", "any id")
+    _stamp(repo, "api:getCustomer", "DO01", "--missing", "no throttle")
+    report = run_check(repo, strict=False)
+    findings = [d for d in report.diagnostics if d.code == "threat-missing"]
+    assert [d.risk for d in findings] == ["critical", "medium"]
+    assert (
+        "[critical: disclosure/bulk by anonymous, subject, staff]"
+        in findings[0].message
+    )
+    payload = report.to_dict()
+    assert payload["diagnostics"][0]["risk"] in ("critical", None)
+
+
+def test_findings_lists_missing_stamps_most_severe_first(repo: Path) -> None:
+    _tp(repo, "getCustomer", f"data:\n  - {IBAN}\n")
+    _tp(repo, "checkout", f"scope: subject\ndata:\n  - {EMAIL}: create\n")
+    _stamp(repo, "api:checkout", "DO01", "--missing", "no throttle")
+    _stamp(repo, "api:getCustomer", "AA03", "--missing", "any id")
+    # A bare !missing written by hand is weighed too.
+    manifest = repo / "api" / "compliance" / "touchpoints" / "checkout.yaml"
+    manifest.write_text(manifest.read_text() + '  DS01: !missing "verbose 404"\n')
+    runner = CliRunner()
+    out = runner.invoke(
+        cli,
+        ["--root", str(repo), "compliance", "threats", "findings", "--format", "json"],
+    )
+    assert out.exit_code == 0, out.output
+    rows = json.loads(out.output)
+    assert [r["sid"] for r in rows][:1] == ["AA03"]
+    assert rows[0]["severity"] == "critical"
+    assert {r["sid"] for r in rows} == {"AA03", "DO01", "DS01"}
+    assert all(r["severity"] for r in rows)
+    out = runner.invoke(
+        cli,
+        [
+            "--root",
+            str(repo),
+            "compliance",
+            "threats",
+            "findings",
+            "--min-severity",
+            "high",
+        ],
+    )
+    assert out.exit_code == 0, out.output
+    assert "AA03" in out.output
+    assert "DO01" not in out.output

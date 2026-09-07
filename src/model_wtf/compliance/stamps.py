@@ -65,10 +65,40 @@ class Stamp(BaseModel):
         return self
 
 
-class Stamps(RootModel[dict[str, Stamp | Missing]]):
-    """The ``threats:`` block: ``SID`` or ``SID@sink`` → stamp or ``!missing``."""
+class Finding(BaseModel):
+    """A ``!missing`` with its weight: the mapping form of a finding.
 
-    root: dict[str, Stamp | Missing] = Field(default_factory=dict)
+    ``missing`` is the reviewer's evidence (what is exploitable, where);
+    the rest is computed by the tool from the matrix (see
+    :mod:`model_wtf.compliance.severity`) when the stamp is written.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    missing: str
+    effect: str | None = None
+    degree: str | None = None
+    actors: list[str] = Field(default_factory=list)
+    data: list[str] = Field(default_factory=list)
+    sensitivity: str | None = None
+    impact: float | None = None
+    likelihood: float | None = None
+    severity: str | None = None
+    commit: str | None = None
+    fingerprint: str | None = None
+    by: Literal["human", "agent"] | None = None
+
+    @property
+    def note(self) -> str:
+        """The evidence, like ``Missing.note``."""
+        return self.missing
+
+
+class Stamps(RootModel[dict[str, Stamp | Finding | Missing]]):
+    """The ``threats:`` block: ``SID`` or ``SID@sink`` → stamp, weighed
+    finding, or bare ``!missing``."""
+
+    root: dict[str, Stamp | Finding | Missing] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _keys(self) -> Stamps:
@@ -84,7 +114,7 @@ class Stamps(RootModel[dict[str, Stamp | Missing]]):
 
     def lookup(
         self, sid: str, sink: str | None = None
-    ) -> tuple[str, Stamp | Missing] | None:
+    ) -> tuple[str, Stamp | Finding | Missing] | None:
         """The most specific stamp for a cell: ``SID@sink`` first, then ``SID``.
 
         Returns the key it matched too, so a report can say which one.
@@ -107,6 +137,14 @@ def stamps_to_yaml(stamps: Stamps) -> CommentedMap:
     for key, value in sorted(stamps.root.items()):
         if isinstance(value, Missing):
             block[key] = TaggedScalar(value=value.note or "", tag=MISSING_TAG)
+            continue
+        if isinstance(value, Finding):
+            found = CommentedMap()
+            for name, item in value.model_dump(exclude_none=True).items():
+                if item in ([], None):
+                    continue
+                found[name] = item
+            block[key] = found
             continue
         entry = CommentedMap()
         entry["status"] = value.status
@@ -206,6 +244,7 @@ def read_stamps(path: Path) -> Stamps:
 __all__ = [
     "NOTE_REQUIRED",
     "STAMP_STATUSES",
+    "Finding",
     "Stamp",
     "Stamps",
     "read_stamps",

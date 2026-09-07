@@ -472,6 +472,25 @@ uv run model-wtf compliance threats stamp api:getOrder DS06 --missing "payment_m
 uv run model-wtf compliance threats stamp api:checkout->api:db-default DS06 --status n/a --note "the app's own database"
 ```
 
+#### Severity
+
+A `!missing` stamp is weighed by the tool, not the agent: **impact ×
+likelihood**. Impact is the *effect* — `disclosure`, `tampering`,
+`destruction`, `denial`, `escalation`, `repudiation` (`_mapping.yaml`
+carries one per threat; `ops` resolves from what the touchpoint does) — at
+a *degree* (`existence` 0.25 < `attribute` 0.5 < `record` 1 < `bulk` 1.5,
+inferred: lists, exports, admin screens, tasks and integer ids are `bulk`)
+on the most sensitive item reached (`public` 0 … `special` 4); escalation
+counts 4, denial is capped at 2. Likelihood is the most feared *actor* the
+touchpoint's scope lets in — `anonymous`, `subject`, `staff`, `system`,
+each with a `malice` and a `reach` in `knowledge/threats/_actors.yaml`,
+overridable in `compliance/actors.yaml` — minus the actors already
+**entitled** to that data through another declared touchpoint (staff
+counting pictures they see in the back-office is not a finding). Buckets:
+`critical` / `high` / `medium` / `low` / `info`. The reviewer may only
+narrow (`--degree existence`, `--effect denial`, `--actor subject`) with a
+reason; `check` tags and sorts findings by risk.
+
 #### The swarm
 
 ```
