@@ -64,6 +64,7 @@ from model_wtf.compliance.declarations import format_errors
 from model_wtf.compliance.ops import OpError, OpSpec, Read, parse_ops, render_ops
 from model_wtf.compliance.report import Diagnostic, Severity
 from model_wtf.compliance.schemas import StrictModel
+from model_wtf.compliance.stamps import Stamps, read_stamps, stamp_lines
 from model_wtf.compliance.yaml_io import load_yaml
 from model_wtf.introspect.runner import (
     IntrospectionFailed,
@@ -214,6 +215,11 @@ class Manifest(StrictModel):
         description="The last challenge a re-review closed (kept so the same "
         "grounds are not raised twice)",
     )
+    threats: Stamps = Field(
+        default_factory=Stamps,
+        description="Stamps closing the threat cells the matrix left open "
+        "(`SID` or `SID@sink` -> {status, note} or !missing)",
+    )
 
     @model_validator(mode="after")
     def _fold_exporting(self) -> Manifest:
@@ -318,6 +324,8 @@ class Touchpoint:
     challenge: ManifestChallenge | None = None
     """Open doubt on the declaration; makes the touchpoint pending."""
     answered: ManifestChallenge | None = None
+    stamps: Stamps = field(default_factory=Stamps)
+    """Threat stamps declared in the manifest."""
     calls: tuple[str, ...] = ()
     """Full ids of the touchpoints this one calls (cross-unit edges)."""
     code_root: Path | None = None
@@ -718,6 +726,7 @@ def _apply(
         note=manifest.note,
         challenge=manifest.challenge,
         answered=manifest.answered,
+        stamps=manifest.threats,
         calls=tuple(facts.calls),
         code_root=unit.code_root,
     )
@@ -789,10 +798,13 @@ def write_manifest(
     ignore: bool = False,
     scope: Scope | None = None,
     answered: ManifestChallenge | None = None,
+    stamps: Stamps | None = None,
 ) -> Path:
     """Create or replace the manifest of ``touchpoint``; return its path.
 
-    ``answered`` records the challenge this declaration closes.
+    ``answered`` records the challenge this declaration closes; ``stamps``
+    (default: the touchpoint's current ones) are carried over so a
+    re-declaration does not lose the threat review.
 
     ``ops`` maps a ref (or glob) to its ops; refs absent from it are bare
     reads. Entries are written in the order of ``data``, one per line, the
@@ -820,6 +832,11 @@ def write_manifest(
         lines.append(f"note: {_scalar(note)}")
     if answered is not None:
         lines.extend(_challenge_lines("answered", answered))
+    if stamps is None:
+        # From disk, not from the (possibly cached) touchpoint: a stamp
+        # written by another process since must survive the rewrite.
+        stamps = read_stamps(path) if path.is_file() else touchpoint.stamps
+    lines.extend(stamp_lines(stamps))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path

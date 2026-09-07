@@ -135,7 +135,7 @@ class Diagnostic:
         return Section.INFO
 
 
-MISSING_CODES = frozenset({"missing", "no-pii-violated"})
+MISSING_CODES = frozenset({"missing", "no-pii-violated", "threat-missing"})
 """Codes of the Missing section besides the ``*-missing`` family."""
 
 REVIEW_CODES = frozenset(

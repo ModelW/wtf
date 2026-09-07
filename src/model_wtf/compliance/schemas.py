@@ -13,6 +13,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
+from model_wtf.compliance.stamps import Stamps
 from model_wtf.compliance.yaml_io import (
     Marker,  # noqa: TC001 - used at runtime by pydantic
 )
@@ -81,6 +82,10 @@ class Party(StrictModel):
         default=None,
         description="Where the data processing agreement with this party lives "
         "(URL or document reference)",
+    )
+    threats: Stamps = Field(
+        default_factory=Stamps,
+        description="Stamps closing the threat cells the matrix left open",
     )
 
 

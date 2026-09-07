@@ -475,6 +475,74 @@ class Tools:
         bits.append(f"  reviewed at commit {entry.commit if entry else '?'}")
         return "\n".join(bits)
 
+    def threat_stamp(
+        self,
+        element: str,
+        sid: str,
+        status: str | None = None,
+        note: str | None = None,
+        missing: str | None = None,
+    ) -> str:
+        """``threat_stamp``: close one open threat cell, or record a finding."""
+        from model_wtf.compliance.threats import (
+            StampError,
+            build_matrix,
+            stamp_cell,
+        )
+
+        ws = self.workspace(refresh=True)
+        matrix = build_matrix(ws)
+        try:
+            path = stamp_cell(
+                matrix,
+                {u.id: u for u in self.units},
+                self.root / "compliance",
+                element,
+                sid,
+                status=status,
+                note=note,
+                missing=missing,
+                by="agent",
+                commit=git_head(self.root),
+            )
+        except StampError as exc:
+            raise ValueError(str(exc)) from exc
+        _log_activity(
+            "threat_stamp", element=element, sid=sid, status=status or "missing"
+        )
+        self._workspace = None
+        return f"Stamped {element} {sid} in {self._rel(path)}."
+
+    def threat_cells(self, element: str) -> str:
+        """``threat_cells``: the open cells of one element with the threat's
+        title and what to look at."""
+        from model_wtf.compliance.threats import (
+            Verdict,
+            build_matrix,
+            load_catalogue,
+        )
+
+        catalogue = load_catalogue()
+        matrix = build_matrix(self.workspace(), catalogue)
+        if element not in matrix.elements:
+            msg = f"no element {element!r}"
+            raise ValueError(msg)
+        lines = []
+        for cell in matrix.by_element(element):
+            if not cell.verdict.needs_review and cell.verdict is not Verdict.MISSING:
+                continue
+            spec = catalogue.threats[cell.sid]
+            note = catalogue.mapping[cell.sid].note or ""
+            lines.append(
+                f"{cell.sid} [{cell.topic}] {spec.title}: {note}".rstrip(": ")
+                + (
+                    f"  (currently {cell.verdict.value}: {cell.reason})"
+                    if cell.verdict is not Verdict.OPEN
+                    else ""
+                )
+            )
+        return "\n".join(lines) or "Nothing open on this element."
+
     def challenge(self, ref: str, grounds: str) -> str:
         """``challenge``: put a reviewed item or touchpoint back to pending."""
         commit = git_head(self.root) or "unknown"
@@ -1230,6 +1298,37 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
         return _guard(lambda: tools.reviews(files))
 
     @server.tool(
+        name="threat_cells",
+        description=(
+            "The threat cells still open on one element (a touchpoint id, "
+            "`unit:store`, `party:x`, or a flow `a->b`): SID, topic, title and "
+            "what to look at. Cells a rule already dismissed are not shown."
+        ),
+    )
+    def threat_cells(element: str) -> str:
+        return _guard(lambda: tools.threat_cells(element))
+
+    @server.tool(
+        name="threat_stamp",
+        description=(
+            "Close one open threat cell on an element after reading the code: "
+            "`status` mitigated (note cites file:line of the control), accepted "
+            "(note says why the risk is acceptable) or n/a (note says why the "
+            "threat does not apply here). Or record a finding with `missing`: "
+            "one line on what is exploitable and where. A flow (`a->b`) is "
+            "stamped on its source touchpoint keyed `SID@sink`."
+        ),
+    )
+    def threat_stamp(
+        element: str,
+        sid: str,
+        status: Literal["mitigated", "accepted", "n/a"] | None = None,
+        note: str | None = None,
+        missing: str | None = None,
+    ) -> str:
+        return _guard(lambda: tools.threat_stamp(element, sid, status, note, missing))
+
+    @server.tool(
         name="challenge",
         description=(
             "Put a reviewed data item (`unit:app.Model.field`) or declared "
@@ -1536,6 +1635,13 @@ def _touchpoint_review(tp: Touchpoint, files_of: set[str]) -> str:
         bits.append(
             f"  answered challenge at {tp.answered.commit}: {tp.answered.grounds}"
         )
+    for key, stamp in sorted(tp.stamps.root.items()):
+        if isinstance(stamp, Missing):
+            bits.append(f"  threat {key}: !missing {stamp.note or ''}")
+        else:
+            bits.append(
+                f"  threat {key}: {stamp.status} — {stamp.note or ''}".rstrip(" —")
+            )
     return "\n".join(bits)
 
 

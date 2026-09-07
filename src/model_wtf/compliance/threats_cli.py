@@ -15,24 +15,31 @@ from rich.text import Text
 from model_wtf.compliance.data_cli import load_context
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.options import ROOT_OPTION
+from model_wtf.compliance.review import git_head
+from model_wtf.compliance.stamps import STAMP_STATUSES, Stamp
 from model_wtf.compliance.threats import (
     Catalogue,
     CatalogueError,
     Cell,
     ElementKind,
     Matrix,
+    StampError,
     Verdict,
     build_matrix,
     load_catalogue,
+    stamp_cell,
 )
 from model_wtf.compliance.threats_gen import GenError, generate
-from model_wtf.compliance.workspace import load_workspace
+from model_wtf.compliance.workspace import SHARED_FOLDER, load_workspace
 from model_wtf.introspect.runner import IntrospectionFailed
 
 _VERDICT_STYLE = {
     Verdict.NEVER: "dim",
     Verdict.DISMISSED: "green",
     Verdict.OPEN: "yellow",
+    Verdict.STALE: "yellow",
+    Verdict.STAMPED: "green",
+    Verdict.MISSING: "red",
 }
 
 
@@ -136,9 +143,12 @@ def matrix_cmd(
     console.print(_kind_table(matrix))
     console.print(_topic_table(matrix, catalogue))
     counts = matrix.counts()
+    n_open = counts.get(Verdict.OPEN, 0) + counts.get(Verdict.STALE, 0)
     console.print(
         Text.assemble(
-            (f"{counts.get(Verdict.OPEN, 0)} open", "yellow"),
+            (f"{n_open} open", "yellow"),
+            (f", {counts.get(Verdict.MISSING, 0)} missing", "red"),
+            (f", {counts.get(Verdict.STAMPED, 0)} stamped", "green"),
             (
                 f"  ({counts.get(Verdict.DISMISSED, 0)} dismissed by rule, "
                 f"{counts.get(Verdict.NEVER, 0)} never in this stack; "
@@ -155,6 +165,8 @@ def _kind_table(matrix: Matrix) -> Table:
     table.add_column("Kind")
     table.add_column("Elements", justify="right")
     table.add_column("Open", justify="right")
+    table.add_column("Stamped", justify="right")
+    table.add_column("Missing", justify="right")
     table.add_column("Dismissed", justify="right")
     table.add_column("Never", justify="right")
     for kind in ElementKind:
@@ -166,7 +178,14 @@ def _kind_table(matrix: Matrix) -> Table:
         table.add_row(
             kind.value,
             str(len(ids)),
-            Text(str(by[Verdict.OPEN]), style="yellow" if by[Verdict.OPEN] else "dim"),
+            Text(
+                str(by[Verdict.OPEN] + by[Verdict.STALE]),
+                style="yellow" if by[Verdict.OPEN] + by[Verdict.STALE] else "dim",
+            ),
+            str(by[Verdict.STAMPED]),
+            Text(
+                str(by[Verdict.MISSING]), style="red" if by[Verdict.MISSING] else "dim"
+            ),
             str(by[Verdict.DISMISSED]),
             str(by[Verdict.NEVER]),
         )
@@ -199,7 +218,9 @@ def _matrix_dict(
     out: dict[str, Any] = {
         "elements": len(matrix.elements),
         "cells": len(matrix.cells),
-        "open": counts.get(Verdict.OPEN, 0),
+        "open": counts.get(Verdict.OPEN, 0) + counts.get(Verdict.STALE, 0),
+        "stamped": counts.get(Verdict.STAMPED, 0),
+        "missing": counts.get(Verdict.MISSING, 0),
         "dismissed": counts.get(Verdict.DISMISSED, 0),
         "never": counts.get(Verdict.NEVER, 0),
         "topics": {t: len(c) for t, c in matrix.open_by_topic().items()},
@@ -254,7 +275,14 @@ def why_cmd(
         )
     )
     cells = [c for c in matrix.by_element(element_id) if not sids or c.sid in sids]
-    for verdict in (Verdict.OPEN, Verdict.DISMISSED, Verdict.NEVER):
+    for verdict in (
+        Verdict.MISSING,
+        Verdict.OPEN,
+        Verdict.STALE,
+        Verdict.STAMPED,
+        Verdict.DISMISSED,
+        Verdict.NEVER,
+    ):
         group = [c for c in cells if c.verdict is verdict]
         if not group:
             continue
@@ -278,12 +306,85 @@ def _cell_line(cell: Cell, catalogue: Catalogue) -> Text:
         line.append(f"  ← {cell.reason}: {rule.description}", style="dim")
     elif cell.verdict is Verdict.NEVER:
         line.append(f"  ← {cell.reason}", style="dim")
+    elif cell.verdict is Verdict.MISSING:
+        line.append(f'  !missing "{cell.reason}"', style="red")
+    elif cell.verdict is Verdict.STAMPED and isinstance(cell.stamp, Stamp):
+        line.append(f"  {cell.stamp.status}", style="green")
+        if cell.stamp.note:
+            line.append(f": {cell.stamp.note}", style="dim")
+        if cell.stamp_key and "@" in cell.stamp_key:
+            line.append(f"  ({cell.stamp_key})", style="dim")
+    elif cell.verdict is Verdict.STALE and isinstance(cell.stamp, Stamp):
+        line.append(f"  {cell.reason}", style="yellow")
+        if cell.stamp.note:
+            line.append(f"  was: {cell.stamp.note}", style="dim")
     else:
         line.append(f"  [{cell.topic}]", style="yellow")
         note = catalogue.mapping[cell.sid].note
         if note:
             line.append(f"  {note}", style="dim")
     return line
+
+
+@threats.command("stamp")
+@click.argument("element_id")
+@click.argument("sid")
+@click.option(
+    "--status",
+    type=click.Choice(list(STAMP_STATUSES)),
+    default=None,
+    help="Close the cell: the code mitigates it, the risk is accepted, or it "
+    "does not apply here.",
+)
+@click.option("--note", default=None, help="Where / why (file:line for mitigated).")
+@click.option(
+    "--missing",
+    "missing_note",
+    default=None,
+    help="Record a finding instead: what is exploitable and where.",
+)
+@click.option("--python", default=None, help="Interpreter to use for introspection.")
+@ROOT_OPTION
+@click.pass_context
+def stamp_cmd(
+    ctx: click.Context,
+    *,
+    element_id: str,
+    sid: str,
+    status: str | None,
+    note: str | None,
+    missing_note: str | None,
+    python: str | None,
+    root: Path | None,
+) -> None:
+    """Stamp one open threat cell on a touchpoint, store, party or flow.
+
+    Writes the `threats:` block of the element's YAML (a flow's on its
+    source touchpoint, keyed `SID@sink`). Pinned to the element's
+    fingerprint: when the code moves, the stamp goes stale and the cell
+    reopens.
+    """
+    matrix, _, resolved = _matrix(ctx, root, python, None)
+    _, units, _ = load_context(root)
+    try:
+        path = stamp_cell(
+            matrix,
+            {u.id: u for u in units},
+            resolved / SHARED_FOLDER,
+            element_id,
+            sid,
+            status=status,
+            note=note,
+            missing=missing_note,
+            commit=git_head(resolved),
+        )
+    except (StampError, ValueError) as exc:
+        Console(stderr=True).print(Text.assemble(("Error: ", "red"), str(exc)))
+        ctx.exit(int(ExitCode.TOOL_ERROR))
+    Console().print(
+        Text.assemble(("stamped", "green"), f"  {element_id} {sid}  → {path}")
+    )
+    ctx.exit(0)
 
 
 __all__ = ["threats"]

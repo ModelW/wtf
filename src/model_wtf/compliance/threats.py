@@ -23,25 +23,28 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from model_wtf.compliance.stamps import Stamp, Stamps, read_stamps, write_stamps
 from model_wtf.compliance.threats_gen import (
     MAPPING_FILE,
     RULES_FILE,
     builtin_threats_dir,
 )
 from model_wtf.compliance.touchpoints import Kind
-from model_wtf.compliance.yaml_io import load_yaml
+from model_wtf.compliance.yaml_io import Missing, load_yaml
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from model_wtf.compliance.data import Row
+    from model_wtf.compliance.report import Unit
+    from model_wtf.compliance.schemas import Party
     from model_wtf.compliance.stores import Store
     from model_wtf.compliance.touchpoints import Touchpoint
     from model_wtf.compliance.workspace import Workspace
@@ -212,6 +215,7 @@ class Element:
     label: str = ""
     touchpoint: Touchpoint | None = None
     store: Store | None = None
+    party: Party | None = None
     files: list[Path] = field(default_factory=list)
     items: list[Row] = field(default_factory=list)
     """Data items on the element (a flow's payload, a store's contents)."""
@@ -240,6 +244,17 @@ class Verdict(StrEnum):
     NEVER = "never"
     DISMISSED = "dismissed"
     OPEN = "open"
+    STAMPED = "stamped"
+    """A reviewer closed it (mitigated / accepted / n/a)."""
+    STALE = "stale"
+    """Stamped, but the element's fingerprint moved since: open again."""
+    MISSING = "missing"
+    """Stamped ``!missing``: an established non-compliance."""
+
+    @property
+    def needs_review(self) -> bool:
+        """Whether an agent or a human still has to look."""
+        return self in (Verdict.OPEN, Verdict.STALE)
 
 
 @dataclass(frozen=True)
@@ -252,6 +267,10 @@ class Cell:
     reason: str
     """The rule id that dismissed it, the `never` text, or the open topic."""
     topic: str | None = None
+    stamp: Stamp | Missing | None = None
+    """The stamp that closed (or flagged) it, when one applies."""
+    stamp_key: str | None = None
+    """``SID`` or ``SID@sink``: which entry of the element's block matched."""
 
 
 @dataclass
@@ -260,10 +279,16 @@ class Matrix:
 
     elements: dict[str, Element]
     cells: list[Cell]
+    titles: dict[str, str] = field(default_factory=dict)
+    """SID → threat title, for renderers without the catalogue at hand."""
 
     def open(self) -> list[Cell]:
-        """Cells an agent has to look at."""
-        return [c for c in self.cells if c.verdict is Verdict.OPEN]
+        """Cells an agent has to look at (open, or stamped on moved code)."""
+        return [c for c in self.cells if c.verdict.needs_review]
+
+    def missing(self) -> list[Cell]:
+        """Cells stamped ``!missing``."""
+        return [c for c in self.cells if c.verdict is Verdict.MISSING]
 
     def by_element(self, element_id: str) -> list[Cell]:
         """Every cell of one element, catalogue order."""
@@ -319,6 +344,7 @@ def build_elements(ws: Workspace) -> dict[str, Element]:
             ElementKind.PARTY,
             "shared",
             party.name if isinstance(party.name, str) else party_id,
+            party=party,
         )
     _add_flows(ws, elements, rows)
     return elements
@@ -438,8 +464,63 @@ def build_matrix(ws: Workspace, catalogue: Catalogue | None = None) -> Matrix:
     cells: list[Cell] = []
     for element in elements.values():
         for sid in catalogue.for_element(element.kind):
-            cells.append(decide(element, sid, catalogue, ws))
-    return Matrix(elements, cells)
+            cell = decide(element, sid, catalogue, ws)
+            if cell.verdict is Verdict.OPEN:
+                cell = apply_stamp(cell, element, elements)
+            cells.append(cell)
+    return Matrix(
+        elements, cells, {sid: t.title for sid, t in catalogue.threats.items()}
+    )
+
+
+def stamps_of(
+    element: Element, elements: dict[str, Element]
+) -> tuple[Stamps, str, str | None]:
+    """``(stamps, fingerprint, sink)`` a cell reads: a flow's come from its
+    source element, with the sink as the qualifier."""
+    if element.kind is ElementKind.FLOW:
+        # The flow's stamps live on its touchpoint end (the source, or the
+        # sink for the actor's request), qualified by the other end.
+        holder, other = _flow_holder(element, elements)
+        if holder is not None:
+            stamps, fingerprint, _ = stamps_of(holder, elements)
+            return stamps, fingerprint, other
+        return Stamps(), "", None
+    if element.touchpoint is not None:
+        return element.touchpoint.stamps, element.touchpoint.fingerprint, None
+    if element.store is not None:
+        return element.store.stamps, element.store.fingerprint, None
+    if element.party is not None:
+        return element.party.threats, "", None
+    return Stamps(), "", None
+
+
+def apply_stamp(cell: Cell, element: Element, elements: dict[str, Element]) -> Cell:
+    """An open cell with the element's stamp applied, if any."""
+    stamps, fingerprint, sink = stamps_of(element, elements)
+    found = stamps.lookup(cell.sid, sink)
+    if found is None:
+        return cell
+    key, stamp = found
+    if isinstance(stamp, Missing):
+        return replace(
+            cell,
+            verdict=Verdict.MISSING,
+            reason=stamp.note or "",
+            stamp=stamp,
+            stamp_key=key,
+        )
+    if stamp.fingerprint and fingerprint and stamp.fingerprint != fingerprint:
+        return replace(
+            cell,
+            verdict=Verdict.STALE,
+            reason=f"stamped {stamp.status} on other code (fingerprint moved)",
+            stamp=stamp,
+            stamp_key=key,
+        )
+    return replace(
+        cell, verdict=Verdict.STAMPED, reason=stamp.status, stamp=stamp, stamp_key=key
+    )
 
 
 def decide(element: Element, sid: str, catalogue: Catalogue, ws: Workspace) -> Cell:
@@ -611,6 +692,7 @@ __all__ = [
     "Element",
     "ElementKind",
     "Matrix",
+    "StampError",
     "Verdict",
     "build_elements",
     "build_matrix",
@@ -619,4 +701,129 @@ __all__ = [
     "load_catalogue",
     "open_per_element",
     "open_per_sid",
+    "stamp_cell",
 ]
+
+
+# ---------------------------------------------------------------------------
+# stamping
+# ---------------------------------------------------------------------------
+
+
+class StampError(ValueError):
+    """The stamp cannot be written as asked."""
+
+
+def stamp_cell(
+    matrix: Matrix,
+    units: dict[str, Unit],
+    shared: Path,
+    element_id: str,
+    sid: str,
+    *,
+    status: str | None,
+    note: str | None,
+    missing: str | None = None,
+    by: str = "human",
+    commit: str | None = None,
+) -> Path:
+    """Write one stamp on the element's YAML file; return the file.
+
+    ``status`` (mitigated / accepted / n/a) closes the cell; ``missing``
+    instead records a finding. A flow is stamped on its source with the
+    sink as qualifier (``SID@sink``). Refused on a cell no rule left open
+    (nothing to stamp) or on an element with no file of its own.
+    """
+    element = matrix.elements.get(element_id)
+    if element is None:
+        msg = f"no element {element_id!r}; ids come from `threats matrix --open`"
+        raise StampError(msg)
+    cell = next((c for c in matrix.by_element(element_id) if c.sid == sid), None)
+    if cell is None and element.kind is not ElementKind.FLOW:
+        # A flow-only threat (DS06, DR01...) stamped on the touchpoint covers
+        # every flow of it: fine as long as one of them carries the cell.
+        cell = next(
+            (
+                c
+                for c in matrix.cells
+                if c.sid == sid
+                and _stamp_holder(matrix.elements[c.element], matrix.elements)[0]
+                is element
+                and c.verdict.needs_review
+            ),
+            None,
+        )
+    if cell is None:
+        msg = f"{sid} does not apply to {element_id} (not in its matrix row)"
+        raise StampError(msg)
+    if cell.verdict in (Verdict.NEVER, Verdict.DISMISSED):
+        msg = (
+            f"{element_id} {sid} is already {cell.verdict.value} ({cell.reason}); "
+            "nothing to stamp"
+        )
+        raise StampError(msg)
+    if (status is None) == (missing is None):
+        msg = "give either a status (mitigated | accepted | n/a) or a missing note"
+        raise StampError(msg)
+    holder, sink = _stamp_holder(element, matrix.elements)
+    path = _holder_path(holder, units, shared)
+    if path is None:
+        msg = f"{holder.id} has no YAML file to stamp"
+        raise StampError(msg)
+    stamps = read_stamps(path)
+    key = f"{sid}@{sink}" if sink else sid
+    _, fingerprint, _ = stamps_of(holder, matrix.elements)
+    value: Stamp | Missing
+    if missing is not None:
+        text = missing.strip()
+        if by == "agent" and not text.startswith("[agent]"):
+            text = f"[agent] {text}"
+        value = Missing(text)
+    else:
+        value = Stamp(
+            status=status,  # type: ignore[arg-type]
+            note=(note or "").strip() or None,
+            commit=commit,
+            fingerprint=fingerprint or None,
+            by=by,  # type: ignore[arg-type]
+        )
+    stamps.root[key] = value
+    write_stamps(path, stamps)
+    return path
+
+
+def _flow_holder(
+    flow: Element, elements: dict[str, Element]
+) -> tuple[Element | None, str | None]:
+    """``(touchpoint end, other end id)`` of a flow; the source when both are."""
+    source = elements.get(flow.source or "")
+    sink = elements.get(flow.sink or "")
+    if source is not None and source.touchpoint is not None:
+        return source, flow.sink
+    if sink is not None and sink.touchpoint is not None:
+        return sink, flow.source
+    return source or sink, flow.sink if source is not None else flow.source
+
+
+def _stamp_holder(
+    element: Element, elements: dict[str, Element]
+) -> tuple[Element, str | None]:
+    """The element whose file carries the stamp, and the flow qualifier if any."""
+    if element.kind is ElementKind.FLOW:
+        holder, other = _flow_holder(element, elements)
+        if holder is not None:
+            return holder, other
+    return element, None
+
+
+def _holder_path(holder: Element, units: dict[str, Unit], shared: Path) -> Path | None:
+    tp = holder.touchpoint
+    if tp is not None and tp.unit in units:
+        if tp.data is None:
+            return None
+        return units[tp.unit].folder / "touchpoints" / f"{tp.slug}.yaml"
+    if holder.store is not None and holder.unit in units:
+        return units[holder.unit].folder / "stores" / f"{holder.store.slug}.yaml"
+    if holder.party is not None:
+        return shared / "parties" / f"{holder.id.removeprefix('party:')}.yaml"
+    return None
