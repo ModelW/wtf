@@ -12,6 +12,12 @@ from rich.text import Text
 from model_wtf.compliance.check import run_check
 from model_wtf.compliance.data_cli import data
 from model_wtf.compliance.exit_codes import ExitCode
+from model_wtf.compliance.gate import (
+    GateError,
+    github_context,
+    run_gate,
+    write_github_outputs,
+)
 from model_wtf.compliance.init_cmd import (
     PartySpec,
     detect_dockerfiles,
@@ -20,6 +26,9 @@ from model_wtf.compliance.init_cmd import (
 )
 from model_wtf.compliance.options import ROOT_OPTION, resolve_root
 from model_wtf.compliance.render import (
+    render_gate_github,
+    render_gate_json,
+    render_gate_text,
     render_github,
     render_json,
     render_text,
@@ -110,6 +119,95 @@ def check(
 
 
 @compliance.command()
+@click.option(
+    "--merge-into",
+    "base_ref",
+    default=None,
+    help="Base ref the change will be merged into (default: the pull request "
+    "base under GitHub Actions).",
+)
+@click.option(
+    "--head", "head_ref", default=None, help="Ref to gate instead of the working tree."
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["auto", "text", "json", "github"]),
+    default="auto",
+    show_default=True,
+    help="auto: github under GitHub Actions, text otherwise.",
+)
+@click.option(
+    "--fail-on-existing",
+    is_flag=True,
+    help="Also fail on findings that were already there (clean repositories).",
+)
+@click.option(
+    "--strict",
+    is_flag=True,
+    help="Treat images without a compliance block as errors instead of warnings.",
+)
+@ROOT_OPTION
+@click.option("--python", default=None, help="Interpreter to use for introspection.")
+@click.pass_context
+def ghate(
+    ctx: click.Context,
+    *,
+    base_ref: str | None,
+    head_ref: str | None,
+    output_format: str,
+    fail_on_existing: bool,
+    strict: bool,
+    root: Path | None,
+    python: str | None,
+) -> None:
+    """The pull-request gate: fail only on findings the change introduces.
+
+    Runs `compliance check` on the base (in a temporary worktree) and on the
+    head, compares by finding identity. Exit 0 when nothing is introduced
+    (pre-existing findings are listed, not failed), 1 when something is, 3
+    on declaration errors in the head, 4 on a tool error.
+    """
+    context = github_context()
+    if base_ref is None:
+        if context is None:
+            Console(stderr=True).print(
+                Text.assemble(
+                    ("Error: ", "red"),
+                    "--merge-into REF is required outside GitHub Actions "
+                    "(e.g. `--merge-into develop`)",
+                )
+            )
+            ctx.exit(int(ExitCode.TOOL_ERROR))
+        base_ref = context.base_ref
+    if output_format == "auto":
+        output_format = "github" if context is not None else "text"
+    try:
+        result = run_gate(
+            resolve_root(root),
+            base_ref=base_ref,
+            head_ref=head_ref,
+            strict=strict,
+            python=python,
+        )
+        if output_format == "json":
+            click.echo(render_gate_json(result))
+        elif output_format == "github":
+            render_gate_github(result, Console(no_color=True, width=200))
+        else:
+            render_gate_text(result, Console())
+        if context is not None:
+            write_github_outputs(result, context)
+    except GateError as exc:
+        Console(stderr=True).print(Text.assemble(("Error: ", "red"), str(exc)))
+        ctx.exit(int(ExitCode.TOOL_ERROR))
+    except Exception as exc:
+        Console(stderr=True).print(Text.assemble(("Tool error: ", "red"), str(exc)))
+        ctx.exit(int(ExitCode.TOOL_ERROR))
+    ctx.exit(int(result.exit_code_with(fail_on_existing=fail_on_existing)))
+
+
+@compliance.command()
 @click.option("--name", "app_name", help="Product name (app.yaml#name).")
 @click.option("--controller-name", help="Legal name of the controller (the client).")
 @click.option("--controller-country", help="Controller country, ISO 3166-1 alpha-2.")
@@ -119,6 +217,11 @@ def check(
     "--no-processor",
     is_flag=True,
     help="The controller operates the product itself; declare no processor.",
+)
+@click.option(
+    "--no-workflow",
+    is_flag=True,
+    help="Do not write .github/workflows/compliance.yml (the PR gate).",
 )
 @click.option(
     "--custom-sensitivity",
@@ -141,6 +244,7 @@ def init(
     processor_name: str | None,
     processor_country: str | None,
     no_processor: bool,
+    no_workflow: bool,
     custom_sensitivity: bool,
     custom_categories: bool,
     root: Path | None,
@@ -184,6 +288,7 @@ def init(
         processor=processor,
         manifest_units=proposed,
         custom_sensitivity=custom_sensitivity,
+        workflow=not no_workflow,
         custom_categories=custom_categories,
     )
     for path in result.created:

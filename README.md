@@ -407,6 +407,62 @@ via `data_flag` or a `{"missing": ...}` verdict in `activity_create`; the
 note is prefixed `[agent]`), `[declared]` (a human's `!missing`) — and
 `data why` prints each right's status next to the item's lifecycle.
 
+### Use it in CI: the gate
+
+Nobody expects a repository to be clean on day one; the gate expects it to
+**not get worse**. `model-wtf compliance ghate` runs the whole `check`
+twice — on the base ref, checked out into a temporary `git worktree` with
+its own `compliance/` state, and on the head (the working tree by default,
+so uncommitted work is gated too) — and fails only on findings the change
+**introduces**.
+
+```yaml
+# .github/workflows/compliance.yml  (written by `compliance init`)
+name: compliance
+on: [pull_request]
+jobs:
+    gate:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+              with: { fetch-depth: 0 }
+            - uses: ModelW/wtf@v1
+```
+
+The action (`action.yml` at the root of this repository, `v1` tag) installs
+uv and model-wtf, runs `uv sync --frozen` / `pnpm install` in every folder
+holding a lockfile so introspection works, then runs the gate. Inputs:
+`merge-into` (default: the PR base from the event), `fail-on-existing`,
+`python-version`, `install-python-deps`, `install-node-deps`. Outputs:
+`introduced`, `fixed`, `pre-existing`. Under Actions it emits one
+`::error`/`::warning` annotation per introduced finding on the head's
+files, a `::notice` verdict, and a Markdown table (introduced / fixed /
+pre-existing per check) in the step summary.
+
+Locally:
+
+```
+uv run model-wtf compliance ghate --merge-into develop           # gate the working tree
+uv run model-wtf compliance ghate --merge-into develop --head feature/x
+uv run model-wtf compliance ghate --merge-into develop --format json
+```
+
+Findings are compared by **identity** — `(scope, code, subject)`, where the
+subject is a data id, a touchpoint id, an activity slug or `file#field`,
+never a line number or a message. Folded lines (`12 data item(s) pending`)
+are compared item by item, so a PR that adds an unreviewed personal field
+fails with exactly that item, while a PR touching an unrelated file when
+300 items were already pending passes. Fixed findings are reported too.
+
+The base worktree gets the head's `.venv` / `node_modules` linked in when
+the unit's lockfile is byte identical on both sides; otherwise the base
+run is approximate and the gate says so (a dependency change is a
+legitimate reason for new findings). Exit codes: 0 nothing introduced
+(pre-existing findings are listed, not failed), 1 findings introduced, 3
+declaration errors in the head (always the PR's fault), 4 tool error;
+`--fail-on-existing` also fails on pre-existing findings for repositories
+that are already clean.
+
 ### Exit codes
 
 | Code | Meaning                                                              |

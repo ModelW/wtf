@@ -1,0 +1,102 @@
+# ModelW/wtf as a GitHub Action: the compliance gate on pull requests.
+#
+#   - uses: actions/checkout@v4
+#     with: { fetch-depth: 0 }
+#   - uses: ModelW/wtf@v1
+#
+# Installs uv and model-wtf (from this checked-out ref), installs each unit's
+# dependencies when a lockfile is found so introspection works, then runs
+# `model-wtf compliance ghate`. Fails only on findings the PR introduces.
+
+name: model-wtf compliance gate
+description: Fail a pull request only when it introduces compliance findings.
+author: ModelW
+
+inputs:
+    merge-into:
+        description: Base ref to compare against (default: the pull request base).
+        required: false
+        default: ""
+    fail-on-existing:
+        description: Also fail on pre-existing findings (for repositories already clean).
+        required: false
+        default: "false"
+    python-version:
+        description: Python used to run model-wtf.
+        required: false
+        default: "3.13"
+    install-python-deps:
+        description: Run `uv sync --frozen` in every folder holding a uv.lock.
+        required: false
+        default: "true"
+    install-node-deps:
+        description: Run `pnpm install --frozen-lockfile` (or npm ci) where a lockfile is found.
+        required: false
+        default: "true"
+    openrouter-api-key:
+        description: Reserved for a future auto-review step; never required for the gate.
+        required: false
+        default: ""
+
+outputs:
+    introduced:
+        description: Number of findings the pull request introduces.
+        value: ${{ steps.gate.outputs.introduced }}
+    fixed:
+        description: Number of findings the pull request fixes.
+        value: ${{ steps.gate.outputs.fixed }}
+    pre-existing:
+        description: Number of findings already present on the base.
+        value: ${{ steps.gate.outputs.pre-existing }}
+
+runs:
+    using: composite
+    steps:
+        - uses: astral-sh/setup-uv@v5
+          with:
+              enable-cache: true
+              python-version: ${{ inputs.python-version }}
+
+        - name: Install model-wtf
+          shell: bash
+          run: uv tool install --python ${{ inputs.python-version }} "${{ github.action_path }}"
+
+        - name: Install unit dependencies (Python)
+          if: inputs.install-python-deps == 'true'
+          shell: bash
+          run: |
+              set -euo pipefail
+              for lock in uv.lock */uv.lock; do
+                  [ -f "$lock" ] || continue
+                  echo "::group::uv sync $(dirname "$lock")"
+                  (cd "$(dirname "$lock")" && uv sync --frozen --no-dev) || echo "::warning::uv sync failed in $(dirname "$lock"); its findings will be approximate"
+                  echo "::endgroup::"
+              done
+
+        - name: Install unit dependencies (Node)
+          if: inputs.install-node-deps == 'true'
+          shell: bash
+          run: |
+              set -euo pipefail
+              for lock in pnpm-lock.yaml */pnpm-lock.yaml; do
+                  [ -f "$lock" ] || continue
+                  command -v pnpm >/dev/null || npm install -g pnpm >/dev/null
+                  echo "::group::pnpm install $(dirname "$lock")"
+                  (cd "$(dirname "$lock")" && pnpm install --frozen-lockfile) || echo "::warning::pnpm install failed in $(dirname "$lock")"
+                  echo "::endgroup::"
+              done
+              for lock in package-lock.json */package-lock.json; do
+                  [ -f "$lock" ] || continue
+                  echo "::group::npm ci $(dirname "$lock")"
+                  (cd "$(dirname "$lock")" && npm ci) || echo "::warning::npm ci failed in $(dirname "$lock")"
+                  echo "::endgroup::"
+              done
+
+        - name: Compliance gate
+          id: gate
+          shell: bash
+          run: |
+              args=()
+              [ -n "${{ inputs.merge-into }}" ] && args+=(--merge-into "${{ inputs.merge-into }}")
+              [ "${{ inputs.fail-on-existing }}" = "true" ] && args+=(--fail-on-existing)
+              model-wtf compliance ghate "${args[@]}"

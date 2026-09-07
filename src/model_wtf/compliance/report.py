@@ -99,6 +99,10 @@ class Diagnostic:
         Who established a Missing finding: ``derived`` (the tool, from ops
         and exemptions), ``claimed`` (an agent that read the code),
         ``declared`` (a human's ``!missing``).
+    items
+        For a line that folds several things (``12 data item(s) pending``),
+        their stable ids. The text renderer keeps the fold; JSON and the
+        gate see each item, so a PR is judged on the items it adds.
     """
 
     severity: Severity
@@ -110,6 +114,7 @@ class Diagnostic:
     hint: str | None = None
     note: str | None = None
     origin: str | None = None
+    items: tuple[str, ...] = ()
 
     @property
     def section(self) -> Section:
@@ -378,6 +383,7 @@ class Report:
             "hint": diag.hint,
             "note": diag.note,
             "origin": diag.origin,
+            "items": list(diag.items),
         }
 
     def by_section(self) -> dict[Section, list[Diagnostic]]:
