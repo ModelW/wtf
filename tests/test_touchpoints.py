@@ -334,10 +334,11 @@ def test_activities_derivation_and_check(repo: Path) -> None:
     assert sections[Section.TODO] == ["todo"]
     # admin:shop.Customer now belongs to ``support``; the front unit's
     # touchpoints and the api data are still pending.
+    # One touchpoint-pending line per introspectable unit: ``front`` only
+    # counts when node and its fixture modules are around.
     assert sorted(sections[Section.REVIEW]) == [
         "pending-review",
-        "touchpoint-pending",
-        "touchpoint-pending",
+        *["touchpoint-pending"] * (2 if HAS_NODE else 1),
     ]
     assert report.exit_code is ExitCode.DECLARATION_ERROR
     missing = next(d for d in report.diagnostics if d.code == "missing")
