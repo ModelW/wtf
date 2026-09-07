@@ -372,8 +372,17 @@ def test_flow_stamps_live_on_the_source_keyed_by_sink(repo: Path) -> None:
     assert by["api:checkout->api:db-default", "DS06"].verdict is Verdict.STAMPED
     # The actor flow is not covered by a sink-specific stamp...
     assert by["actor:subject->api:checkout", "DS06"].verdict is Verdict.OPEN
-    # ...but a bare SID covers every flow of the touchpoint.
-    _stamp(repo, "api:checkout", "DR01", "--status", "n/a", "--note", "https only")
+    # A bare SID would cover every flow of the touchpoint at once: refused
+    # while several carry the open cell, with the keys to use instead.
+    out = _stamp(repo, "api:checkout", "DR01", "--status", "n/a", "--note", "https")
+    assert out.exit_code != 0  # type: ignore[attr-defined]
+    assert "DR01@actor:subject" in out.output  # type: ignore[attr-defined]
+    assert "DR01@api:db-default" in out.output  # type: ignore[attr-defined]
+    for sink in ("api:db-default", "api:task:shop.send_receipt"):
+        _stamp(repo, "api:checkout", f"DR01@{sink}", "--status", "n/a", "--note", "x")
+    # Once only one flow is left open, the bare key is unambiguous.
+    out = _stamp(repo, "api:checkout", "DR01", "--status", "n/a", "--note", "https")
+    assert out.exit_code == 0, out.output  # type: ignore[attr-defined]
     matrix = build_matrix(_ws(repo))
     by = {(c.element, c.sid): c for c in matrix.cells}
     assert by["actor:subject->api:checkout", "DR01"].verdict is Verdict.STAMPED

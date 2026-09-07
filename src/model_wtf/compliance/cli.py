@@ -16,6 +16,7 @@ from model_wtf.compliance.check import run_check
 from model_wtf.compliance.data_cli import data
 from model_wtf.compliance.discovery import load_units, select_manifest
 from model_wtf.compliance.exit_codes import ExitCode
+from model_wtf.compliance.flows_cli import flows
 from model_wtf.compliance.gate import (
     GateError,
     commit_challenges,
@@ -56,6 +57,7 @@ compliance.add_command(data)
 compliance.add_command(stores)
 compliance.add_command(touchpoints)
 compliance.add_command(activities)
+compliance.add_command(flows)
 compliance.add_command(threats)
 
 

@@ -23,6 +23,7 @@ import re
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -46,6 +47,7 @@ from model_wtf.compliance.data import (
 )
 from model_wtf.compliance.declarations import PARTIES_DIR, load_declarations
 from model_wtf.compliance.discovery import find_repo_root, load_units, select_manifest
+from model_wtf.compliance.flows import build_flows, describe
 from model_wtf.compliance.knowledge import Knowledge, load_knowledge
 from model_wtf.compliance.ops import OPS_HELP, OpError, OpSpec, parse_ops_json
 from model_wtf.compliance.review import Lock, Reviewed, git_head
@@ -61,7 +63,9 @@ from model_wtf.compliance.touchpoints import (
     Scope,
     Touchpoint,
     Transfer,
+    Undeclared,
     challenge_manifest,
+    report_undeclared,
     write_manifest,
 )
 from model_wtf.compliance.workspace import Workspace, load_workspace
@@ -517,28 +521,12 @@ class Tools:
 
         ws = self.workspace(refresh=True)
         matrix = build_matrix(ws)
-        # `SID@sink` names one flow of the element: stamp that flow.
-        target = element
-        if "@" in sid:
-            sid, _, sink = sid.partition("@")
-            flow = next(
-                (
-                    e
-                    for e in matrix.elements
-                    if e in (f"{element}->{sink}", f"{sink}->{element}")
-                ),
-                None,
-            )
-            if flow is None:
-                msg = f"{element} has no flow with {sink!r}"
-                raise ValueError(msg)
-            target = flow
         try:
             path, key, written = stamp_cell(
                 matrix,
                 {u.id: u for u in self.units},
                 self.root / "compliance",
-                target,
+                element,
                 sid,
                 status=status,
                 note=note,
@@ -677,7 +665,77 @@ class Tools:
             )
             lines.append(f"{eid}  {where}")
             lines.append(f"  open: {listed}")
+            if element.touchpoint is not None:
+                lines.extend(
+                    f"  flow {f.stamp_key_suffix}: {describe(f, ws)}"
+                    for f in build_flows(ws, matrix.elements).of(eid)
+                )
         return "\n".join(lines)
+
+    def flows(self, element: str) -> str:
+        """``flows``: the flows of one touchpoint in plain words, each with the
+        ``@sink`` suffix a stamp uses to name it."""
+        from model_wtf.compliance.threats import build_elements
+
+        ws = self.workspace()
+        if element not in ws.all_touchpoints:
+            msg = f"no touchpoint {element!r}"
+            raise ValueError(msg)
+        inventory = build_flows(ws, build_elements(ws))
+        lines = [
+            f"{f.stamp_key_suffix}  [{f.kind.value}, {f.status.value}]  "
+            f"{describe(f, ws)}"
+            for f in inventory.of(element)
+        ]
+        if not lines:
+            return f"{element} has no flow (declares no data, no transfer)."
+        return (
+            f"Flows of {element} (stamp a flow-only threat as `SID@sink`):\n"
+            + "\n".join(lines)
+            + "\nAnything the code sends elsewhere is not on this list: "
+            "report it with flow_report."
+        )
+
+    def flow_report(self, element: str, sink: str, data: list[str], note: str) -> str:
+        """``flow_report``: record a flow the code has and the model lacks."""
+        ws = self.workspace(refresh=True)
+        tp = ws.all_touchpoints.get(element)
+        if tp is None:
+            msg = f"no touchpoint {element!r}"
+            raise ValueError(msg)
+        problems: list[str] = []
+        refs = [
+            full
+            for r in data
+            if (full := self._resolve_ref(r, tp.unit, problems)) is not None
+        ]
+        if problems:
+            return "Error: nothing written; fix these:\n  " + "\n  ".join(problems)
+        if not note.strip():
+            return "Error: the note must cite the code (file:line and what it sends)."
+        parties = set(load_declarations(self.root / SHARED_FOLDER).parties)
+        target = sink.strip()
+        bare = target.removeprefix("party:")
+        if bare in parties:
+            target = f"party:{bare}"
+        at = datetime.now(tz=UTC).replace(microsecond=0).isoformat()
+        found = Undeclared(
+            sink=target,
+            data=refs,
+            note=note.strip(),
+            commit=git_head(self.root),
+            at=at.replace("+00:00", "Z"),
+        )
+        refused = report_undeclared(self.unit(tp.unit), tp, found)
+        if refused:
+            return f"Refused ({element} -> {target}): {refused}"
+        self._workspace = None
+        _log_activity("flow_report", element=element, sink=target, items=len(refs))
+        return (
+            f"Recorded: {element} sends {len(refs)} item(s) to {target}, undeclared. "
+            "It is a finding until the transfer is declared (touchpoint_set_data "
+            "with `transfers`; party_add first when the organisation is new)."
+        )
 
     def challenge(self, ref: str, grounds: str) -> str:
         """``challenge``: put a reviewed item or touchpoint back to pending."""
@@ -1471,6 +1529,33 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
     )
     def threat_topic(topic: str, elements: list[str] | None = None) -> str:
         return _guard(lambda: tools.threat_topic(topic, elements or []))
+
+    @server.tool(
+        name="flows",
+        description=(
+            "The flows of one touchpoint in plain words — what it exchanges with "
+            "its callers, what it does on which store, what it sends to which "
+            "organisation (declared transfers are intended, not leaks) — each with "
+            "the `@sink` suffix to stamp a flow-only threat. Compare the code with "
+            "this list; whatever the code sends elsewhere goes to flow_report."
+        ),
+    )
+    def flows_tool(element: str) -> str:
+        return _guard(lambda: tools.flows(element))
+
+    @server.tool(
+        name="flow_report",
+        description=(
+            "Record a flow the code has and the model lacks: `element` (touchpoint "
+            "id), `sink` (a party id when it exists, else the host or service as "
+            "the code names it), `data` (inventory refs of what is sent), `note` "
+            "(file:line and what the code does). It becomes a finding until the "
+            "transfer is declared. Not for declared transfers or the project's "
+            "own stores."
+        ),
+    )
+    def flow_report(element: str, sink: str, data: list[str], note: str) -> str:
+        return _guard(lambda: tools.flow_report(element, sink, data, note))
 
     @server.tool(
         name="threat_stamp",
