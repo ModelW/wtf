@@ -9,7 +9,7 @@ an ``!todo`` there would be noise nobody is required to resolve.
 from __future__ import annotations
 
 import re
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
@@ -66,6 +66,16 @@ class Party(StrictModel):
     )
     representative: Contact | None = Field(
         default=None, description="Art. 27 representative in the Union"
+    )
+    safeguard: Literal["sccs", "bcr", "dpf", "derogation"] | Marker | None = Field(
+        default=None,
+        description="Ch. V safeguard for transfers to this party when it sits "
+        "outside the EEA/adequacy countries: sccs, bcr, dpf or derogation",
+    )
+    dpf_certified: bool | None = Field(
+        default=None,
+        description="Whether the party is on the EU-US Data Privacy Framework list "
+        "(required for safeguard: dpf)",
     )
 
 

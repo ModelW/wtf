@@ -1,0 +1,50 @@
+# Countries to which personal data may flow without Chapter V safeguards:
+# the EEA, and the countries covered by a Commission adequacy decision
+# (Art. 45). US only under the Data Privacy Framework, hence `dpf_certified`
+# on the party rather than a country entry here.
+eea:
+  - AT
+  - BE
+  - BG
+  - HR
+  - CY
+  - CZ
+  - DK
+  - EE
+  - FI
+  - FR
+  - DE
+  - GR
+  - HU
+  - IE
+  - IT
+  - LV
+  - LT
+  - LU
+  - MT
+  - NL
+  - PL
+  - PT
+  - RO
+  - SK
+  - SI
+  - ES
+  - SE
+  - IS
+  - LI
+  - NO
+adequacy:
+  - AD  # Andorra
+  - AR  # Argentina
+  - CA  # Canada (commercial organisations, PIPEDA)
+  - CH  # Switzerland
+  - FO  # Faroe Islands
+  - GG  # Guernsey
+  - IL  # Israel
+  - IM  # Isle of Man
+  - JP  # Japan
+  - JE  # Jersey
+  - NZ  # New Zealand
+  - KR  # Republic of Korea
+  - GB  # United Kingdom
+  - UY  # Uruguay

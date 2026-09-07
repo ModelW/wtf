@@ -48,11 +48,12 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Annotated, Any
 
 import yaml
-from pydantic import Field, StringConstraints, ValidationError
+from pydantic import Field, StringConstraints, ValidationError, model_validator
 
 from model_wtf.compliance.declarations import format_errors
 from model_wtf.compliance.knowledge import Dpia, Knowledge
 from model_wtf.compliance.report import Diagnostic, Severity, marker_diagnostics
+from model_wtf.compliance.rights import Right, RightsSpec
 from model_wtf.compliance.schemas import NonEmpty, StrictModel
 from model_wtf.compliance.stores import UnitStores, collect_stores
 from model_wtf.compliance.yaml_io import Marker, load_yaml, todo_text
@@ -140,7 +141,25 @@ class Override(StrictModel):
     category: str | None = None
     store: str | None = None
     """Slug of the store holding the value, when the settings get it wrong."""
-    reason: NonEmpty | Marker
+    reason: NonEmpty | Marker | None = None
+    """Why the rule was wrong. Optional when the file only carries ``rights``."""
+    rights: RightsSpec | None = None
+    """Exemptions or observed gaps per right (see :mod:`rights`)."""
+
+    @model_validator(mode="after")
+    def _reason_unless_rights_only(self) -> Override:
+        given = (self.pii, self.sensitivity, self.category, self.store)
+        classifies = any(v is not None for v in given)
+        if classifies and self.reason is None:
+            msg = "reason: required when the file changes the classification"
+            raise ValueError(msg)
+        return self
+
+
+class RightsOnly(StrictModel):
+    """``data/<app.Model>.*.yaml``: a rights block for every field of a model."""
+
+    rights: RightsSpec
 
 
 class ManualItem(StrictModel):
@@ -153,6 +172,7 @@ class ManualItem(StrictModel):
     store: str | Marker | None = None
     """Slug of the store holding the item (``stores/`` declares external ones)."""
     reason: NonEmpty | None = Field(default=None, description="Optional rationale")
+    rights: RightsSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -186,6 +206,8 @@ class Row:
     """What to look at in this project to confirm or refute ``assumption``."""
     unknown_contents: Unknown | None = None
     """Exhaustiveness of ``contents`` (container columns with a declaration)."""
+    rights: RightsSpec | None = None
+    """Exemptions / observed gaps, from the item's file or the model glob file."""
 
     @property
     def full_id(self) -> str:
@@ -289,6 +311,7 @@ def collect_unit(
     data.stores = collect_stores(unit, inventory)
     data.diagnostics.extend(data.stores.diagnostics)
     overrides = _load_data_files(unit, data.diagnostics)
+    model_rights = _pop_model_rights(unit, overrides, data.diagnostics)
 
     known: set[str] = set()
     if inventory is not None:
@@ -317,9 +340,62 @@ def collect_unit(
         if row is not None:
             data.rows.append(row)
 
+    _apply_model_rights(unit, data, model_rights)
     data.rows.sort(key=lambda r: r.id)
     _check_store_references(data)
     return data
+
+
+def _pop_model_rights(
+    unit: Unit, overrides: dict[str, dict[str, Any]], diagnostics: list[Diagnostic]
+) -> dict[str, RightsSpec]:
+    """Take the ``<app.Model>.*`` files out of ``overrides``; ``{label: rights}``."""
+    out: dict[str, RightsSpec] = {}
+    for stem in [s for s in overrides if s.endswith(".*")]:
+        raw = overrides.pop(stem)
+        path = unit.folder / DATA_DIR / f"{stem}.yaml"
+        spec = _validate(RightsOnly, raw, path, diagnostics)
+        if spec is not None:
+            out[stem[:-2]] = spec.rights
+    return out
+
+
+def _apply_model_rights(
+    unit: Unit, data: UnitData, model_rights: dict[str, RightsSpec]
+) -> None:
+    """Glob rights apply to every field of the model without its own block.
+
+    Rights on a non-personal item are meaningless (nothing to exempt), so
+    the glob only lands on ``pii`` rows; an item file with its own ``rights``
+    wins over the glob, right by right.
+    """
+    if not model_rights:
+        return
+    for index, row in enumerate(data.rows):
+        label = row.id.rsplit(".", 1)[0].split("@", 1)[0]
+        spec = model_rights.get(label)
+        if spec is None or not row.pii:
+            continue
+        merged = spec if row.rights is None else _merge_rights(spec, row.rights)
+        data.rows[index] = replace(row, rights=merged)
+    for label in model_rights:
+        if not any(r.id.startswith(f"{label}.") for r in data.rows):
+            data.diagnostics.append(
+                Diagnostic(
+                    Severity.ERROR,
+                    "data-ref-unknown",
+                    f"{label}.*.yaml: no model {label!r} in unit {unit.id}",
+                    unit.id,
+                    unit.folder / DATA_DIR / f"{label}.*.yaml",
+                )
+            )
+
+
+def _merge_rights(base: RightsSpec, over: RightsSpec) -> RightsSpec:
+    values = {
+        r.value: over.get(r) if over.get(r) is not None else base.get(r) for r in Right
+    }
+    return RightsSpec.model_validate(values)
 
 
 def _check_store_references(data: UnitData) -> None:
@@ -400,6 +476,7 @@ def _classify(
     source = Source.RULE
     store = _store_slug(finfo, model)
     assumption = check = None
+    rights: RightsSpec | None = None
     if known is not None:
         # Library verdict: applied after the rule, before any repo override.
         # Fixed ones need no review; assumed ones stay pending with a caption.
@@ -416,7 +493,20 @@ def _classify(
             category = override.category or category
             store = override.store or store
             _check_vocabulary(level, category, knowledge, path, diagnostics)
-            source = Source.OVERRIDE
+            rights = override.rights
+            if override.reason is not None or rights is None:
+                source = Source.OVERRIDE
+            if rights is not None and not pii:
+                diagnostics.append(
+                    Diagnostic(
+                        Severity.ERROR,
+                        "rights-on-non-personal",
+                        f"{path.name}: rights declared on a non-personal item "
+                        "(nothing to exempt)",
+                        unit.id,
+                        path,
+                    )
+                )
     dpia = (
         knowledge.dpia_for(level, category)
         if level in knowledge.sensitivity and category in knowledge.categories
@@ -438,6 +528,7 @@ def _classify(
         store=store,
         assumption=assumption,
         check=check,
+        rights=rights,
     )
 
 
@@ -636,6 +727,7 @@ def _manual_row(
         dpia=dpia,
         source=Source.MANUAL,
         store=None if isinstance(item.store, Marker) else item.store,
+        rights=item.rights,
     )
 
 

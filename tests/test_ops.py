@@ -54,7 +54,7 @@ ROUND_TRIPS: list[tuple[object, str, object]] = [
         {"erase": {"by": "staff"}},
     ),
     ({"erase": {"on": "account_closed"}}, "erase(on=account_closed)", None),
-    (PURGE, "retention_purge(after=days 30, from=api:cart.Cart.last_used_at)", None),
+    (PURGE, "retention_purge(after=30 days, from=api:cart.Cart.last_used_at)", None),
     ({"portability": {"format": "json"}}, "portability(format=json)", None),
     ({"create": {"consent_for": "newsletter"}}, "create(consent_for=newsletter)", None),
     (

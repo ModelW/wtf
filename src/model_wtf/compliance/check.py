@@ -22,6 +22,7 @@ from model_wtf.compliance.report import (
     Unit,
 )
 from model_wtf.compliance.review import LOCK_FILE, Lock, ReviewStatus
+from model_wtf.compliance.rights import check_rights
 from model_wtf.compliance.touchpoints import TOUCHPOINTS_DIR
 from model_wtf.compliance.workspace import load_workspace
 
@@ -155,6 +156,8 @@ def _check_data(
         )
         _check_touchpoints(unit, unit_tps.visible(), ws, diagnostics)
     diagnostics.extend(ws.activities.diagnostics)
+    rights_diagnostics, _ = check_rights(ws)
+    diagnostics.extend(rights_diagnostics)
     return counts
 
 

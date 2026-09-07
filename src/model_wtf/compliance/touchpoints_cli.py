@@ -28,6 +28,7 @@ from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.ops import Op, OpError, OpSpec, describe, parse_ops
 from model_wtf.compliance.options import ROOT_OPTION
 from model_wtf.compliance.report import Severity
+from model_wtf.compliance.rights import ItemRights, RightStatus, rights_of
 from model_wtf.compliance.touchpoints import Kind, Transfer, write_manifest
 from model_wtf.compliance.workspace import Workspace, load_workspace
 from model_wtf.compliance.yaml_io import Marker
@@ -768,6 +769,8 @@ class Why:
     ref: str
     touchpoints: list[Touchpoint]
     activities: list[Activity]
+    rights: ItemRights | None = None
+    """Per-right status (personal items held by an activity only)."""
 
     @property
     def verdict(self) -> str:
@@ -820,6 +823,16 @@ class Why:
         return {
             "id": self.ref,
             "lifecycle": self.lifecycle(),
+            "rights": [
+                {
+                    "right": f.right.value,
+                    "status": f.status.value,
+                    "article": f.article,
+                    "detail": f.detail,
+                    "origin": f.origin,
+                }
+                for f in (self.rights.findings if self.rights else [])
+            ],
             "touchpoints": [
                 {
                     "id": t.full_id,
@@ -850,7 +863,14 @@ def _plain(value: object) -> str | None:
 
 
 def _meta(op: OpSpec) -> str:
-    return ", ".join(f"{k} {v}" for k, v in op.payload().items())
+    return ", ".join(f"{k} {_flat(v)}" for k, v in op.payload().items())
+
+
+def _flat(value: object) -> str:
+    """``{'days': 7}`` → ``7 days``; scalars as-is."""
+    if isinstance(value, dict):
+        return " ".join(f"{v} {k}" for k, v in value.items())
+    return str(value)
 
 
 _LIFECYCLE: list[tuple[Op, str, bool]] = [
@@ -885,7 +905,9 @@ def _lifecycle_part(
 
 def why(ref: str, ws: Workspace) -> Why:
     """Compute :class:`Why` for a data full id."""
-    return Why(ref, ws.touchpoints_using(ref), ws.activities.holding(ref))
+    return Why(
+        ref, ws.touchpoints_using(ref), ws.activities.holding(ref), rights_of(ref, ws)
+    )
 
 
 @data.command("why")
@@ -944,6 +966,12 @@ def data_why(
 
 
 VERDICT_STYLE = {"held": "green", "orphan": "red", "unreferenced": "yellow"}
+RIGHT_STYLE = {
+    RightStatus.SATISFIED: "green",
+    RightStatus.EXEMPT: "dim",
+    RightStatus.MISSING: "red",
+    RightStatus.NOT_APPLICABLE: "dim",
+}
 
 
 def render_why(entry: Why, ws: Workspace, *, manifests: bool) -> Text:
@@ -971,6 +999,14 @@ def render_why(entry: Why, ws: Workspace, *, manifests: bool) -> Text:
         basis = _plain(act.spec.legal_basis) or "!todo"
         retention = _plain(act.spec.retention) or "!todo"
         out.append(f"{basis}; retention {retention}\n", style="dim")
+    for finding in entry.rights.findings if entry.rights else []:
+        style = RIGHT_STYLE[finding.status]
+        out.append(f"  {finding.right.value:<12}", style=style)
+        out.append(f"{finding.article:<13}", style="dim")
+        out.append(f"{finding.status.value}: {finding.detail}", style=style)
+        if finding.origin and finding.status is RightStatus.MISSING:
+            out.append(f" [{finding.origin}]", style="dim")
+        out.append("\n")
     out.append(f"  -> {entry.verdict_text}\n", style=VERDICT_STYLE[entry.verdict])
     if manifests:
         for act in entry.activities:

@@ -219,6 +219,8 @@ class Knowledge:
         """Library models by ``app.Model``, for ``fields_default`` and captions."""
         self.todos = todos or []
         """``!todo`` values found in the custom scale/categories."""
+        self.adequacy: frozenset[str] = _load_adequacy()
+        """Countries (ISO alpha-2) data may flow to without Ch. V safeguards."""
 
     @cached_property
     def default_ids(self) -> tuple[frozenset[str], frozenset[str]]:
@@ -462,6 +464,15 @@ def _load_dir[M: BaseModel](
         diagnostics.extend(marker_diagnostics(instance, path, scope))
         out[path.stem] = instance
     return out
+
+
+def _load_adequacy() -> frozenset[str]:
+    """EEA + adequacy-decision countries from ``knowledge/adequacy.yaml``."""
+    path = _builtin_dir("adequacy.yaml")
+    data = load_yaml(path) or {}
+    return frozenset(
+        str(c).upper() for key in ("eea", "adequacy") for c in data.get(key, [])
+    )
 
 
 def _builtin_dir(name: str) -> Path:

@@ -142,16 +142,57 @@ def _lines(report: Report, diags: list[Diagnostic]) -> list[tuple[Text, str | No
     """
     out: list[tuple[Text, str | None]] = []
     grouped: dict[str, list[Diagnostic]] = defaultdict(list)
+    rights: dict[str, list[Diagnostic]] = defaultdict(list)
     for diag in diags:
         if diag.code in {"todo", "missing"} and diag.path is not None:
             grouped[report.display_path(diag.path)].append(diag)
+        elif diag.code in RIGHTS_CODES and diag.subject and "#" in diag.subject:
+            rights[diag.subject.split("#", 1)[0]].append(diag)
         else:
             where = f"{diag.scope_id}: " if diag.scope_id else ""
             out.append((Text.assemble((where, "bold"), diag.message), diag.hint))
     for file, group in grouped.items():
         fields = ", ".join(_field_with_note(d) for d in group)
         out.append((Text.assemble((file, "bold"), ": ", fields), None))
+    for ref, group in rights.items():
+        out.append((_rights_line(ref, group), f"data why {ref}"))
     return out
+
+
+RIGHTS_CODES = frozenset(
+    {
+        "access-missing",
+        "rectification-missing",
+        "erasure-missing",
+        "retention-missing",
+        "portability-missing",
+        "objection-missing",
+        "consent-missing",
+        "transfer-safeguard-missing",
+    }
+)
+"""Per-item rights findings, folded one line per item in the text output."""
+
+
+def _rights_line(ref: str, group: list[Diagnostic]) -> Text:
+    """``api:people.User.email: access, erase, retention [derived]``.
+
+    A claim or a declaration carries its note and origin inline; a line
+    whose findings are all derived gets one ``[derived]`` tag at the end.
+    """
+    parts: list[str] = []
+    for diag in group:
+        right = (diag.subject or "").split("#", 1)[-1]
+        if diag.note:
+            note = diag.note.removeprefix("[agent]").strip()
+            parts.append(f'{right} "{note}" [{diag.origin}]')
+        else:
+            parts.append(right)
+    origins = {d.origin or "derived" for d in group}
+    tag = ""
+    if len(origins) == 1 and not any(d.note for d in group):
+        tag = f" [{origins.pop()}]"
+    return Text.assemble((ref, "bold"), ": ", ", ".join(parts), (tag, "dim"))
 
 
 def _field_with_note(diag: Diagnostic) -> str:

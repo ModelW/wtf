@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from model_wtf.compliance.data import Row
     from model_wtf.compliance.knowledge import Knowledge
     from model_wtf.compliance.report import Diagnostic, Unit
+    from model_wtf.compliance.schemas import Party
 
 SHARED_FOLDER = "compliance"
 
@@ -43,6 +44,8 @@ class Workspace:
     data: dict[str, UnitData] = field(default_factory=dict)
     touchpoints: dict[str, UnitTouchpoints] = field(default_factory=dict)
     activities: Activities = field(default_factory=Activities)
+    parties: dict[str, Party] = field(default_factory=dict)
+    """Declared organisations by id (``country``, ``safeguard`` feed Ch. V)."""
 
     @property
     def shared(self) -> Path:
@@ -100,7 +103,8 @@ def load_workspace(
     if not with_touchpoints:
         return ws
     known = data_index({uid: d.rows for uid, d in ws.data.items()})
-    parties = set(load_declarations(ws.shared).parties)
+    ws.parties = load_declarations(ws.shared).parties
+    parties = set(ws.parties)
     for unit in selected:
         ws.touchpoints[unit.id] = collect_touchpoints(
             unit, python=python, known_data=known, known_parties=parties

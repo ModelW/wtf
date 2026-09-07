@@ -331,14 +331,61 @@ uv run model-wtf compliance data why <unit:id>... [--model unit:app.Model] [--ma
 
 `compliance/activities/<slug>.yaml` (repository root, activities span units)
 is the Art. 30 row: `name`, `purpose`, `legal_basis` (`consent | contract |
-legal_obligation | vital_interests | public_task | legitimate_interests`),
-`data_subjects`, `touchpoints`, `recipients` (party ids), `retention`,
-`controller`/`processor` (default: `app.yaml`'s). Any of them may be `!todo`.
-Everything else is **derived** from the touchpoints: the data items, hence
-categories, stores, maximum sensitivity, DPIA trigger and units involved.
-`data why` answers the reverse question — which touchpoints handle an item
-and which activities justify holding it (`held by N` / `orphan` /
-`unreferenced`), with `--manifests` printing the activity files.
+legal_obligation | vital_interests | public_task | legitimate_interests`, or
+`no_pii` — a claim that the activity handles no personal item, verified at
+every check: `no-pii-violated` otherwise), `data_subjects`, `touchpoints`,
+`recipients` (party ids), `controller`/`processor` (default: `app.yaml`'s);
+`consent: {record: <ref>, granularity: separate|bundled}` for consent-based
+ones (the stored proof, created with `create: {consent_for: <slug>}`),
+`interest` for legitimate interests (the balancing test), `basis_note` when
+two bases compete, `dpia_reference` when the derived trigger fires. Any of
+them may be `!todo` or `!missing "why"`. Everything else is **derived** from
+the touchpoints: the data items, hence categories, stores, maximum
+sensitivity, DPIA trigger, units, recipients and the ops per item. Retention
+is not a field: the policy is the `retention_purge` op in the code.
+
+### Rights coverage
+
+Nothing about rights is written on activities. Touchpoints state what the
+code does (ops), data items state what is true of the data regardless of
+code, activities carry purpose and basis; `check` derives, **per personal
+item in every activity that handles it**, whether each right is served
+(`src/model_wtf/compliance/rights.py`):
+
+| right | satisfied when | code |
+| -- | -- | -- |
+| access (Art. 15) | an `access` op reaches it | `access-missing` |
+| rectification (Art. 16) | a `rectify` op (subject or staff) | `rectification-missing` |
+| erasure (Art. 17) | an `erase` op; `mode: anonymise` needs a ground to keep the row; `legal_obligation` activities exempt by construction | `erasure-missing` |
+| storage limitation (Art. 5(1)(e)) | a `retention_purge` op, or an `erase` with `on: <event>` | `retention-missing` |
+| portability (Art. 20) | consent/contract activities with a subject-facing `create`: a `portability` op | `portability-missing` |
+| objection (Art. 21) | legitimate-interests activities: an `object` op on one of its items | `objection-missing` |
+| consent (Art. 7) | consent activities: `consent.record` created with `consent_for`, and a `consent_withdraw: {for: slug}` op | `consent-proof-missing`, `consent-withdrawal-missing` |
+| transfers (Ch. V) | party outside the EEA / adequacy list (`knowledge/adequacy.yaml`) carries `safeguard: sccs|bcr|dpf|derogation` (`dpf` with `dpf_certified: true`) | `transfer-safeguard-missing` |
+| DPIA (Art. 35) | derived trigger `always`/`large_scale` → `dpia_reference` on the activity | `dpia-missing` |
+
+Exemptions live on the **data item** (`<unit>/compliance/data/<id>.yaml`, or
+`<app.Model>.*.yaml` for every personal field of a model; the item's own
+file wins right by right):
+
+```yaml
+rights:
+  erase: {exempt: legal_obligation, note: "accounting records, 10 years"}
+  portability: {exempt: derived}
+  rectify: {exempt: staff_only}           # verified: an admin op by staff must exist
+  access: {exempt: manual, note: "..."}   # always listed under Review
+  retention: !missing "no purge task, see FAH-210"
+```
+
+Grounds: `legal_obligation`, `contract_active` (still needs an event-driven
+`erase`), `not_provided_by_subject` (portability), `derived`
+(rectify/portability), `staff_only`, `manual`, `public_interest`, `research`,
+`legal_claims`. Precedence for a right: item exemption → derived from ops →
+missing. Every unmet right lands in the **Missing** section tagged with its
+origin — `[derived]` (the tool), `[claimed]` (an agent that read the code,
+via `data_flag` or a `{"missing": ...}` verdict in `activity_create`; the
+note is prefixed `[agent]`), `[declared]` (a human's `!missing`) — and
+`data why` prints each right's status next to the item's lifecycle.
 
 ### Exit codes
 

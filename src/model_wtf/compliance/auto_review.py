@@ -216,6 +216,9 @@ def sandbox(
                     "model-wtf_touchpoint_set_data": "deny",
                     "model-wtf_data_review_model": "deny",
                     "model-wtf_data_add_manual": "deny",
+                    # Verdicts on rights come from reading code; the grouper
+                    # only sees the graph.
+                    "model-wtf_data_flag": "deny",
                 },
             ),
         },
@@ -580,6 +583,19 @@ def narrate_write(  # noqa: C901 - one branch per kind
             "new party ",
             (ident, "bold"),
             f" ({entry.get('name', '')})",
+        )
+    if kind == "flag":
+        verdict = str(entry.get("verdict", ""))
+        what = f"{entry.get('right')} {verdict}"
+        if entry.get("ground"):
+            what += f" ({entry['ground']})"
+        return Text.assemble(
+            (
+                "  ! " if verdict == "missing" else "  ~ ",
+                "red" if verdict == "missing" else "yellow",
+            ),
+            (ident, "bold"),
+            f": {what}",
         )
     if kind == "manual":
         return Text.assemble(

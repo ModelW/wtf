@@ -13,7 +13,12 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from model_wtf.compliance.exit_codes import ExitCode
-from model_wtf.compliance.yaml_io import Missing, field_description, iter_markers
+from model_wtf.compliance.yaml_io import (
+    Marker,
+    Missing,
+    field_description,
+    iter_markers,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -90,6 +95,10 @@ class Diagnostic:
         Free text attached by whoever wrote the finding (the marker's note,
         an agent's justification); kept apart from the message so renderers
         can fold lines without losing it.
+    origin
+        Who established a Missing finding: ``derived`` (the tool, from ops
+        and exemptions), ``claimed`` (an agent that read the code),
+        ``declared`` (a human's ``!missing``).
     """
 
     severity: Severity
@@ -100,6 +109,7 @@ class Diagnostic:
     subject: str | None = None
     hint: str | None = None
     note: str | None = None
+    origin: str | None = None
 
     @property
     def section(self) -> Section:
@@ -108,7 +118,7 @@ class Diagnostic:
             return Section.ERRORS
         if self.severity is Severity.INFO:
             return Section.INFO
-        if self.code == "missing" or self.code.endswith("-missing"):
+        if self.code in MISSING_CODES or self.code.endswith("-missing"):
             return Section.MISSING
         if self.code == "todo":
             return Section.TODO
@@ -119,6 +129,9 @@ class Diagnostic:
         # nothing to do about it from a compliance standpoint.
         return Section.INFO
 
+
+MISSING_CODES = frozenset({"missing", "no-pii-violated"})
+"""Codes of the Missing section besides the ``*-missing`` family."""
 
 REVIEW_CODES = frozenset(
     {
@@ -225,6 +238,13 @@ class Scope:
         return ScopeStatus.OK
 
 
+def _marker_origin(marker: Marker) -> str:
+    """``claimed`` when an agent wrote the marker, ``declared`` otherwise."""
+    return (
+        "claimed" if (marker.note or "").lstrip().startswith("[agent]") else "declared"
+    )
+
+
 def marker_diagnostics(
     model: BaseModel, path: Path, scope_id: str | None
 ) -> list[Diagnostic]:
@@ -253,6 +273,7 @@ def marker_diagnostics(
                 # ``--todo`` questionnaire is built from it.
                 hint=None if missing else field_description(model, dotted),
                 note=marker.note,
+                origin=_marker_origin(marker) if missing else None,
             )
         )
     return out
@@ -356,6 +377,7 @@ class Report:
             "subject": diag.subject,
             "hint": diag.hint,
             "note": diag.note,
+            "origin": diag.origin,
         }
 
     def by_section(self) -> dict[Section, list[Diagnostic]]:

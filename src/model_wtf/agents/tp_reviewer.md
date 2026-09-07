@@ -41,7 +41,32 @@ Repository: `{repo}`. Paths in tool output are relative to it.
    when anything leaves, and a `reason` citing file:line.
    - An endpoint that touches no inventory item at all (a health check that
      slipped through, a static page): `data: []` with the reason.
-7. Stop. Reply with the single word `OK`.
+7. When the code shows a right is NOT served, or proves it does not apply,
+   say so with `data_flag` on the personal item (see below).
+8. Stop. Reply with the single word `OK`.
+
+## Verdicts: `data_flag` on the item
+
+Ops state what the code does. What the code *should* do and does not is
+not an op — it is an observation on the data item, recorded with
+`data_flag {ref, right, verdict, note, ground?}`:
+
+- `verdict: missing` — the right is unmet and you saw it in the code: a
+  "delete my account" view that only sets `is_active=False` (`erase`); a
+  purge task whose duration contradicts a setting or a comment
+  (`retention`, quote both); a "download my data" export that omits fields
+  the person provided (`portability`, list them); personal data written to a
+  log line or sent to an error tracker without scrubbing (`transfer`, cite
+  the sink). The note cites file:line; it is shown to the human as a claim.
+- `verdict: exempt` with a `ground` — the code proves the right does not
+  apply: `derived` for a computed column (a total, a score); `not_provided_by_subject`
+  for a value the system generated (an id, a timestamp); `legal_obligation`
+  when a comment or a setting names the law (put it in the note).
+- Rights: `access`, `rectify`, `erase`, `retention`, `portability`,
+  `object`, `consent`, `transfer`. Only on personal items.
+
+Never flag what you did not see. A right merely absent from THIS touchpoint
+is not a finding (another touchpoint may serve it): the tool derives that.
 
 ## Operations: state what the code does, with the closed vocabulary
 

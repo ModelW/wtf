@@ -140,6 +140,14 @@ def todo_text() -> str:
     return TODO_TAG
 
 
+def marker_text(marker: Marker) -> str:
+    """The YAML literal for a marker: ``!todo`` or ``!missing "note"``."""
+    if marker.note is None:
+        return marker.tag
+    note = yaml.safe_dump(marker.note, width=10**6).strip().removesuffix("\n...")
+    return f"{marker.tag} {note}"
+
+
 def iter_todo_paths(model: BaseModel, prefix: str = "") -> Iterator[str]:
     """Yield the dotted path of every :class:`Todo` inside a validated model."""
     for path, marker in iter_markers(model, prefix):
@@ -206,5 +214,6 @@ __all__ = [
     "iter_markers",
     "iter_todo_paths",
     "load_yaml",
+    "marker_text",
     "todo_text",
 ]

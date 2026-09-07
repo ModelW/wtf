@@ -129,7 +129,7 @@ class OpSpec(BaseModel):
 
 def _flat(value: Any) -> str:
     if isinstance(value, dict):
-        return " ".join(f"{k} {v}" for k, v in value.items())
+        return " ".join(f"{v} {k}" for k, v in value.items())
     return str(value)
 
 
@@ -335,7 +335,16 @@ def parse_ops(value: Any) -> tuple[list[OpSpec], list[str]]:
     return _dedupe(out), warnings
 
 
-def _expand(verb: str, meta: dict[str, Any], warnings: list[str]) -> list[OpSpec]:
+_YAML_BOOL_KEYS = {True: "on", False: "off"}
+"""PyYAML reads the bare key ``on`` as ``True`` (YAML 1.1 booleans); ``erase:
+{on: account_closed}`` is too natural to forbid, so the key is put back."""
+
+
+def _expand(verb: str, meta: dict[Any, Any], warnings: list[str]) -> list[OpSpec]:
+    meta = {
+        _YAML_BOOL_KEYS.get(k, k) if isinstance(k, bool) else k: v
+        for k, v in meta.items()
+    }
     if verb == WRITE_ALIAS:
         if meta:
             msg = "write takes no metadata; it is a deprecated alias for create+update"

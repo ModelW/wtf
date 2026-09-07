@@ -27,15 +27,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, model_validator
 
 from model_wtf.compliance.declarations import format_errors
 from model_wtf.compliance.report import Diagnostic, Severity, marker_diagnostics
 from model_wtf.compliance.schemas import NonEmpty, Slug, StrictModel
-from model_wtf.compliance.yaml_io import Marker, load_yaml
+from model_wtf.compliance.yaml_io import Marker, Todo, load_yaml, marker_text, todo_text
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -56,6 +56,23 @@ class LegalBasis(StrEnum):
     VITAL_INTERESTS = "vital_interests"
     PUBLIC_TASK = "public_task"
     LEGITIMATE_INTERESTS = "legitimate_interests"
+    NO_PII = "no_pii"
+    """Not an Art. 6 basis: a claim that the activity handles no personal
+    item at all. Verified at every check (``no-pii-violated`` otherwise)."""
+
+
+class Consent(StrictModel):
+    """How a consent-based activity proves and scopes its consent."""
+
+    record: str | Marker = Field(
+        description="Full ref of the stored proof, created with "
+        "`create: {consent_for: <this activity>}` by some touchpoint"
+    )
+    granularity: Literal["separate", "bundled"] = Field(
+        default="separate",
+        description="separate = asked on its own; bundled = tied to other "
+        "purposes (Art. 7(4) warning)",
+    )
 
 
 class ActivityFile(StrictModel):
@@ -67,7 +84,23 @@ class ActivityFile(StrictModel):
     )
     legal_basis: LegalBasis | Marker = Field(
         description="Art. 6 basis: contract, consent, legal_obligation, "
-        "legitimate_interests, vital_interests or public_task"
+        "legitimate_interests, vital_interests or public_task; no_pii when "
+        "the activity handles no personal item"
+    )
+    basis_note: NonEmpty | None = Field(
+        default=None,
+        description="When two bases compete: the candidates and the argument",
+    )
+    consent: Consent | None = Field(
+        default=None, description="Required when legal_basis is consent"
+    )
+    interest: NonEmpty | Marker | None = Field(
+        default=None,
+        description="legitimate_interests: the balancing test (Art. 6(1)(f))",
+    )
+    dpia_reference: NonEmpty | Marker | None = Field(
+        default=None,
+        description="Where the DPIA lives, when the derived trigger fires (Art. 35)",
     )
     touchpoints: list[str] = Field(default_factory=list)
     data_subjects: list[NonEmpty] | Marker = Field(
@@ -86,6 +119,17 @@ class ActivityFile(StrictModel):
         default=None, description="Party id, when not the app's processor"
     )
     description: NonEmpty | None = None
+
+    @model_validator(mode="after")
+    def _basis_extras(self) -> ActivityFile:
+        basis = self.legal_basis
+        if basis is LegalBasis.CONSENT and self.consent is None:
+            # Not an error: the proof is what KFF-208 checks for. A missing
+            # block reads as ``consent.record: !todo``.
+            self.consent = Consent(record=Todo())
+        if basis is LegalBasis.LEGITIMATE_INTERESTS and self.interest is None:
+            self.interest = Todo()
+        return self
 
 
 def list_dict() -> dict[str, list[str]]:
@@ -319,39 +363,58 @@ def write_activity(
     slug: str,
     *,
     name: str | None,
-    purpose: str | None,
-    legal_basis: str | None,
+    purpose: str | Marker | None,
+    legal_basis: str | Marker | None,
     touchpoints: list[str],
     data_subjects: list[str] | None = None,
     recipients: list[str] | None = None,
     retention: str | None = None,
+    basis_note: str | None = None,
+    consent_record: str | Marker | None = None,
+    interest: str | Marker | None = None,
 ) -> Path | None:
-    """Write ``activities/<slug>.yaml``; ``None`` when it already exists."""
-    from model_wtf.compliance.yaml_io import todo_text
+    """Write ``activities/<slug>.yaml``; ``None`` when it already exists.
 
+    A :class:`Marker` value is written as its tag (``!todo`` / ``!missing
+    "note"``); ``None`` on a required field becomes ``!todo``. ``retention``
+    is only written when given: the policy lives in ``retention_purge`` ops.
+    """
     path = shared / ACTIVITIES_DIR / f"{slug}.yaml"
     if path.exists():
         return None
 
-    def scalar(value: str | None) -> str:
-        if not value:
+    def scalar(value: str | Marker | None) -> str:
+        if value is None or value == "":
             return todo_text()
+        if isinstance(value, Marker):
+            return marker_text(value)
         return yaml.safe_dump(value, width=10**6).strip().removesuffix("\n...")
 
     lines = [
         f"name: {scalar(name)}",
         f"purpose: {scalar(purpose)}",
-        f"legal_basis: {legal_basis or todo_text()}",
+        f"legal_basis: {scalar(legal_basis)}",
     ]
-    if data_subjects:
-        lines.append("data_subjects: [" + ", ".join(data_subjects) + "]")
-    else:
-        lines.append(f"data_subjects: {todo_text()}")
+    optional: list[tuple[bool, str]] = [
+        (bool(basis_note), f"basis_note: {scalar(basis_note)}"),
+        (
+            legal_basis == LegalBasis.CONSENT or consent_record is not None,
+            f"consent:\n  record: {scalar(consent_record)}",
+        ),
+        (
+            legal_basis == LegalBasis.LEGITIMATE_INTERESTS or interest is not None,
+            f"interest: {scalar(interest)}",
+        ),
+    ]
+    lines.extend(text for wanted, text in optional if wanted)
+    subjects = "[" + ", ".join(data_subjects) + "]" if data_subjects else todo_text()
+    lines.append(f"data_subjects: {subjects}")
     lines.append("touchpoints:" if touchpoints else "touchpoints: []")
     lines.extend(f"  - {ref}" for ref in touchpoints)
     if recipients:
         lines.append("recipients: [" + ", ".join(recipients) + "]")
-    lines.append(f"retention: {scalar(retention)}")
+    if retention:
+        lines.append(f"retention: {scalar(retention)}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path

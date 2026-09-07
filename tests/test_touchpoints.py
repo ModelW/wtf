@@ -319,7 +319,17 @@ def test_activities_derivation_and_check(repo: Path) -> None:
         "activity-unknown-touchpoint",
         "party-unknown",
     ]
-    assert sections[Section.MISSING] == ["missing"]
+    # The declared !missing, plus what the rights derivation finds: every
+    # personal item of ``ordering``/``support`` lacks access, rectification,
+    # erasure and retention; the derived DPIA trigger has no reference.
+    missing = sections[Section.MISSING]
+    assert missing.count("missing") == 1
+    assert "dpia-missing" in missing
+    assert {"access-missing", "rectification-missing", "erasure-missing"} <= set(
+        missing
+    )
+    assert "retention-missing" in missing
+    assert "portability-missing" not in missing  # no subject-facing create
     assert sections[Section.TODO] == ["todo"]
     # admin:shop.Customer now belongs to ``support``; the front unit's
     # touchpoints and the api data are still pending.
@@ -447,7 +457,8 @@ def test_cli_touchpoints_activities_why(repo: Path) -> None:
     )
     assert created.exit_code == 0, created.output
     path = repo / "compliance" / "activities" / "ordering.yaml"
-    assert "retention: !todo" in path.read_text()
+    # Retention is not scaffolded: the policy lives in `retention_purge` ops.
+    assert "retention" not in path.read_text()
     again = runner.invoke(cli, [*act, "create", "ordering", *root])
     assert again.exit_code == 1
     add = runner.invoke(
@@ -655,7 +666,7 @@ def test_mcp_touchpoint_write_tools(repo: Path) -> None:
         tools.activity_add_touchpoints("nope", ["api:checkout"])
     text = (repo / "compliance" / "activities" / "ordering.yaml").read_text()
     assert "legal_basis: contract" in text
-    assert "retention: !todo" in text
+    assert "retention" not in text
     assert "api:task:shop.send_receipt" in text
     assert "activities: NONE" not in tools.activities_graph()
     assert "ordering | Take orders | 2 touchpoints" in tools.activities_list()
