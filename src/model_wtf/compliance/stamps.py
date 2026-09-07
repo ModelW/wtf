@@ -87,6 +87,11 @@ class Finding(BaseModel):
     commit: str | None = None
     fingerprint: str | None = None
     by: Literal["human", "agent"] | None = None
+    narrowed_effect: str | None = None
+    narrowed_degree: str | None = None
+    narrowed_actor: str | None = None
+    """What the reviewer narrowed, kept apart from the computed fields so
+    the weight can be recomputed as the code moves."""
 
     @property
     def note(self) -> str:

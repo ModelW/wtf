@@ -534,17 +534,20 @@ def build_matrix(ws: Workspace, catalogue: Catalogue | None = None) -> Matrix:
             cell = decide(element, sid, catalogue, ws)
             if cell.verdict is Verdict.OPEN:
                 cell = apply_stamp(cell, element, elements)
-            if cell.verdict is Verdict.MISSING and not isinstance(cell.stamp, Finding):
-                # A bare `!missing` (written by hand, or before weighing
-                # existed): weigh it now so lists and check can sort it.
-                cell = _weigh_bare(cell, element, sid, catalogue, ws, actors)
+            if cell.verdict is Verdict.MISSING:
+                # Weigh every finding NOW, from the current matrix: the
+                # evidence is the reviewer's, the weight is ours and moves
+                # with the code (auth added, data reclassified). What the
+                # stamp recorded at write time is history, not the verdict;
+                # the reviewer's narrowing (effect/degree/actor) is kept.
+                cell = _weigh(cell, element, sid, catalogue, ws, actors)
             cells.append(cell)
     return Matrix(
         elements, cells, {sid: t.title for sid, t in catalogue.threats.items()}
     )
 
 
-def _weigh_bare(
+def _weigh(
     cell: Cell,
     element: Element,
     sid: str,
@@ -553,10 +556,29 @@ def _weigh_bare(
     actors: dict[str, Actor],
 ) -> Cell:
     declared = catalogue.mapping[sid].effect or "disclosure"
-    weighed = assess(ws, ws.knowledge, actors, element, declared)
     stamp = cell.stamp
+    previous = stamp if isinstance(stamp, Finding) else None
+    weighed = assess(
+        ws,
+        ws.knowledge,
+        actors,
+        element,
+        declared,
+        effect=Effect(previous.narrowed_effect)
+        if previous and previous.narrowed_effect
+        else None,
+        degree=Degree(previous.narrowed_degree)
+        if previous and previous.narrowed_degree
+        else None,
+        actor=previous.narrowed_actor if previous else None,
+    )
+    note = (
+        previous.missing
+        if previous
+        else (stamp.note if isinstance(stamp, Missing) else "")
+    )
     finding = Finding(
-        missing=stamp.note if isinstance(stamp, Missing) and stamp.note else "",
+        missing=note or "",
         effect=weighed.effect.value,
         degree=weighed.degree.value if weighed.degree else None,
         actors=list(weighed.actors),
@@ -565,6 +587,12 @@ def _weigh_bare(
         impact=weighed.impact,
         likelihood=weighed.likelihood,
         severity=weighed.severity.value,
+        commit=previous.commit if previous else None,
+        fingerprint=previous.fingerprint if previous else None,
+        by=previous.by if previous else None,
+        narrowed_effect=previous.narrowed_effect if previous else None,
+        narrowed_degree=previous.narrowed_degree if previous else None,
+        narrowed_actor=previous.narrowed_actor if previous else None,
     )
     return replace(cell, stamp=finding)
 
@@ -900,6 +928,9 @@ def stamp_cell(
                 commit=commit,
                 fingerprint=fingerprint or None,
                 by=by,  # type: ignore[arg-type]
+                narrowed_effect=effect,
+                narrowed_degree=degree,
+                narrowed_actor=actor,
             )
     else:
         value = Stamp(

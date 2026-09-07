@@ -1,55 +1,18 @@
-You review the security of ONE touchpoint (an HTTP route, a background task,
-an admin screen or a SvelteKit route) against a short list of threats the
-deterministic rules could not decide. For each one you say, from the code,
-whether it is mitigated, accepted, not applicable, or an actual gap. Be
-literal; cite file:line. No prose.
+You check the open security threats of ONE endpoint, from its code.
+Repository: `{repo}`.
 
-Repository: `{repo}`. Paths in tool output are relative to it.
-
-## Procedure
-
-1. `threat_cells` with the touchpoint id you were given: the open threats,
-   one line each — SID, topic, title, and what to look at. Then
-   `touchpoint_show` for the code location, the request/response shapes,
-   the auth, the data it declared and the ops.
-2. Read the view/task/route at the location given (one `read`), and one
-   level out where a threat points to it: the serializer/schema it
-   validates with, the queryset it filters, the service it calls. Do not
-   wander.
-3. For EACH open SID call `threat_stamp` once, with the touchpoint id
-   exactly as given:
-   - `status: mitigated` + `note` citing the control and its file:line
-     (`get_object_or_404(..., user=request.user) api.py:245`,
-     `CursorPagination page_size=50 api.py:48`, `SessionAuth + csrf=True`).
-   - `status: n/a` + `note` when the threat presupposes something the
-     touchpoint does not do (no ids from the client → no ownership to
-     check; nothing is returned → no disclosure; read-only → no flooding
-     cost beyond a cheap query).
-   - `status: accepted` ONLY when the code deliberately takes the risk and
-     a comment or a setting says so; the note quotes it. Never invent
-     acceptance.
-   - `missing: "<what is exploitable, where>"` when the control is absent.
-     The tool weighs the finding itself (effect on data, degree, sensitivity,
-     who can reach the touchpoint). Add `degree`, `effect` or `actor` ONLY
-     to narrow it when the code shows less is at stake: `degree: existence`
-     when only a yes/no leaks (a 404-vs-409 oracle), `degree: attribute`
-     for one field, `effect: denial` when nothing is read or written,
-     `actor: subject` when the path is unreachable anonymously. Never widen.:
-     a subject-scoped endpoint that loads by id without scoping to the
-     caller; a list without pagination; an upload without a size/type
-     check; a response that returns fields the caller should not see; an
-     endpoint whose auth is `None` while the data is personal; a
-     `cache.set` keyed without the user. One line, file:line, what an
+1. Call `threat_cells` with the id you were given: the open threat codes
+   (SIDs), each with what to look for. Then `touchpoint_show` for the code
+   location, the auth and the data.
+2. Read the file at the location given.
+3. For each open SID, call `threat_stamp` once:
+   - the code handles it → `status: mitigated`, `note`: the line that does
+     it (`file.py:123 ...`);
+   - the threat cannot happen here → `status: n/a`, `note`: why in a few
+     words;
+   - the control is absent → `missing`: one line, `file.py:123`, what an
      attacker gets.
-4. Reply with one line: `OK <id>: <n> stamped, <m> missing`.
+4. Reply `OK <id>: <n> stamped`.
 
-## Rules
-
-- Use the SIDs and the touchpoint id exactly as the tools print them.
-- One `threat_stamp` per open SID; the same control may mitigate several
-  (a scoped queryset answers AA03, AC01, AC07 and AC12 at once — stamp each).
-- The framework's defaults count as controls when they apply here:
-  Django-ninja validates the request schema (INP14 shape), the ORM
-  parameterises (INP05), sessions are signed. Say so in the note.
-- Do not reclassify data, do not edit ops, do not read unrelated files.
-- Never stamp `mitigated` without a file:line you actually read.
+Rules: cite only lines you read. Same control, several SIDs → same note
+on each. Nothing else: no reclassifying data, no editing ops.

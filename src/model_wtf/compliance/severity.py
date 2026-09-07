@@ -256,7 +256,14 @@ def entitled_actors(
 ) -> set[str]:
     """Actors whose scope already performs the effect's op on every item
     through a declared touchpoint other than ``except_for`` (the one under
-    assessment cannot vouch for itself): not a risk on that data."""
+    assessment cannot vouch for itself): not a risk on that data.
+
+    Only **staff** can be entitled this way: their scope is global, so a
+    staff screen showing every customer's address makes another staff read
+    of addresses no new exposure. A *subject* is only ever entitled to their
+    own rows; reaching another person's through this touchpoint is exactly
+    the risk, so subjects are never dropped here.
+    """
     if not items or not effect.on_data:
         return set()
     wanted = {
@@ -271,12 +278,9 @@ def entitled_actors(
         # Only staff and subject scopes entitle: a public route serving the
         # item means everyone sees it already, which the sensitivity should
         # reflect; a task entitles nobody.
-        if tp.scope is Scope.STAFF:
-            actors = {"staff"}
-        elif tp.scope is Scope.SUBJECT:
-            actors = {"subject"}
-        else:
+        if tp.scope is not Scope.STAFF:
             continue
+        actors = {"staff"}
         for ref in tp.data:
             if ref in per_item and wanted & {o.op for o in tp.ops.get(ref, ())}:
                 per_item[ref] |= actors

@@ -1406,17 +1406,14 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
     @server.tool(
         name="threat_stamp",
         description=(
-            "Close one open threat cell on an element after reading the code: "
-            "`status` mitigated (note cites file:line of the control), accepted "
-            "(note says why the risk is acceptable) or n/a (note says why the "
-            "threat does not apply here). Or record a finding with `missing`: "
-            "one line on what is exploitable and where. The tool weighs a finding "
-            "from the matrix (effect on data, degree, sensitivity, who can reach "
-            "the touchpoint); pass `effect`, `degree` (existence < attribute < "
-            "record < bulk) or `actor` only to NARROW it when the code shows less "
-            "is at stake (an oracle reveals existence only; only an authenticated "
-            "user can reach it). A flow (`a->b`) is stamped on its source "
-            "touchpoint keyed `SID@sink`."
+            "Record your verdict on one threat (SID) of one element. Either "
+            "`status`: mitigated (note = the file:line that handles it), n/a "
+            "(note = why it cannot happen here) or accepted (note = the comment "
+            "or setting that accepts the risk); or `missing`: one line, file:line, "
+            "what an attacker gets. Optional, only when the code shows less is at "
+            "stake than the default: `degree` existence (a yes/no leaks) or "
+            "attribute (one field), `effect` denial (nothing read or written), "
+            "`actor` subject (unreachable anonymously)."
         ),
     )
     def threat_stamp(
