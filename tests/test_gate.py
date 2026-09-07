@@ -440,3 +440,24 @@ def test_commit_challenges_stages_only_compliance_files(repo: Path) -> None:
     )
     assert git(repo, "status", "--porcelain") == "?? api/shop/junk.py"
     assert commit_challenges(repo, [], base_sha="abc123def456") is None
+
+
+def test_parallel_challenges_through_separate_locks_all_survive(repo: Path) -> None:
+    """The challenger calls `challenge` several times, possibly in parallel;
+    each goes through its own Lock. Saving must only write what that Lock
+    touched, or the last writer erases the others' challenges."""
+    from model_wtf.compliance.mcp_server import Decision, Tools
+
+    Tools(repo).review_model(
+        "api:shop.Customer",
+        [Decision(field="email", ok=True), Decision(field="phone", ok=True)],
+        "checked",
+    )
+    unit, _ = _rows(repo)
+    first, second = Lock(unit), Lock(unit)  # both loaded before either writes
+    assert first.challenge("shop.Customer.email", commit="abc", grounds="e") is None
+    first.save()
+    assert second.challenge("shop.Customer.phone", commit="abc", grounds="p") is None
+    second.save()
+    text = (repo / "api" / "compliance" / "data.lock.yaml").read_text()
+    assert text.count("challenge:") == 2

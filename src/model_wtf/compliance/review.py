@@ -145,6 +145,8 @@ class Lock:
         self.data = self._load()
         self._dropped: set[str] = set()
         """Ids pruned by this instance, so a merge does not resurrect them."""
+        self._touched: set[str] = set()
+        """Ids this instance wrote; only those win over the file on save."""
 
     def _load(self) -> LockFile:
         if not self.path.is_file():
@@ -219,6 +221,7 @@ class Lock:
                 note=note,
                 answered=answered,
             )
+            self._touched.add(row.id)
 
     def challenge(self, item_id: str, *, commit: str, grounds: str) -> str | None:
         """Cast a doubt on a reviewed item; the reason it was refused, if so.
@@ -240,6 +243,7 @@ class Lock:
             grounds=grounds,
             at=datetime.now(tz=UTC).replace(microsecond=0),
         )
+        self._touched.add(item_id)
         return None
 
     def prune(self, live_rows: list[Row]) -> list[str]:
@@ -260,10 +264,11 @@ class Lock:
         """Write the lock back, keys sorted for stable diffs.
 
         Several agent sessions may review different models at the same time
-        (``--workers``), each through its own MCP server process. The write
-        therefore happens under an exclusive file lock and **merges** with
-        what is on disk: entries this instance did not touch are kept as the
-        other writers left them, entries it marked win.
+        (``--workers``), or one session may call several tools in parallel,
+        each through its own :class:`Lock`. The write therefore happens
+        under an exclusive file lock and **merges** with what is on disk:
+        only the entries this instance touched win, everything else is kept
+        as the other writers left it.
         """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         guard = self.path.with_suffix(".lock")
@@ -271,7 +276,10 @@ class Lock:
             fcntl.flock(handle, fcntl.LOCK_EX)
             try:
                 on_disk = self._load().items if self.path.is_file() else {}
-                merged = {**on_disk, **self.data.items}
+                merged = {
+                    **on_disk,
+                    **{k: v for k, v in self.data.items.items() if k in self._touched},
+                }
                 for item_id in self._dropped:
                     merged.pop(item_id, None)
                 payload = {
