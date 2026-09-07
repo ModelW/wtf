@@ -41,6 +41,7 @@ from model_wtf.compliance.render import (
     render_todo,
 )
 from model_wtf.compliance.stores_cli import stores
+from model_wtf.compliance.threats_cli import threats
 from model_wtf.compliance.touchpoints_cli import activities, touchpoints
 from model_wtf.compliance.workspace import SHARED_FOLDER
 from model_wtf.opencode import API_KEY_ENV, DEFAULT_MODEL, OpenCodeUnavailable
@@ -55,6 +56,7 @@ compliance.add_command(data)
 compliance.add_command(stores)
 compliance.add_command(touchpoints)
 compliance.add_command(activities)
+compliance.add_command(threats)
 
 
 @compliance.command()

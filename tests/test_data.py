@@ -431,7 +431,8 @@ def test_check_reports_pending_reviews(django_repo: Path) -> None:
     codes = {d.code for d in report.diagnostics}
     # Library assumptions are agent context, not a to-do line: the pending
     # line carries the breakdown instead.
-    assert codes == {"pending-review", "touchpoint-pending"}
+    # (threat-open: the stores always have cells to look at.)
+    assert codes == {"pending-review", "touchpoint-pending", "threat-open"}
     pending = next(d for d in report.diagnostics if d.code == "pending-review")
     assert "assumed" in pending.message
     assert pending.hint == "data auto-review --unit api"
