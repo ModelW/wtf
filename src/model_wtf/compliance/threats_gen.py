@@ -27,6 +27,7 @@ from model_wtf.compliance.yaml_io import load_yaml
 THREATS_DIR = "threats"
 MAPPING_FILE = "_mapping.yaml"
 RULES_FILE = "_rules.yaml"
+TOPICS_FILE = "_topics.yaml"
 PYTM_RAW = (
     "https://raw.githubusercontent.com/OWASP/pytm/{ref}/pytm/threatlib/threats.json"
 )

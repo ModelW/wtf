@@ -472,8 +472,30 @@ uv run model-wtf compliance threats stamp api:getOrder DS06 --missing "payment_m
 uv run model-wtf compliance threats stamp api:checkout->api:db-default DS06 --status n/a --note "the app's own database"
 ```
 
-Agents get the same through `threat_cells` (what is open on one element)
-and `threat_stamp`. The swarm that fills the matrix comes next.
+#### The swarm
+
+```
+uv run model-wtf compliance threats auto-review --unit api            # one reviewer per topic
+uv run model-wtf compliance threats auto-review --by touchpoint       # one reviewer per touchpoint
+uv run model-wtf compliance threats auto-review --elements api:getOrder,api:checkout
+```
+
+`auto-review` sends agents to stamp the open cells. By default one
+reviewer per **topic** (access, auth, input, disclosure, dos, files, xss,
+csrf, credentials, store, llm; `knowledge/threats/_topics.yaml` carries
+each checklist) over a batch of touchpoints (`--topic-batch`, 12): the
+same question asked of each touchpoint, answered from its code with
+`threat_stamp`. `--by touchpoint` sends one reviewer per touchpoint with
+all its open SIDs instead. Measured on Food@Home (14 subject-facing
+endpoints, same commit): per topic closed every cell for 49k tokens and
+found the unscoped `Cart`/`Order` lookups; per touchpoint spent 109k
+tokens, stalled on 12 of 14 and missed them — small models do better with
+one narrow question than with fifteen. The reviewer never reclassifies
+data or edits ops; a stamp it cannot justify with a file:line stays open.
+
+Introspection payloads are cached under `.git/model-wtf/introspect/`,
+keyed by the source tree (paths, sizes, mtimes): a swarm of MCP servers
+boots Django once, not once per tool call. `MODEL_WTF_NO_CACHE=1` bypasses.
 
 ### Use it in CI: the gate
 

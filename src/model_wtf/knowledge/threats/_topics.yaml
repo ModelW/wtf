@@ -1,0 +1,99 @@
+# One entry per agent topic (the `topic:` values of _mapping.yaml). The
+# checklist is what the per-topic reviewer looks for on every touchpoint;
+# `sids` is informational (the mapping is the source of truth).
+
+access:
+  title: Access control and object ownership
+  checklist:
+    - Does the touchpoint load or act on objects by an id, slug or UUID the caller supplies? Then the queryset must be scoped to the caller (`user=request.user`, `owner=...`) or the object checked against them; an admin screen must check the model permission (has_view/has_change).
+    - A subject-scoped touchpoint must never reach staff-only behaviour (flags, statuses, other users' rows) through a parameter.
+    - Bulk or "mine" listings filter by the caller before anything else.
+    - "Functionality misuse: can a legitimate action be repeated or aimed at scale (coupon replay, mass invites) without a limit or ownership?"
+  sids: [AA03, AC01, AC07, AC09, AC12]
+
+auth:
+  title: Authentication enforcement
+  checklist:
+    - Is the auth the scope implies actually enforced on this route (auth class, `login_required`, admin wrapper), including on every method the view handles?
+    - "`auth=None` or an empty permission list on a route that returns or writes personal data is a gap unless it is public by design."
+    - "Login / token endpoints: throttling or lockout against dictionary attacks; tokens random and checked server-side."
+  sids: [AA01, AA02, AC11, CR03]
+
+input:
+  title: Input handled beyond its shape
+  checklist:
+    - The schema/serializer validates the shape; does the code trust the meaning? Prices, totals, roles, statuses, owner ids coming from the client must be recomputed or checked server-side (AA04).
+    - Request values reaching a filter, order_by, raw query, URL, path, shell or template name unchecked (INP10/INP25/INP14).
+    - Does the code decode, unquote or filter strings itself? Then encodings matter (DE02/INP35); otherwise n/a.
+    - "ninja/DRF request validation, the ORM and typed path params are controls: cite the schema class."
+  sids: [AA04, DE02, INP10, INP14, INP35, LB01, INP25, INP05, INP06, INP26, INP33, API02]
+
+disclosure:
+  title: What leaves the touchpoint
+  checklist:
+    - "Does the response (or the log line, or the transfer) carry more than the caller should see: other users' fields, internal ids, payment details, staff notes? Compare the response schema with the declared data."
+    - "Error paths: do exceptions or 4xx bodies reveal existence (\"user not found\" vs generic), stack traces, SQL?"
+    - Anything cached (`cache.set`, `cache_page`) keyed without the caller when the content is personal.
+    - Personal data in GET parameters or URLs (they land in logs).
+  sids: [DS01, INP18, DS05, DS06, DR01]
+
+dos:
+  title: Resource limits
+  checklist:
+    - Lists paginated or capped; querysets bounded; `prefetch/select_related` where a list would N+1 on input.
+    - "Uploads: size and type limits before reading the body."
+    - Expensive calls triggered by the caller (geocoding, email, external API, PDF rendering) throttled or queued.
+    - Unauthenticated endpoints that write rows (signup, contact) throttled.
+  sids: [DO01, DO02]
+
+files:
+  title: Files in and out
+  checklist:
+    - "Uploads: content-type and extension validated, size capped, stored under a generated name (never the client's), outside any executable path."
+    - "Serving: path built from a database id, never from a client path; `Content-Disposition`/`X-Content-Type-Options` where a browser could render it."
+    - Any `open()`, `Path()`, `os.path.join` with a request value.
+  sids: [AC06, INP17, INP23, HA01, INP11]
+
+xss:
+  title: HTML output escaping
+  checklist:
+    - "Every `mark_safe`, `|safe`, `format_html`, `{@html}` in the touchpoint's templates or code: is the interpolated value user-controlled? If so, sanitised (bleach/nh3) or a gap."
+    - Content typed by one person and rendered to another (comments, names, addresses) goes through auto-escaping.
+  sids: [SC02, SC03, SC04, DS04, INP27, INP28, INP29, INP30, INP38, INP39, INP40]
+
+csrf:
+  title: CSRF on cookie-authenticated writes
+  checklist:
+    - "A state-changing view authenticated by a session cookie without the CSRF middleware (`csrf_exempt`, ninja `csrf=False`, SvelteKit `checkOrigin: false`) is a gap; bearer-token routes are n/a."
+  sids: [AC21]
+
+sessions:
+  title: Session handling on JSON GETs
+  checklist:
+    - "A cookie-authenticated GET returning JSON with personal data: SameSite cookies or a custom header requirement mitigate JSON hijacking; otherwise note the legacy-browser risk as accepted or missing."
+  sids: [SC01]
+
+credentials:
+  title: Credentials on flows
+  checklist:
+    - Passwords, tokens, API keys in this touchpoint's files hardcoded (AC24) or long-lived without rotation (AC22/AC23)? Settings read from the environment are fine; literals are not.
+  sids: [AC22, AC23, AC24]
+
+surface:
+  title: Discovery surface
+  checklist:
+    - API docs, OpenAPI schema, browsable API, admin index reachable in production? Restricted to staff or disabled?
+  sids: [API01, DS03, HA03]
+
+store:
+  title: Stores as the application uses them
+  checklist:
+    - "A store shared by several units: do both trust what they read (a cache key namespace, a queue payload validated)?"
+    - "Audit-trail tables: can the application rewrite or delete its own trail through a normal code path?"
+  sids: [AC02, DE04]
+
+llm:
+  title: LLM in the loop
+  checklist:
+    - Does user input reach the prompt? Is the output shown to another person, executed, or used to call tools? Is personal data sent to the provider, and is that a declared transfer?
+  sids: [LLM01, LLM02, LLM03, LLM04, LLM05, LLM06, LLM07, LLM08, LLM09]

@@ -139,7 +139,7 @@ def test_todos_are_warnings_with_paths(make_repo: MakeRepo) -> None:
 @pytest.mark.parametrize(
     ("party_body", "expected"),
     [
-        (PARTY_ACME + "colour: blue\n", "colour: Extra inputs are not permitted"),
+        (PARTY_ACME + "colour: blue\n", "<root>: unexpected key 'colour'"),
         (PARTY_ACME.replace("country: FR", "country: France"), "country:"),
         (PARTY_ACME.replace("email: privacy@acme.example", "email: ''"), "email:"),
         (PARTY_ACME + "dpo:\n  name: X\n", "dpo.email: Field required"),

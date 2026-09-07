@@ -90,7 +90,12 @@ MISSING = Missing()
 """The bare ``!missing``."""
 
 
-class _Loader(yaml.SafeLoader):
+_BaseLoader: type[yaml.SafeLoader] = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+"""libyaml when the wheel ships it: a fah-sized compliance folder (500
+files) parses in a third of a second instead of four."""
+
+
+class _Loader(_BaseLoader):  # type: ignore[valid-type, misc]
     """SafeLoader that understands ``!todo`` and ``!missing``."""
 
 

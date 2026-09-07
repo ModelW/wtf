@@ -12,6 +12,7 @@ kinds of problems come out, and the exit code depends on which:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -130,23 +131,41 @@ def _check_party_refs(decl: Declarations, app_path: Path) -> None:
             )
 
 
+_BRANCH = re.compile(
+    r"^(function-after\[.*\]|function-before\[.*\]|function-wrap\[.*\]|"
+    r"tagged-union\[.*\]|union\[.*\]|constrained-str|str|int|bool|list\[.*\]|"
+    r"dict\[.*\]|literal\[.*\]|is-instance\[.*\]|nullable|.*\[.*\])$"
+)
+"""Location segments pydantic adds for the validator or union branch it was
+in; they mean nothing to the person editing the YAML."""
+
+
 def format_errors(exc: ValidationError) -> list[tuple[str, str]]:
     """Flatten a pydantic error into ``(dotted location, message)`` pairs.
 
     Every human field is a ``T | Marker`` union, so pydantic reports two
     failures per bad value: one for ``T`` and one "should be an instance of
-    Marker". The second is noise for the reader; it is dropped and the union
-    branch name (``constrained-str``, ``is-instance[Marker]``) is stripped
-    from the location.
+    Marker". The second is noise for the reader and is dropped, as are the
+    validator / union branch segments of the location (``function-after[...]``,
+    ``constrained-str``). An unexpected key is phrased as such, and the same
+    complaint is never repeated.
     """
     out: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
     for err in exc.errors():
         parts = [str(p) for p in err["loc"]]
         if parts and parts[-1].startswith("is-instance["):
             continue
-        if parts and parts[-1] in {"constrained-str", "str", "list[str]"}:
-            parts.pop()
-        out.append((".".join(parts) or "<root>", err["msg"]))
+        kept = [p for p in parts if not _BRANCH.match(p)]
+        msg = err["msg"]
+        if err["type"] == "extra_forbidden" and kept:
+            key = kept.pop()
+            msg = f"unexpected key {key!r}"
+        pair = (".".join(kept) or "<root>", msg)
+        if pair in seen:
+            continue
+        seen.add(pair)
+        out.append(pair)
     return out
 
 

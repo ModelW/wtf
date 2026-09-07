@@ -289,7 +289,9 @@ def test_a_stamp_closes_a_cell_and_missing_becomes_a_finding(repo: Path) -> None
     text = manifest.read_text()
     # The rest of the file is untouched; the block is appended.
     assert text.startswith("scope: subject\nnote: reviewed\n")
-    assert "threats:\n  AC01: {status: mitigated, note: get_object_or_404" in text
+    assert (
+        "threats:\n  AC01:\n    status: mitigated\n    note: get_object_or_404" in text
+    )
     assert "fingerprint:" in text
     cells = _cells(repo, "api:getCustomer")
     assert cells["AC01"][0] is Verdict.STAMPED
@@ -362,7 +364,7 @@ def test_flow_stamps_live_on_the_source_keyed_by_sink(repo: Path) -> None:
     )
     assert out.exit_code == 0, out.output  # type: ignore[attr-defined]
     text = (repo / "api" / "compliance" / "touchpoints" / "checkout.yaml").read_text()
-    assert "DS06@api:db-default: {status: n/a" in text
+    assert "DS06@api:db-default:\n    status: n/a" in text
     matrix = build_matrix(_ws(repo))
     by = {(c.element, c.sid): c for c in matrix.cells}
     assert by["api:checkout->api:db-default", "DS06"].verdict is Verdict.STAMPED
@@ -382,7 +384,7 @@ def test_store_and_party_stamps(repo: Path) -> None:
     )
     assert out.exit_code == 0, out.output  # type: ignore[attr-defined]
     store_file = repo / "api" / "compliance" / "stores" / "db-default.yaml"
-    assert "threats:\n  AC01: {status: n/a" in store_file.read_text()
+    assert "threats:\n  AC01:\n    status: n/a" in store_file.read_text()
     assert _cells(repo, "api:db-default")["AC01"][0] is Verdict.STAMPED
     # A re-declaration of a touchpoint keeps its stamps.
     from model_wtf.compliance.mcp_server import DataRef, Tools
@@ -404,7 +406,7 @@ def test_store_and_party_stamps(repo: Path) -> None:
     text = (
         repo / "api" / "compliance" / "touchpoints" / "getCustomer.yaml"
     ).read_text()
-    assert "AA03: {status: mitigated" in text
+    assert "AA03:\n    status: mitigated" in text
     # The agent tools: cells to look at, then a stamp by the agent.
     listing = tools.threat_cells("api:getCustomer")
     assert "AC01 [access]" in listing
@@ -418,3 +420,70 @@ def test_store_and_party_stamps(repo: Path) -> None:
     assert finding.note == "no owner check"
     # The challenger sees stamps as assertions to re-check.
     assert "threat AA03: mitigated — x" in tools.reviews(["api/shop/api.py"])
+
+
+def test_stamps_survive_hostile_notes_and_keep_the_rest_of_the_file(repo: Path) -> None:
+    """Notes with colons, braces, quotes and unicode; the reviewer's own
+    lines untouched, byte for byte."""
+    from model_wtf.compliance.stamps import Stamp, Stamps, read_stamps, write_stamps
+    from model_wtf.compliance.yaml_io import Missing
+
+    manifest = repo / "api" / "compliance" / "touchpoints" / "getCustomer.yaml"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    original = (
+        "# reviewed by hand\n"
+        "scope: subject\n"
+        "note: 'api.py:31: {braces}, colons: everywhere'\n"
+        "data:\n"
+        "  - api:shop.Customer.email: [create, read]\n"
+    )
+    manifest.write_text(original)
+    hostile = 'guard at api.py:144-152; {not: yaml}, it\'s "quoted" — ok: yes'
+    stamps = Stamps(
+        {
+            "AA01": Stamp(status="mitigated", note=hostile, by="agent"),
+            "CR03": Missing("[agent] no throttle: 'x', {y}"),
+        }
+    )
+    write_stamps(manifest, stamps)
+    text = manifest.read_text()
+    assert text.startswith(original)
+    back = read_stamps(manifest)
+    assert back.root["AA01"].note == hostile  # type: ignore[union-attr]
+    assert isinstance(back.root["CR03"], Missing)
+    assert back.root["CR03"].note == "[agent] no throttle: 'x', {y}"
+    # Rewriting merges into the block rather than appending a second one;
+    # `merge=False` replaces it.
+    write_stamps(manifest, Stamps({"AA01": Stamp(status="n/a", note="n")}))
+    assert manifest.read_text().count("threats:") == 1
+    assert "CR03" in manifest.read_text()
+    write_stamps(manifest, Stamps({"AA01": Stamp(status="n/a", note="n")}), merge=False)
+    assert "CR03" not in manifest.read_text()
+    # The manifest still loads through the touchpoint schema.
+    run_check(repo, strict=False)
+
+
+def test_topics_cover_every_open_topic_and_swarm_work_is_grouped(repo: Path) -> None:
+    from model_wtf.compliance.threats import (
+        load_topics,
+        work_by_topic,
+        work_by_touchpoint,
+    )
+
+    topics = load_topics()
+    catalogue = load_catalogue()
+    used = {t.topic_name for t in catalogue.mapping.values() if t.never is None}
+    assert used <= set(topics), used - set(topics)
+    for topic in topics.values():
+        assert topic.checklist
+    _tp(repo, "getCustomer", f"scope: subject\ndata:\n  - {EMAIL}\n")
+    matrix = build_matrix(_ws(repo))
+    by_tp = work_by_touchpoint(matrix)
+    # Undeclared touchpoints are not work yet; flows fold onto their source.
+    assert "api:getCustomer" in by_tp
+    assert "api:checkout" not in by_tp
+    assert all("->" not in k for k in by_tp)
+    by_topic = work_by_topic(matrix)
+    assert "access" in by_topic
+    assert "api:getCustomer" in by_topic["access"]
+    assert {c.sid for c in by_topic["access"]["api:getCustomer"]} >= {"AA03", "AC01"}
