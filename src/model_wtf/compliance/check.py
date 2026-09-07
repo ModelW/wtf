@@ -206,18 +206,19 @@ def _check_threats(
             if finding.degree:
                 weight += f"/{finding.degree}"
             weight += f" by {', '.join(finding.actors) or '-'}]"
+        fid = matrix.finding_id(cell)
         diagnostics.append(
             Diagnostic(
                 Severity.WARNING,
                 "threat-missing",
-                f"{cell.element}: {cell.sid} {catalogue_title(matrix, cell.sid)}"
-                f"{weight} [{origin}]",
+                f"{fid + ' ' if fid else ''}{cell.element}: {cell.sid} "
+                f"{catalogue_title(matrix, cell.sid)}{weight} [{origin}]",
                 scopes_by_element[cell.element],
                 _element_path(element, scopes),
                 subject=f"{cell.element}#{cell.sid}",
                 note=note,
                 origin=origin,
-                hint=f"threats why {cell.element} {cell.sid}",
+                hint=f"threats why {fid or cell.element + ' ' + cell.sid}",
                 risk=finding.severity if finding else None,
             )
         )

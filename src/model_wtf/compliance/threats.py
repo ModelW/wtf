@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from model_wtf.compliance.findings import assign_ids
 from model_wtf.compliance.severity import (
     Actor,
     Assessment,
@@ -53,7 +54,7 @@ from model_wtf.compliance.threats_gen import (
     builtin_threats_dir,
 )
 from model_wtf.compliance.touchpoints import Kind
-from model_wtf.compliance.yaml_io import Missing, load_yaml
+from model_wtf.compliance.yaml_io import Marker, Missing, load_yaml
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -343,6 +344,13 @@ class Matrix:
     cells: list[Cell]
     titles: dict[str, str] = field(default_factory=dict)
     """SID → threat title, for renderers without the catalogue at hand."""
+    ids: dict[str, str] = field(default_factory=dict)
+    """Finding key (``holder#SID[@sink]``) → ``F-0001`` from the register."""
+
+    def finding_id(self, cell: Cell) -> str | None:
+        """The stable id of a missing cell, if registered."""
+        holder, _ = _stamp_holder(self.elements[cell.element], self.elements)
+        return self.ids.get(f"{holder.id}#{cell.stamp_key or cell.sid}")
 
     def open(self) -> list[Cell]:
         """Cells an agent has to look at (open, or stamped on moved code)."""
@@ -523,8 +531,10 @@ def _touchpoint_files(tp: Touchpoint) -> list[Path]:
 # ---------------------------------------------------------------------------
 
 
-def build_matrix(ws: Workspace, catalogue: Catalogue | None = None) -> Matrix:
-    """Every element x applicable threat, decided."""
+def build_matrix(
+    ws: Workspace, catalogue: Catalogue | None = None, *, register: bool = True
+) -> Matrix:
+    """Every element x applicable threat, decided; findings given stable ids."""
     catalogue = catalogue or load_catalogue()
     elements = build_elements(ws)
     cells: list[Cell] = []
@@ -542,9 +552,13 @@ def build_matrix(ws: Workspace, catalogue: Catalogue | None = None) -> Matrix:
                 # the reviewer's narrowing (effect/degree/actor) is kept.
                 cell = _weigh(cell, element, sid, catalogue, ws, actors)
             cells.append(cell)
-    return Matrix(
+    matrix = Matrix(
         elements, cells, {sid: t.title for sid, t in catalogue.threats.items()}
     )
+    # Ids are allocated here so every reader (findings, check, why, the
+    # swarm's narration) agrees; a read-only caller passes register=False.
+    matrix.ids = assign_ids(matrix, ws.shared, write=register)
+    return matrix
 
 
 def _weigh(
@@ -729,10 +743,32 @@ def _fires(when: RuleWhen, element: Element, ws: Workspace) -> bool:  # noqa: C9
         return False
     if when.flow == "not_personal" and any(r.pii for r in element.items):
         return False
+    if when.flow == "declared_transfer" and not _safeguarded_transfer(element, ws):
+        return False
     return not (
         when.flow == "no_credentials"
         and any(r.category == "credentials" for r in element.items)
     )
+
+
+def _safeguarded_transfer(element: Element, ws: Workspace) -> bool:
+    """A flow to a party whose country is adequate or covered by a safeguard."""
+    if element.kind is not ElementKind.FLOW or not (element.sink or "").startswith(
+        "party:"
+    ):
+        return False
+    party = ws.parties.get(element.sink.removeprefix("party:"))  # type: ignore[union-attr]
+    if party is None:
+        return False
+    country = party.country if isinstance(party.country, str) else None
+    if country is None:
+        return False
+    if country.upper() in ws.knowledge.adequacy:
+        return True
+    safeguard = getattr(party, "safeguard", None)
+    if safeguard is None or isinstance(safeguard, Marker):
+        return False
+    return not (safeguard == "dpf" and not getattr(party, "dpf_certified", False))
 
 
 def _no_request(element: Element) -> bool:
@@ -840,7 +876,7 @@ class StampError(ValueError):
     """The stamp cannot be written as asked."""
 
 
-def stamp_cell(
+def stamp_cell(  # noqa: C901 - one validation per refusal, one knob per narrowing
     matrix: Matrix,
     units: dict[str, Unit],
     shared: Path,
@@ -942,6 +978,11 @@ def stamp_cell(
         )
     stamps.root[key] = value
     write_stamps(path, stamps)
+    if missing is not None and ws is not None:
+        # Register the finding now: the caller's matrix predates the stamp.
+        fresh = replace(cell, verdict=Verdict.MISSING, stamp_key=key, stamp=value)
+        matrix.cells.append(fresh)
+        matrix.ids = assign_ids(matrix, ws.shared)
     return path, key, value
 
 

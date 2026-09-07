@@ -502,7 +502,7 @@ class Tools:
         ws = self.workspace(refresh=True)
         matrix = build_matrix(ws)
         try:
-            path, _, written = stamp_cell(
+            path, key, written = stamp_cell(
                 matrix,
                 {u.id: u for u in self.units},
                 self.root / "compliance",
@@ -521,6 +521,24 @@ class Tools:
         except (StampError, ValueError) as exc:
             raise ValueError(str(exc)) from exc
         severity = getattr(written, "severity", None) or ""
+        fid = ""
+        if missing:
+            # Allocate the finding's id now so the narration and the reply
+            # can cite it.
+            fresh = build_matrix(self.workspace(refresh=True))
+            fid = (
+                next(
+                    (
+                        fresh.finding_id(c)
+                        for c in fresh.missing()
+                        if c.sid == sid
+                        and (c.stamp_key or c.sid) == key
+                        and c.element == element
+                    ),
+                    None,
+                )
+                or ""
+            )
         _log_activity(
             "threat_stamp",
             id=element,
@@ -529,9 +547,10 @@ class Tools:
             note=(missing or note or "").strip(),
             title=self._threat_title(sid),
             severity=severity,
+            fid=fid,
         )
         self._workspace = None
-        tail = f" ({severity})" if severity else ""
+        tail = f" ({severity}{', ' + fid if fid else ''})" if severity else ""
         return f"Stamped {element} {sid} in {self._rel(path)}{tail}."
 
     def _threat_title(self, sid: str) -> str:

@@ -642,3 +642,46 @@ def test_findings_lists_missing_stamps_most_severe_first(repo: Path) -> None:
     assert out.exit_code == 0, out.output
     assert "AA03" in out.output
     assert "DO01" not in out.output
+
+
+def test_findings_get_stable_ids_that_survive_fixes_and_returns(repo: Path) -> None:
+    from model_wtf.compliance.findings import REGISTER_FILE, load_register, resolve
+
+    _tp(repo, "getCustomer", f"data:\n  - {IBAN}\n")
+    _tp(repo, "checkout", f"scope: subject\ndata:\n  - {EMAIL}: create\n")
+    _stamp(repo, "api:getCustomer", "AA03", "--missing", "any id")
+    _stamp(repo, "api:checkout", "DO01", "--missing", "no throttle")
+    register = load_register(repo / "compliance")
+    assert set(register.findings) == {"F-0001", "F-0002"}
+    assert resolve(repo / "compliance", "f-0001") == "api:getCustomer#AA03"
+    matrix = build_matrix(_ws(repo))
+    ids = {matrix.finding_id(c) for c in matrix.missing()}
+    assert ids == {"F-0001", "F-0002"}
+    # check cites the id and hints `threats why F-000x`.
+    report = run_check(repo, strict=False)
+    line = next(d for d in report.diagnostics if d.code == "threat-missing")
+    assert line.message.startswith("F-0001 ")
+    assert line.hint == "threats why F-0001"
+    # Fixing one closes its id (dated) but never reuses it.
+    manifest = repo / "api" / "compliance" / "touchpoints" / "checkout.yaml"
+    manifest.write_text(manifest.read_text().replace("DO01:", "DOXX:"))
+    build_matrix(_ws(repo))
+    register = load_register(repo / "compliance")
+    assert register.findings["F-0002"].closed
+    _stamp(repo, "api:checkout", "DO02", "--missing", "unbounded")
+    register = load_register(repo / "compliance")
+    assert "F-0003" in register.findings
+    # It comes back under the same id when the finding reappears.
+    manifest.write_text(manifest.read_text().replace("DOXX:", "DO01:"))
+    build_matrix(_ws(repo))
+    register = load_register(repo / "compliance")
+    assert register.findings["F-0002"].closed is None
+    assert (repo / "compliance" / REGISTER_FILE).is_file()
+    # why F-0001 explains the one finding.
+    out = CliRunner().invoke(
+        cli, ["--root", str(repo), "compliance", "threats", "why", "F-0001"]
+    )
+    assert out.exit_code == 0, out.output
+    assert "api:getCustomer" in out.output
+    assert "any id" in out.output
+    assert "critical" in out.output

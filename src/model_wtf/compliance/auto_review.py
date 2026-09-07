@@ -821,8 +821,10 @@ def narrate_write(  # noqa: C901 - one branch per kind
             "accepted": ("  ~ ", "yellow"),
             "n/a": ("  - ", "dim"),
         }.get(status, ("  ? ", "dim"))
+        fid = str(entry.get("fid") or "")
         return Text.assemble(
             (mark, colour),
+            (f"{fid} ", "bold") if fid else "",
             (ident, "bold"),
             f" {sid} ({title}) ",
             (status, colour),

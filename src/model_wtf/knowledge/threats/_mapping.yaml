@@ -150,7 +150,7 @@ AC21: {element: [process], dismiss: [no_request, no_cookie_auth, safe_method_onl
 AC01: {element: [process, store], dismiss: [no_request, public_by_design], topic: access, effect: ops, note: "privilege abuse: subject-scoped touchpoint acting on objects it does not own; staff screens without permission checks"}
 AC07: {element: [process], dismiss: [no_request, public_by_design], topic: access, effect: ops}
 AC09: {element: [process], dismiss: [no_request], topic: access, effect: tampering, note: "functionality misuse: legitimate feature used at scale or out of intent (mass signup, coupon replay)"}
-AC12: {element: [process], dismiss: [no_request, public_by_design], topic: access, effect: escalation, note: "privilege escalation: a subject reaching staff-only behaviour through this touchpoint"}
+AC12: {element: [process], dismiss: [no_request, public_by_design], topic: access, effect: ops, note: "privilege escalation: reaching behaviour or rows beyond one's own through this touchpoint; weighed like its siblings on what the ops do (a role escalation to staff is AA01/AA02 territory)"}
 
 # --- disclosure ----------------------------------------------------------------
 DS01: {element: [process], dismiss: [no_request], topic: disclosure, effect: disclosure, note: "excavation: error messages, enumeration (user exists?), verbose 4xx"}
@@ -163,14 +163,14 @@ DS03: {element: [process], dismiss: [not_surface_route], topic: surface, effect:
 HA03: {element: [process], dismiss: [not_surface_route], topic: surface, effect: disclosure, note: "fingerprinting through the application's discovery surface (docs, schema, default error pages); proxy headers are infra"}
 INP18: {element: [process], dismiss: [no_request], topic: disclosure, effect: disclosure, note: "what errors/logs the touchpoint returns on bad input"}
 DS05: {element: [process], dismiss: [no_cache_use], topic: disclosure, effect: disclosure, note: "personal data cached under a key another person can hit"}
-DS06: {element: [flow], dismiss: [flow_not_personal], topic: disclosure, effect: disclosure, note: "the flow carries more than the receiver should see (response leaks fields, logs, transfers)"}
-DR01: {element: [flow], dismiss: [flow_not_personal], topic: disclosure, effect: disclosure, note: "sensitive data on a flow without protection: plaintext credentials, secrets in URLs, personal data in GET params"}
+DS06: {element: [flow], dismiss: [flow_not_personal, declared_transfer], topic: disclosure, effect: disclosure, note: "the flow carries more than the receiver should see (response leaks fields, logs, transfers)"}
+DR01: {element: [flow], dismiss: [flow_not_personal, declared_transfer], topic: disclosure, effect: disclosure, note: "sensitive data on a flow without protection: plaintext credentials, secrets in URLs, personal data in GET params"}
 
 # --- denial of service ----------------------------------------------------------
 DO01: {element: [process], dismiss: [no_request], topic: dos, effect: denial, note: "flooding: unthrottled expensive endpoint (signup, password reset, search, geocoding calls)"}
 DO02: {element: [process, store], dismiss: [no_request], topic: dos, effect: denial, note: "excessive allocation: unbounded list, upload size, unpaginated query, N+1 by input"}
 
 # --- credentials on flows ------------------------------------------------------------
-AC22: {element: [flow], dismiss: [flow_no_credentials], topic: credentials, effect: escalation}
-AC23: {element: [flow], dismiss: [flow_no_credentials], topic: credentials, effect: escalation}
+AC22: {element: [flow], dismiss: [flow_no_credentials, declared_transfer], topic: credentials, effect: escalation}
+AC23: {element: [flow], dismiss: [flow_no_credentials, declared_transfer], topic: credentials, effect: escalation}
 AC24: {element: [flow], dismiss: [flow_no_credentials], topic: credentials, effect: escalation, note: "hardcoded credentials in the touchpoint's files (grep for keys/tokens)"}

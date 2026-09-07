@@ -491,6 +491,16 @@ counting pictures they see in the back-office is not a finding). Buckets:
 narrow (`--degree existence`, `--effect denial`, `--actor subject`) with a
 reason; `check` tags and sorts findings by risk.
 
+Every finding gets a stable id, `F-0042`, allocated in
+`compliance/findings.lock.yaml` on first sighting and never reused (a fixed
+finding is closed with a date, not deleted, so a ticket citing it still
+resolves). `threats findings` lists them most severe first — several
+threats with the same evidence on one element fold into one row — and
+`threats why F-0042` explains one: weight, who, data, evidence, the
+threat's description and mitigations. A declared, safeguarded transfer to
+a party is the intended use, not a leak: disclosure threats on that flow
+are dismissed by rule.
+
 #### The swarm
 
 ```

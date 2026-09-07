@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from dataclasses import dataclass, replace
 from pathlib import Path  # noqa: TC003 - click needs it at runtime
 from typing import Any
 
@@ -297,7 +298,7 @@ def findings_cmd(
     """
     matrix, catalogue, _ = _matrix(ctx, root, python, only)
     cutoff = _SEVERITY_ORDER.index(min_severity)
-    rows: list[tuple[int, Cell, Finding | None]] = []
+    rows: list[Row] = []
     seen: set[tuple[str, str]] = set()
     for cell in matrix.missing():
         # One stamp covers the touchpoint and every flow of it: one row,
@@ -315,21 +316,28 @@ def findings_cmd(
         )
         if finding is not None and rank > cutoff:
             continue
-        rows.append((rank, cell, finding))
-    rows.sort(key=lambda r: (r[0], -(r[2].impact or 0) if r[2] else 0, r[1].element))
+        fid = matrix.finding_id(cell)
+        rows.append(Row(rank, cell, finding, [fid] if fid else []))
+    rows.sort(key=lambda r: (r.rank, -(r.finding.impact or 0) if r.finding else 0))
+    rows = _fold_same_evidence(rows)
     if output_format == "json":
         click.echo(
             json.dumps(
                 [
                     {
-                        "element": cell.element,
-                        "sid": cell.sid,
-                        "title": catalogue.threats[cell.sid].title,
-                        "topic": cell.topic,
-                        "note": cell.reason,
-                        **(finding.model_dump(exclude={"missing"}) if finding else {}),
+                        "ids": row.ids,
+                        "element": row.cell.element,
+                        "sid": row.cell.sid,
+                        "title": _titles(row.cell.sid, catalogue),
+                        "topic": row.cell.topic,
+                        "note": row.cell.reason,
+                        **(
+                            row.finding.model_dump(exclude={"missing"})
+                            if row.finding
+                            else {}
+                        ),
                     }
-                    for _, cell, finding in rows
+                    for row in rows
                 ],
                 indent=2,
             )
@@ -340,6 +348,7 @@ def findings_cmd(
         console.print(Text("no finding at or above this severity", style="green"))
         ctx.exit(0)
     table = Table(title=f"{len(rows)} finding(s)", title_justify="left")
+    table.add_column("Id", no_wrap=True)
     table.add_column("Severity")
     table.add_column("Element", no_wrap=True)
     table.add_column("Threat")
@@ -347,7 +356,8 @@ def findings_cmd(
     table.add_column("Who")
     table.add_column("Data")
     table.add_column("Evidence")
-    for _, cell, finding in rows:
+    for row in rows:
+        cell, finding = row.cell, row.finding
         sev = finding.severity if finding and finding.severity else "unweighed"
         effect = ""
         who = ""
@@ -359,9 +369,14 @@ def findings_cmd(
             who = ", ".join(finding.actors) or "-"
             data = finding.sensitivity or ""
         table.add_row(
+            Text(
+                (row.ids[0] if row.ids else "")
+                + (f"\n+{len(row.ids) - 1}" if len(row.ids) > 1 else ""),
+                style="bold",
+            ),
             Text(sev, style=_SEVERITY_STYLE.get(sev, "dim")),
             cell.element,
-            f"{cell.sid} {catalogue.threats[cell.sid].title}",
+            _titles(cell.sid, catalogue),
             effect,
             who,
             data,
@@ -369,6 +384,35 @@ def findings_cmd(
         )
     console.print(table)
     ctx.exit(0)
+
+
+@dataclass
+class Row:
+    """One line of ``threats findings``: possibly several SIDs folded."""
+
+    rank: int
+    cell: Cell
+    finding: Finding | None
+    ids: list[str]
+
+
+def _fold_same_evidence(rows: list[Row]) -> list[Row]:
+    """Several SIDs on one element with the same evidence and weight are one
+    finding (pytm's catalogue splits ownership into four threats): keep the
+    first row, list the other SIDs and ids on it."""
+    out: list[Row] = []
+    index: dict[tuple[str, str, str | None], int] = {}
+    for row in rows:
+        severity = row.finding.severity if row.finding else None
+        key = (row.cell.element, row.cell.reason.strip(), severity)
+        if key in index:
+            prev = out[index[key]]
+            prev.cell = replace(prev.cell, sid=f"{prev.cell.sid}, {row.cell.sid}")
+            prev.ids.extend(row.ids)
+            continue
+        index[key] = len(out)
+        out.append(row)
+    return out
 
 
 def _heaviest(matrix: Matrix, holder_id: str, cell: Cell) -> Cell:
@@ -387,9 +431,15 @@ def _heaviest(matrix: Matrix, holder_id: str, cell: Cell) -> Cell:
         ):
             best = other
     # Report on the holder's id, whatever cell carried the weight.
-    from dataclasses import replace
 
     return replace(best, element=holder_id)
+
+
+def _titles(sids: str, catalogue: Catalogue) -> str:
+    parts = [s.strip() for s in sids.split(",")]
+    if len(parts) == 1:
+        return f"{parts[0]} {catalogue.threats[parts[0]].title}"
+    return ", ".join(parts) + f"  ({catalogue.threats[parts[0]].title}, …)"
 
 
 def _impact(cell: Cell) -> float:
@@ -415,8 +465,11 @@ def why_cmd(
     root: Path | None,
 ) -> None:
     """Every threat for one element (a touchpoint id, `unit:store`, `party:x`,
-    or a flow `a->b`) with in/out and the rule that decided it."""
-    matrix, catalogue, _ = _matrix(ctx, root, python, None)
+    or a flow `a->b`) with in/out and the rule that decided it. A finding id
+    (`F-0042`) shows that one finding in full."""
+    matrix, catalogue, resolved = _matrix(ctx, root, python, None)
+    if element_id.upper().startswith("F-"):
+        _why_finding(ctx, matrix, catalogue, resolved, element_id.upper())
     element = matrix.elements.get(element_id)
     if element is None:
         near = [e for e in matrix.elements if element_id in e][:8]
@@ -454,6 +507,70 @@ def why_cmd(
         )
         for cell in group:
             console.print(_cell_line(cell, catalogue))
+    ctx.exit(0)
+
+
+def _why_finding(
+    ctx: click.Context, matrix: Matrix, catalogue: Catalogue, root: Path, fid: str
+) -> None:
+    from model_wtf.compliance.findings import resolve
+
+    key = resolve(root / SHARED_FOLDER, fid)
+    if key is None:
+        Console(stderr=True).print(
+            Text.assemble(("Error: ", "red"), f"no finding {fid}")
+        )
+        ctx.exit(int(ExitCode.TOOL_ERROR))
+    holder, _, stamp_key = key.partition("#")
+    sid = stamp_key.split("@", 1)[0]
+    cells = [
+        c
+        for c in matrix.missing()
+        if c.sid == sid
+        and (c.stamp_key or c.sid) == stamp_key
+        and _stamp_holder(matrix.elements[c.element], matrix.elements)[0].id == holder
+    ]
+    console = Console()
+    if not cells:
+        console.print(
+            Text.assemble(
+                (fid, "bold"), f"  {key}  ", ("closed: no longer missing", "green")
+            )
+        )
+        ctx.exit(0)
+    cell = cells[0]
+    spec = catalogue.threats[sid]
+    console.print(Text.assemble((fid, "bold"), f"  {holder}  {sid} {spec.title}"))
+    finding = cell.stamp if isinstance(cell.stamp, Finding) else None
+    if finding is not None:
+        console.print(
+            Text(
+                f"  {finding.severity}: {finding.effect}"
+                + (f"/{finding.degree}" if finding.degree else "")
+                + f"  impact {finding.impact} x likelihood {finding.likelihood}",
+                style=_SEVERITY_STYLE.get(finding.severity or "", "yellow"),
+            )
+        )
+        console.print(Text(f"  who: {', '.join(finding.actors) or 'nobody reachable'}"))
+        if finding.data:
+            console.print(
+                Text(f"  data ({finding.sensitivity}): {', '.join(finding.data)}")
+            )
+        if finding.by or finding.commit:
+            console.print(
+                Text(
+                    f"  stamped by {finding.by or '?'} at {finding.commit or '?'}",
+                    style="dim",
+                )
+            )
+    console.print(Text("  evidence:", style="bold"))
+    console.print(Text(f"    {cell.reason.removeprefix('[agent]').strip()}"))
+    console.print()
+    console.print(Text("  threat:", style="bold"))
+    console.print(Text(f"    {spec.details[:600]}", style="dim"))
+    if spec.mitigations:
+        console.print(Text("  mitigations:", style="bold"))
+        console.print(Text(f"    {spec.mitigations[:600]}", style="dim"))
     ctx.exit(0)
 
 
@@ -672,7 +789,6 @@ def auto_review_cmd(
     mitigated (with file:line), n/a, accepted, or a `missing` finding. Same
     sandbox and exit codes as the other auto-reviews.
     """
-    from dataclasses import replace
 
     from model_wtf.compliance.auto_review import (
         THREATS_TARGET,

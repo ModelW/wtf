@@ -202,3 +202,9 @@ flow_no_credentials:
   description: the flow carries no item of category `credentials`
   when:
     flow: no_credentials
+
+declared_transfer:
+  applies: [flow]
+  description: the flow is a declared transfer to a party with a valid Ch. V safeguard; sending the data there is the intended use, not a leak (whether it sends more than declared is the reviewer's question at declaration time)
+  when:
+    flow: declared_transfer

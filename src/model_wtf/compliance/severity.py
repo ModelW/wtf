@@ -208,6 +208,10 @@ def infer_degree(element: Element) -> Degree:
     tp = element.touchpoint
     if tp is None:
         return Degree.BULK if element.kind.value == "store" else Degree.RECORD
+    if element.kind.value == "flow" and (element.sink or "").startswith("party:"):
+        # What leaves to a party is what this call handles — the caller's
+        # own input, one record — however many rows the touchpoint lists.
+        return Degree.RECORD
     facts = tp.facts
     if facts.kind is Kind.TASK or facts.kind is Kind.ADMIN:
         return Degree.BULK
