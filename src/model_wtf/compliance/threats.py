@@ -124,6 +124,7 @@ class RuleWhen(BaseModel):
     methods_exclude: list[str] | None = None
     auth_not_cookie: bool | None = None
     id_absent: list[str] | None = None
+    id_regex_absent: list[str] | None = None
     grep_absent: list[str] | None = None
     grep_present: list[str] | None = None
     store_type: list[str] | None = None
@@ -495,6 +496,10 @@ def _fires(when: RuleWhen, element: Element, ws: Workspace) -> bool:  # noqa: C9
         return False
     if when.id_absent is not None and any(
         w in element.id.lower() for w in when.id_absent
+    ):
+        return False
+    if when.id_regex_absent is not None and any(
+        re.search(p, element.id.lower()) for p in when.id_regex_absent
     ):
         return False
     if when.grep_absent is not None:

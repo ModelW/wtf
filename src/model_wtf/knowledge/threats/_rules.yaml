@@ -13,6 +13,8 @@
 #                                       no unsafe HTTP method
 #     methods_only: [GET, HEAD, OPTIONS]  fires when methods ⊆ this set
 #     framework: [ninja, drf, ...]
+#     id_absent: [<word>, ...]          fires when no word is a substring of the id
+#     id_regex_absent: [<regex>, ...]   same, anchored regexes on the id
 #     grep_absent: [<regex>, ...]       fires when none matches in the files
 #     grep_present: [<regex>, ...]      fires when one matches
 #     store_type: [database, ...]
@@ -36,6 +38,52 @@ no_xml:
   description: no XML parser in the touchpoint's files
   when:
     grep_absent: ['xml\.etree', 'lxml', 'xml\.dom', 'xml\.sax', 'defusedxml', 'xmltodict', 'DOMParser', 'XMLParser', 'fast-xml-parser', 'xml2js']
+
+no_soap:
+  applies: [process]
+  description: no SOAP client in the touchpoint's files
+  when:
+    grep_absent: ['\bzeep\b', '\bsuds\b', 'soap', 'SOAP', '\.wsdl', 'strong-soap', 'easy-soap']
+
+no_llm:
+  applies: [process]
+  description: no LLM SDK, gateway, RAG stack, voice agent or provider API key in the touchpoint's files
+  # What WITH's own repos use (Sept 2026): the ChatFAQ SDK and its FSMs
+  # (cawl-chatbot, lefebvre-xia, bonnard, activeseed, enel), OpenAI /
+  # Anthropic / Mistral / Google GenAI / Together, LiveKit voice agents with
+  # ElevenLabs / Deepgram / Speechmatics, chat_rag / rag_pipeline over
+  # pgvector, Laminar and OpenInference tracing, the rhllor gateway and
+  # OpenRouter. Lockfiles are never read (litellm is transitive everywhere):
+  # only the element's own files count. Common English words (together,
+  # whisper, phoenix) are matched only as imports or package names.
+  when:
+    grep_absent:
+      # SDKs and frameworks
+      - '\bchatfaq(_sdk|-sdk|-widget)?\b'
+      - 'ChatFAQSDK|FSMDefinition'
+      - '(import|from)\s+(openai|anthropic|mistralai|together|cohere|groq|replicate|dspy|haystack|instructor|silero|whisper)\b'
+      - 'api\.(openai|anthropic|mistral|together|cohere|groq)\.(com|ai|xyz)'
+      - 'google\.genai|google-genai|generativeai|generativelanguage\.googleapis'
+      - 'bedrock-runtime|invoke_model\('
+      - 'langchain|langgraph|llama_index|llamaindex|litellm|\bollama\b|pydantic_ai'
+      - '\btransformers\b|sentence_transformers|\bvllm\b'
+      - "@ai-sdk|from ['\"]ai['\"]"
+      # voice agents
+      - '\blivekit\b|elevenlabs|deepgram|speechmatics'
+      # RAG
+      - '\bchat_rag\b|\brag_pipeline\b|embedding_provider|VectorField|\bpgvector\b|\bqdrant\b|\bchromadb\b|\bweaviate\b|\bpinecone\b|\bfaiss\b'
+      # observability wrappers only used around LLM calls
+      - '\blmnr\b|openinference|langfuse'
+      # endpoints and gateways
+      - 'chat\.completions|/v1/messages|/v1/chat|/v1/embeddings|openrouter|\brhllor\b'
+      # provider keys
+      - '(OPENAI|ANTHROPIC|MISTRAL|OPENROUTER|GEMINI|GOOGLE_AI|GOOGLE_GENAI|COHERE|HUGGINGFACE|HF|TOGETHER|GROQ|ELEVENLABS|DEEPGRAM|LIVEKIT|CHATFAQ|LMNR|LANGFUSE)_(API_)?(KEY|TOKEN|SECRET)'
+
+not_surface_route:
+  applies: [process]
+  description: not a discovery endpoint (API docs, schema, admin index, browsable API)
+  when:
+    id_regex_absent: ['(^|[:/_-])(docs|openapi|schema|swagger|redoc|browsable|api-root|debug)([:/_-]|$)', 'admin:index$']
 
 no_resource_from_input:
   applies: [process]

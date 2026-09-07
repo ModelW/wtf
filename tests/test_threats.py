@@ -235,3 +235,28 @@ def test_cli_matrix_and_why(repo: Path) -> None:
         cli, ["--root", str(repo), "compliance", "threats", "gen", "--check"]
     )
     assert out.exit_code == 0, out.output
+
+
+def test_llm_and_soap_cells_open_only_where_the_files_use_them(repo: Path) -> None:
+    """Review feedback: LLMs and SOAP clients do show up in projects, so they
+    are dismissed by a grep, not `never`."""
+    cells = _cells(repo, "api:getCustomer")
+    assert cells["LLM01"] == (Verdict.DISMISSED, "no_llm")
+    assert cells["INP06"][0] is Verdict.DISMISSED
+    api = repo / "api" / "shop" / "api.py"
+    api.write_text(
+        api.read_text() + "\n\ndef _summarise(text):\n"
+        "    from openai import OpenAI\n"
+        "    return OpenAI().chat.completions.create(model='x', messages=[])\n"
+        "\n\ndef _soap():\n    import zeep\n    return zeep.Client('x.wsdl')\n"
+    )
+    cells = _cells(repo, "api:getCustomer")
+    assert cells["LLM01"] == (Verdict.OPEN, "llm")
+    assert cells["LLM07"][0] is Verdict.OPEN
+    assert cells["INP06"][0] is Verdict.OPEN
+    # A plain English "together" in a docstring is not an SDK.
+    text = api.read_text().replace("from openai import OpenAI", "pass")
+    text = text.replace("OpenAI().chat.completions.create(model='x', messages=[])", "0")
+    api.write_text(text + '\n\ndef _doc():\n    """Group things together."""\n')
+    cells = _cells(repo, "api:getCustomer")
+    assert cells["LLM01"] == (Verdict.DISMISSED, "no_llm")

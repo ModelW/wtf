@@ -27,20 +27,20 @@ INP02: {never: "memory-safe runtimes; buffer overflows are the interpreter's pro
 INP07: {never: "memory-safe runtimes"}
 INP12: {never: "memory-safe runtimes"}
 INP24: {never: "memory-safe runtimes; oversize input is DO02 (excessive allocation) here"}
-INP34: {never: "no SOAP"}
+INP34: {element: [process], dismiss: [no_soap], topic: input, note: "SOAP array overflow: only where the touchpoint consumes a SOAP service (zeep, suds)"}
 INP08: {never: "Python str formatting and JS template literals do not interpret user data as format directives; logging uses %-style with arguments"}
 INP13: {never: "no shell command built from input in the generated stacks (subprocess with a list is the rule); a touchpoint that shells out is INP31"}
 
 # --- technologies absent from the stacks ------------------------------------
 INP03: {never: "no Server Side Includes: Django templates and SvelteKit render on the app server"}
-INP06: {never: "no SOAP"}
+INP06: {element: [process], dismiss: [no_request, no_soap], topic: input, note: "SOAP parameter tampering: only where the touchpoint calls a SOAP service with request data"}
 INP09: {never: "no LDAP"}
 INP15: {never: "no IMAP/SMTP command built from input; mail goes through Django's mail backend with header validation (BadHeaderError)"}
 INP16: {never: "no PHP"}
 AC08: {never: "no registry"}
 AC14: {never: "no privileged block / signal handling exposed to input"}
 AC13: {never: "no privileged process to hijack inside the app"}
-INP20: {never: "clickjacking is a response-header concern handled once by XFrameOptionsMiddleware / SvelteKit CSP, not per touchpoint; covered by the security-settings review (out of the matrix)"}
+INP20: {never: "clickjacking is a response-header concern handled once by XFrameOptionsMiddleware / SvelteKit CSP, not per touchpoint; belongs to the security-settings review (DEBUG, cookie flags, headers, ALLOWED_HOSTS: one check per unit, outside this matrix)"}
 
 # --- XML (only when a parser is actually used) -------------------------------
 AC04: {element: [flow], dismiss: [no_xml], topic: input, note: "XML on a flow only if the touchpoint parses XML"}
@@ -73,16 +73,19 @@ CR05: {never: "encryption at rest is the platform's (managed Postgres/S3); the a
 AC02: {element: [store], dismiss: [store_not_shared], topic: store, note: "a cache or queue shared between units: who trusts what it reads"}
 DE04: {element: [store], dismiss: [store_not_audit], topic: store, note: "audit-trail stores: can the app rewrite its own trail"}
 
-# --- LLM / agents / lambda: not in the stacks --------------------------------
-LLM01: {never: "no LLM in the generated stacks; a project that adds one declares it as a party with transfers"}
-LLM02: {never: "no LLM"}
-LLM03: {never: "no LLM"}
-LLM04: {never: "no LLM"}
-LLM05: {never: "no LLM"}
-LLM06: {never: "no LLM"}
-LLM07: {never: "no LLM"}
-LLM08: {never: "no LLM"}
-LLM09: {never: "no agent harness"}
+# --- LLM / agents: only where a touchpoint's files call one -------------------
+# The smoke test is a grep for the SDKs and API key names (`no_llm`). The
+# LLM itself is a party the touchpoint transfers to; these cells ask what
+# the touchpoint lets through to it and back.
+LLM01: {element: [process], dismiss: [no_llm], topic: llm, note: "user input reaches the prompt"}
+LLM02: {element: [process], dismiss: [no_llm], topic: llm, note: "retrieved content (RAG, tool results) reaches the prompt"}
+LLM03: {element: [process], dismiss: [no_llm, flow_not_personal], topic: llm, note: "personal data sent to the provider; is it a declared transfer with a DPA"}
+LLM04: {element: [process], dismiss: [no_llm], topic: llm, note: "fine-tuning data integrity (rare in our stacks)"}
+LLM05: {element: [process], dismiss: [no_llm], topic: llm, note: "tool calls the model can trigger and what they may touch"}
+LLM06: {element: [process], dismiss: [no_llm], topic: llm, note: "model output executed as code"}
+LLM07: {element: [process], dismiss: [no_llm], topic: llm, note: "system prompt relied upon as a safety control"}
+LLM08: {element: [process], dismiss: [no_llm], topic: llm, note: "model output shown to another person without filtering"}
+LLM09: {element: [process], dismiss: [no_llm], topic: llm, note: "agent harness launching tools from configuration"}
 
 # --- environment variables: a deployment fact, not a request ------------------
 AC03: {never: "env vars come from the platform, never from the request; the app cannot be made to read attacker-controlled ones"}
@@ -145,8 +148,13 @@ AC12: {element: [process], dismiss: [no_request, public_by_design], topic: acces
 
 # --- disclosure ----------------------------------------------------------------
 DS01: {element: [process], dismiss: [no_request], topic: disclosure, note: "excavation: error messages, enumeration (user exists?), verbose 4xx"}
-DS03: {never: "footprinting/hardening of the host is infra"}
-HA03: {never: "fingerprinting: server headers are infra/proxy"}
+# NOTE: the discovery routes (openapi, admin:index, docs) are plumbing for the
+# data review and hidden by IGNORED_BY_DEFAULT, so today no touchpoint carries
+# these two cells. They belong with the per-unit security-settings check
+# (DEBUG, Server headers, ALLOWED_HOSTS, docs in production) that KFF-213
+# adds as a unit-level element; the rule is ready for it.
+DS03: {element: [process], dismiss: [not_surface_route], topic: surface, note: "footprinting: the application's own discovery surface — API docs / OpenAPI schema, admin index, browsable API left on in production. Host hardening is infra"}
+HA03: {element: [process], dismiss: [not_surface_route], topic: surface, note: "fingerprinting through the application's discovery surface (docs, schema, default error pages); proxy headers are infra"}
 INP18: {element: [process], dismiss: [no_request], topic: disclosure, note: "what errors/logs the touchpoint returns on bad input"}
 DS05: {element: [process], dismiss: [no_cache_use], topic: disclosure, note: "personal data cached under a key another person can hit"}
 DS06: {element: [flow], dismiss: [flow_not_personal], topic: disclosure, note: "the flow carries more than the receiver should see (response leaks fields, logs, transfers)"}
