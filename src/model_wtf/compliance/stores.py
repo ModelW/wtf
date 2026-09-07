@@ -25,6 +25,7 @@ deployment facts and never appear here. The optional
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
@@ -35,6 +36,7 @@ from pydantic import Field, ValidationError
 from model_wtf.compliance.declarations import format_errors
 from model_wtf.compliance.report import Diagnostic, Severity, marker_diagnostics
 from model_wtf.compliance.schemas import NonEmpty, StrictModel
+from model_wtf.compliance.stamps import Stamps
 from model_wtf.compliance.yaml_io import Marker, load_yaml
 
 if TYPE_CHECKING:
@@ -91,6 +93,10 @@ class StoreFile(StrictModel):
     description: NonEmpty | Marker | None = Field(
         default=None, description="What this store holds, in one sentence"
     )
+    threats: Stamps = Field(
+        default_factory=Stamps,
+        description="Stamps closing the threat cells the matrix left open",
+    )
     ignore: bool = False
 
 
@@ -112,6 +118,14 @@ class Store:
     retention: str | None = None
     description: str | None = None
     ignore: bool = False
+    stamps: Stamps = field(default_factory=Stamps)
+    """Threat stamps from ``stores/<slug>.yaml``."""
+
+    @property
+    def fingerprint(self) -> str:
+        """What a threat stamp on the store looked at: type, backend, config."""
+        text = f"{self.type.value}|{self.backend}|{self.config or ''}"
+        return hashlib.sha256(text.encode()).hexdigest()[:8]
 
     @property
     def full_slug(self) -> str:
@@ -214,6 +228,7 @@ def _merge(unit: Unit, slug: str, base: Store | None, declared: StoreFile) -> St
             retention=text(declared.retention),
             description=text(declared.description),
             ignore=declared.ignore,
+            stamps=declared.threats,
         )
     return Store(
         unit=unit.id,
@@ -228,6 +243,7 @@ def _merge(unit: Unit, slug: str, base: Store | None, declared: StoreFile) -> St
         retention=text(declared.retention) or base.retention,
         description=text(declared.description) or base.description,
         ignore=declared.ignore,
+        stamps=declared.threats,
     )
 
 

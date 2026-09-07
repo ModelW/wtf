@@ -440,8 +440,40 @@ uv run model-wtf compliance threats why api:getOrder  # each threat: in/out and 
 
 `check` folds the open cells into one Review line per unit (items
 `unit:id#SID` ride on it for the gate). Undeclared touchpoints do not
-count yet: their flows are unknown until they are reviewed. Stamps
-(`threats:` blocks closing open cells) and the agent swarm come next.
+count yet: their flows are unknown until they are reviewed.
+
+#### Stamps
+
+An open cell is closed by a **stamp** in the element's own YAML
+(touchpoint manifest, `stores/<slug>.yaml`, `parties/<id>.yaml`):
+
+```yaml
+threats:
+  AC01: {status: mitigated, note: "get_object_or_404(user=request.user) api.py:245"}
+  DO02: {status: accepted, note: "list capped at 50 by CursorPagination"}
+  HA01: {status: n/a, note: "photo id is a UUID looked up in the DB; no path built"}
+  DS06: !missing "returns payment_method to anonymous callers (auth=None)"
+  DS06@party:mapbox: {status: mitigated, note: "only the position is sent"}
+```
+
+`mitigated` (the code handles it; cite where), `accepted` (the risk owner
+accepts; say why), `n/a` (the rule could not tell but the threat does not
+apply here). A key is a SID — the element and every flow it is part of —
+or `SID@<other end>` for one flow. `!missing` is a finding: **Missing**
+(`threat-missing`, origin claimed/declared like rights). Stamps written by
+the tool carry the element's fingerprint; when the code moves the stamp is
+**stale** and the cell reopens. Re-declaring a touchpoint keeps its
+stamps; the challenger's `reviews` tool lists them as assertions to
+re-check.
+
+```
+uv run model-wtf compliance threats stamp api:getOrder AC01 --status mitigated --note "orders/api.py:283 scoped to request.user"
+uv run model-wtf compliance threats stamp api:getOrder DS06 --missing "payment_method returned to anonymous callers"
+uv run model-wtf compliance threats stamp api:checkout->api:db-default DS06 --status n/a --note "the app's own database"
+```
+
+Agents get the same through `threat_cells` (what is open on one element)
+and `threat_stamp`. The swarm that fills the matrix comes next.
 
 ### Use it in CI: the gate
 

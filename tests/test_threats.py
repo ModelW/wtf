@@ -260,3 +260,161 @@ def test_llm_and_soap_cells_open_only_where_the_files_use_them(repo: Path) -> No
     api.write_text(text + '\n\ndef _doc():\n    """Group things together."""\n')
     cells = _cells(repo, "api:getCustomer")
     assert cells["LLM01"] == (Verdict.DISMISSED, "no_llm")
+
+
+# ---------------------------------------------------------------------------
+# stamps
+# ---------------------------------------------------------------------------
+
+
+def _stamp(root: Path, *args: str) -> object:
+    return CliRunner().invoke(
+        cli, ["--root", str(root), "compliance", "threats", "stamp", *args]
+    )
+
+
+def test_a_stamp_closes_a_cell_and_missing_becomes_a_finding(repo: Path) -> None:
+    _tp(repo, "getCustomer", f"scope: subject\nnote: reviewed\ndata:\n  - {EMAIL}\n")
+    out = _stamp(
+        repo,
+        "api:getCustomer",
+        "AC01",
+        "--status",
+        "mitigated",
+        "--note",
+        "get_object_or_404(user=request.user) api.py:31",
+    )
+    assert out.exit_code == 0, out.output  # type: ignore[attr-defined]
+    manifest = repo / "api" / "compliance" / "touchpoints" / "getCustomer.yaml"
+    text = manifest.read_text()
+    # The rest of the file is untouched; the block is appended.
+    assert text.startswith("scope: subject\nnote: reviewed\n")
+    assert "threats:\n  AC01: {status: mitigated, note: get_object_or_404" in text
+    assert "fingerprint:" in text
+    cells = _cells(repo, "api:getCustomer")
+    assert cells["AC01"][0] is Verdict.STAMPED
+    assert cells["AC01"][1] == "mitigated"
+
+    out = _stamp(repo, "api:getCustomer", "DS01", "--missing", "returns the DB error")
+    assert out.exit_code == 0, out.output  # type: ignore[attr-defined]
+    cells = _cells(repo, "api:getCustomer")
+    assert cells["DS01"] == (Verdict.MISSING, "returns the DB error")
+    report = run_check(repo, strict=False)
+    finding = next(d for d in report.diagnostics if d.code == "threat-missing")
+    assert finding.subject == "api:getCustomer#DS01"
+    assert finding.origin == "declared"
+    assert finding.note == "returns the DB error"
+    assert finding.section.value == "missing"
+    open_line = next(d for d in report.diagnostics if d.code == "threat-open")
+    assert "api:getCustomer#AC01" not in open_line.items
+    assert "api:getCustomer#DS01" not in open_line.items
+
+    # Nothing to stamp on a dismissed or unknown cell; a status needs a note
+    # for accepted/n-a.
+    assert (
+        _stamp(
+            repo, "api:getCustomer", "INP16", "--status", "n/a", "--note", "x"
+        ).exit_code
+        == 4
+    )  # type: ignore[attr-defined]
+    assert (
+        _stamp(repo, "api:getCustomer", "AC07", "--status", "accepted").exit_code == 4
+    )  # type: ignore[attr-defined]
+    assert (
+        _stamp(repo, "api:nope", "AC07", "--status", "n/a", "--note", "x").exit_code
+        == 4
+    )  # type: ignore[attr-defined]
+
+
+def test_a_stamp_goes_stale_when_the_touchpoint_changes(repo: Path) -> None:
+    _tp(repo, "getCustomer", f"scope: subject\ndata:\n  - {EMAIL}\n")
+    _stamp(repo, "api:getCustomer", "AA03", "--status", "mitigated", "--note", "x")
+    assert _cells(repo, "api:getCustomer")["AA03"][0] is Verdict.STAMPED
+    # A new request field changes the fingerprint.
+    api = repo / "api" / "shop" / "api.py"
+    api.write_text(
+        api.read_text().replace(
+            "def get_customer(request, customer_id: int, verbose: bool = False):",
+            "def get_customer(request, customer_id: int, verbose: bool = False, "
+            "fmt: str = 'json'):",
+        )
+    )
+    cell = _cells(repo, "api:getCustomer")["AA03"]
+    assert cell[0] is Verdict.STALE
+    assert "fingerprint moved" in cell[1]
+    line = next(
+        d for d in run_check(repo, strict=False).diagnostics if d.code == "threat-open"
+    )
+    assert "api:getCustomer#AA03" in line.items
+    assert "stamped on code that moved" in line.message
+
+
+def test_flow_stamps_live_on_the_source_keyed_by_sink(repo: Path) -> None:
+    _tp(repo, "checkout", f"scope: subject\ndata:\n  - {EMAIL}: create\n")
+    out = _stamp(
+        repo,
+        "api:checkout->api:db-default",
+        "DS06",
+        "--status",
+        "n/a",
+        "--note",
+        "the store is the app's own database",
+    )
+    assert out.exit_code == 0, out.output  # type: ignore[attr-defined]
+    text = (repo / "api" / "compliance" / "touchpoints" / "checkout.yaml").read_text()
+    assert "DS06@api:db-default: {status: n/a" in text
+    matrix = build_matrix(_ws(repo))
+    by = {(c.element, c.sid): c for c in matrix.cells}
+    assert by["api:checkout->api:db-default", "DS06"].verdict is Verdict.STAMPED
+    # The actor flow is not covered by a sink-specific stamp...
+    assert by["actor:subject->api:checkout", "DS06"].verdict is Verdict.OPEN
+    # ...but a bare SID covers every flow of the touchpoint.
+    _stamp(repo, "api:checkout", "DR01", "--status", "n/a", "--note", "https only")
+    matrix = build_matrix(_ws(repo))
+    by = {(c.element, c.sid): c for c in matrix.cells}
+    assert by["actor:subject->api:checkout", "DR01"].verdict is Verdict.STAMPED
+    assert by["api:checkout->api:db-default", "DR01"].verdict is Verdict.STAMPED
+
+
+def test_store_and_party_stamps(repo: Path) -> None:
+    out = _stamp(
+        repo, "api:db-default", "AC01", "--status", "n/a", "--note", "one unit"
+    )
+    assert out.exit_code == 0, out.output  # type: ignore[attr-defined]
+    store_file = repo / "api" / "compliance" / "stores" / "db-default.yaml"
+    assert "threats:\n  AC01: {status: n/a" in store_file.read_text()
+    assert _cells(repo, "api:db-default")["AC01"][0] is Verdict.STAMPED
+    # A re-declaration of a touchpoint keeps its stamps.
+    from model_wtf.compliance.mcp_server import DataRef, Tools
+
+    tools = Tools(repo)
+    tools.touchpoint_set_data(
+        "api:getCustomer",
+        [DataRef(ref="shop.Customer.email")],
+        reason="r",
+        scope="subject",
+    )
+    _stamp(repo, "api:getCustomer", "AA03", "--status", "mitigated", "--note", "x")
+    tools.touchpoint_set_data(
+        "api:getCustomer",
+        [DataRef(ref="shop.Customer.email")],
+        reason="again",
+        scope="subject",
+    )
+    text = (
+        repo / "api" / "compliance" / "touchpoints" / "getCustomer.yaml"
+    ).read_text()
+    assert "AA03: {status: mitigated" in text
+    # The agent tools: cells to look at, then a stamp by the agent.
+    listing = tools.threat_cells("api:getCustomer")
+    assert "AC01 [access]" in listing
+    assert "AA03" not in listing
+    assert tools.threat_stamp(
+        "api:getCustomer", "AC01", missing="no owner check"
+    ).startswith("Stamped")
+    report = run_check(repo, strict=False)
+    finding = next(d for d in report.diagnostics if d.code == "threat-missing")
+    assert finding.origin == "claimed"
+    assert finding.note == "no owner check"
+    # The challenger sees stamps as assertions to re-check.
+    assert "threat AA03: mitigated — x" in tools.reviews(["api/shop/api.py"])

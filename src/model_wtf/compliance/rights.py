@@ -928,6 +928,11 @@ def _provided_by_subject(
     return any(o.op in (Op.CREATE, Op.UPDATE) and tp.scope in scopes for tp, o in ops)
 
 
+def is_agent_note(note: str | None) -> bool:
+    """Whether an agent wrote the note (``[agent]`` prefix)."""
+    return (note or "").lstrip().startswith(AGENT_PREFIX)
+
+
 def _is_agent(note: str | None) -> bool:
     return (note or "").lstrip().startswith(AGENT_PREFIX)
 

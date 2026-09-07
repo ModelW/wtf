@@ -22,8 +22,14 @@ from model_wtf.compliance.report import (
     Unit,
 )
 from model_wtf.compliance.review import LOCK_FILE, Lock, ReviewStatus
-from model_wtf.compliance.rights import check_rights
-from model_wtf.compliance.threats import CatalogueError, Element, build_matrix
+from model_wtf.compliance.rights import AGENT_PREFIX, check_rights, is_agent_note
+from model_wtf.compliance.threats import (
+    CatalogueError,
+    Element,
+    Matrix,
+    Verdict,
+    build_matrix,
+)
 from model_wtf.compliance.touchpoints import TOUCHPOINTS_DIR
 from model_wtf.compliance.workspace import Workspace, load_workspace
 
@@ -180,6 +186,31 @@ def _check_threats(
             Diagnostic(Severity.ERROR, "threats-catalogue", str(exc), SHARED_SCOPE_ID)
         )
         return
+    scopes = {u.id: u for u in units}
+    scopes_by_element = {
+        eid: (e.unit if e.unit in scopes else SHARED_SCOPE_ID)
+        for eid, e in matrix.elements.items()
+    }
+    for cell in matrix.missing():
+        element = matrix.elements[cell.element]
+        note = cell.reason
+        origin = "claimed" if is_agent_note(note) else "declared"
+        if origin == "claimed":
+            note = note.removeprefix(AGENT_PREFIX).strip()
+        diagnostics.append(
+            Diagnostic(
+                Severity.WARNING,
+                "threat-missing",
+                f"{cell.element}: {cell.sid} {catalogue_title(matrix, cell.sid)} "
+                f"[{origin}]",
+                scopes_by_element[cell.element],
+                _element_path(element, scopes),
+                subject=f"{cell.element}#{cell.sid}",
+                note=note,
+                origin=origin,
+                hint=f"threats why {cell.element} {cell.sid}",
+            )
+        )
     for unit in units:
         cells = [
             c
@@ -192,6 +223,9 @@ def _check_threats(
         elements = {c.element for c in cells}
         topics = Counter(c.topic or "review" for c in cells)
         summary = ", ".join(f"{n} {t}" for t, n in topics.most_common(4))
+        stale = sum(c.verdict is Verdict.STALE for c in cells)
+        if stale:
+            summary += f"; {stale} stamped on code that moved"
         diagnostics.append(
             Diagnostic(
                 Severity.WARNING,
@@ -205,6 +239,21 @@ def _check_threats(
                 items=tuple(sorted(f"{c.element}#{c.sid}" for c in cells)),
             )
         )
+
+
+def catalogue_title(matrix: Matrix, sid: str) -> str:
+    """The threat's title when the catalogue is around, else the SID."""
+    return matrix.titles.get(sid, sid)
+
+
+def _element_path(element: Element, units: dict[str, Unit]) -> Path | None:
+    """The YAML file a stamp on the element lives in (a flow's: its source's)."""
+    tp = element.touchpoint
+    if tp is not None and tp.unit in units:
+        return units[tp.unit].folder / TOUCHPOINTS_DIR / f"{tp.slug}.yaml"
+    if element.store is not None and element.unit in units:
+        return units[element.unit].folder / "stores" / f"{element.store.slug}.yaml"
+    return None
 
 
 def _declared(element: Element) -> bool:
