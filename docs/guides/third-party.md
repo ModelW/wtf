@@ -55,10 +55,39 @@ does this), `touchpoints set-data` on the CLI.
 - If the code stops calling the host, nothing happens; if it starts calling
   a host no party owns, `flow-undeclared`.
 
+## Not a third party: a service the project runs
+
+Do not invent a party for the project's own realtime server, search index
+or the SMTP relay behind `EMAIL_HOST` — a party is a named organisation. Those
+are **stores**: declare one in `<unit>/compliance/stores/<slug>.yaml`
+
+```yaml
+type: realtime          # or external, search, ...
+backend: hocuspocus
+name: TMW kitchen board
+hosts: [TMW_URL]        # the setting name or hostname the code reaches it by
+```
+
+(or `store_add` from the agent) and put the copy on the touchpoint:
+
+```yaml
+stores:
+  - store: tmw
+    data: [api:orders.Order.reference, api:orders.Order.status]
+    purpose: live kitchen board
+```
+
+The flow `api:task:kitchen.sync_order_to_board->api:tmw` is a store flow
+with the store's threat cells; nothing enters the recipients column. When
+the operator is a deployment fact (the SMTP relay), `type: external` and
+`provider: !todo` for a human.
+
 ## Hosts and the project's own
 
 The introspection reads the hostnames in the view's URL literals and
 well-known SDK client names. Hosts from `ALLOWED_HOSTS`, `CSRF_TRUSTED_ORIGINS`,
 `CORS_ALLOWED_ORIGINS` and any `*_URL` setting are the project's own, as
-are docker service names and loopback. Everything else must belong to a
-party — through its `website` domain or its `hosts` list.
+are docker service names and loopback. A `settings.X_URL` / `X_HOST` the
+view reads is reported as `setting:X_URL`. Everything else must belong to a
+party (its `website` domain or `hosts` list) or to a store (`hosts`, which
+may name the setting).

@@ -28,6 +28,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+import yaml
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -61,6 +62,7 @@ from model_wtf.compliance.rights import (
 from model_wtf.compliance.stamps import Finding, Stamps
 from model_wtf.compliance.touchpoints import (
     Scope,
+    StoreWrite,
     Touchpoint,
     Transfer,
     Undeclared,
@@ -73,8 +75,9 @@ from model_wtf.compliance.yaml_io import Missing, load_yaml, todo_text
 from model_wtf.introspect.runner import IntrospectionFailed
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
+    from model_wtf.compliance.flows import Flow
     from model_wtf.compliance.report import Unit
     from model_wtf.compliance.stores import Store
 
@@ -148,6 +151,18 @@ class ExportDecision(BaseModel):
     )
     data: list[str] = Field(description="Data refs that leave the unit to this party")
     purpose: str | None = Field(default=None, description="One line: why it is sent")
+
+
+class StoreDecision(BaseModel):
+    """Data a touchpoint copies into another store of the project."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    store: str = Field(
+        description="Store slug (`tmw`) or `unit:slug`, see stores_list / store_add"
+    )
+    data: list[str] = Field(description="Data refs written into that store")
+    purpose: str | None = Field(default=None, description="One line: why")
 
 
 class ContentDecision(BaseModel):
@@ -355,8 +370,59 @@ class Tools:
             data = self.data(unit)
             for store in data.stores.visible():
                 backend = store.backend or "-"
-                lines.append(f"{unit.id}:{store.slug} | {store.type.value} | {backend}")
+                hosts = f" | hosts {', '.join(store.hosts)}" if store.hosts else ""
+                lines.append(
+                    f"{unit.id}:{store.slug} | {store.type.value} | {backend}{hosts}"
+                )
         return "\n".join(lines) or "no store found"
+
+    def store_add(
+        self,
+        unit_id: str,
+        slug: str,
+        type_: str,
+        name: str,
+        backend: str | None = None,
+        hosts: list[str] | None = None,
+        description: str | None = None,
+    ) -> str:
+        """``store_add``: declare a store the settings do not show."""
+        from model_wtf.compliance.stores import STORES_DIR, StoreType
+
+        unit = self.unit(unit_id)
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", slug):
+            msg = f"store slug {slug!r} must be kebab-case (e.g. `tmw`)"
+            raise ValueError(msg)
+        try:
+            kind = StoreType(type_)
+        except ValueError:
+            allowed = ", ".join(t.value for t in StoreType)
+            msg = f"type must be one of {allowed}"
+            raise ValueError(msg) from None
+        if not name.strip():
+            msg = "a human name is required"
+            raise ValueError(msg)
+        folder = unit.folder / STORES_DIR
+        path = folder / f"{slug}.yaml"
+        if path.exists():
+            return (
+                f"store {unit_id}:{slug} already exists ({path.relative_to(self.root)})"
+            )
+        doc: dict[str, Any] = {"type": kind.value, "name": name.strip()}
+        if backend:
+            doc["backend"] = backend.strip()
+        if hosts:
+            doc["hosts"] = [h.strip() for h in hosts if h.strip()]
+        if description:
+            doc["description"] = description.strip()
+        folder.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+        self._workspace = None
+        _log_activity("store", id=f"{unit_id}:{slug}", name=name.strip())
+        return (
+            f"created store {unit_id}:{slug} ({path.relative_to(self.root)}); "
+            "declare the copy on the touchpoint with touchpoint_set_data `stores`"
+        )
 
     # -- touchpoints & activities (read-only here; writes come with KFF-201) --
 
@@ -369,10 +435,9 @@ class Tools:
     def touchpoint_pending(self, unit_id: str | None = None) -> str:
         """``touchpoint_pending``: touchpoints without a data declaration."""
         ws = self.workspace()
+        gaps = ws.undeclared_flows()
         pending = [
-            t
-            for t in ws.all_touchpoints.values()
-            if t.pending and not t.ignore and (unit_id is None or t.unit == unit_id)
+            t for t in ws.pending_touchpoints() if unit_id is None or t.unit == unit_id
         ]
         # Most valuable first: the project's own API/form routes (they carry
         # the request shapes), then tasks, then admin screens, then
@@ -380,6 +445,8 @@ class Tools:
         rank = {"ninja": 0, "drf": 0, "form": 1, "procrastinate": 2, "celery": 2}
         pending.sort(
             key=lambda t: (
+                # Declared but incomplete first: the reviewer is stuck there.
+                t.data is None,
                 rank.get(t.facts.framework, 4 if t.facts.kind.value == "admin" else 5)
                 if t.facts.framework != ""
                 else 3,
@@ -390,7 +457,7 @@ class Tools:
         lines = [
             f"{t.full_id} | {t.facts.kind.value} | {t.facts.framework or 'sveltekit'} "
             f"| {len(t.facts.request) + len(t.facts.response) + len(t.facts.data)} "
-            "fields"
+            f"fields{_pending_why(t, gaps.get(t.full_id, ()))}"
             for t in pending
         ]
         if not lines:
@@ -405,6 +472,14 @@ class Tools:
 
     def touchpoint_show(self, ref: str) -> str:
         """``touchpoint_show``: facts, schemas, manifest and activities."""
+        ws = self.workspace()
+        tp = ws.all_touchpoints.get(ref)
+        why = ""
+        if tp is not None:
+            why = _pending_why(tp, ws.undeclared_flows().get(ref, ()))
+        return self._touchpoint_show(ref) + (f"\n\nPENDING BECAUSE{why}" if why else "")
+
+    def _touchpoint_show(self, ref: str) -> str:
         from model_wtf.compliance.touchpoints_cli import render_touchpoint
 
         ws = self.workspace()
@@ -713,11 +788,9 @@ class Tools:
             return "Error: nothing written; fix these:\n  " + "\n  ".join(problems)
         if not note.strip():
             return "Error: the note must cite the code (file:line and what it sends)."
-        parties = set(load_declarations(self.root / SHARED_FOLDER).parties)
-        target = sink.strip()
-        bare = target.removeprefix("party:")
-        if bare in parties:
-            target = f"party:{bare}"
+        from model_wtf.compliance.flows import resolve_sink
+
+        target = resolve_sink(ws, tp.unit, sink)
         at = datetime.now(tz=UTC).replace(microsecond=0).isoformat()
         found = Undeclared(
             sink=target,
@@ -733,8 +806,9 @@ class Tools:
         _log_activity("flow_report", element=element, sink=target, items=len(refs))
         return (
             f"Recorded: {element} sends {len(refs)} item(s) to {target}, undeclared. "
-            "It is a finding until the transfer is declared (touchpoint_set_data "
-            "with `transfers`; party_add first when the organisation is new)."
+            "It is a finding until the flow is declared: touchpoint_set_data with "
+            "`transfers` (another organisation; party_add first when new) or "
+            "`stores` (a store of the project; store_add first when new)."
         )
 
     def challenge(self, ref: str, grounds: str) -> str:
@@ -950,6 +1024,7 @@ class Tools:
         reason: str,
         transfers: list[ExportDecision] | None = None,
         scope: str | None = None,
+        stores: list[StoreDecision] | None = None,
     ) -> str:
         """``touchpoint_set_data``: write a touchpoint's manifest.
 
@@ -1010,6 +1085,34 @@ class Tools:
             exports.append(
                 Transfer(party=export.party, data=resolved, purpose=export.purpose)
             )
+        from model_wtf.compliance.flows import resolve_sink
+
+        known_stores = {
+            f"{uid}:{slug}"
+            for uid, d in ws.data.items()
+            for slug, st in d.stores.stores.items()
+            if not st.ignore
+        }
+        writes: list[StoreWrite] = []
+        for write in stores or []:
+            full_store = (
+                write.store if ":" in write.store else f"{tp.unit}:{write.store}"
+            )
+            if full_store not in known_stores:
+                known = ", ".join(sorted(known_stores)) or "none"
+                problems.append(
+                    f"store {write.store!r} is not declared; call store_add first "
+                    f"(known: {known})"
+                )
+                continue
+            resolved = [
+                full
+                for r in write.data
+                if (full := self._resolve_ref(r, tp.unit, problems)) is not None
+            ]
+            writes.append(
+                StoreWrite(store=full_store, data=resolved, purpose=write.purpose)
+            )
         if problems:
             return "Error: nothing written; fix these:\n  " + "\n  ".join(problems)
         unit = self.unit(tp.unit)
@@ -1019,10 +1122,12 @@ class Tools:
             refs,
             ops=ops,
             transfers=exports,
+            stores=writes,
             note=reason.strip(),
             scope=scope_value,
             # A re-declaration answers the open challenge.
             answered=tp.challenge or tp.answered,
+            resolve_sink=lambda sink: resolve_sink(ws, tp.unit, sink),
         )
         self.workspace(refresh=True)
         _log_activity(
@@ -1035,10 +1140,18 @@ class Tools:
         if exports:
             plural = "y" if len(exports) == 1 else "ies"
             sent = f", transfers to {len(exports)} part{plural}"
+        if writes:
+            sent += f", writes to {len(writes)} store(s)"
         rel = path.relative_to(self.root)
         out = f"{ref}: {len(refs)} data item(s) declared{sent} ({rel})"
         if warnings:
             out += "\nWarnings:\n  " + "\n  ".join(warnings)
+        ws = self.workspace()
+        fresh = ws.all_touchpoints.get(ref)
+        if fresh is not None:
+            why = _pending_why(fresh, ws.undeclared_flows().get(ref, ()))
+            if why:
+                out += "\nSTILL PENDING" + why
         return out
 
     def _resolve_pattern(
@@ -1156,6 +1269,8 @@ class Tools:
                 edges.append("defers " + ", ".join(tp.facts.defers))
             if tp.transfers:
                 edges.append("transfers to " + ", ".join(e.party for e in tp.transfers))
+            if tp.stores:
+                edges.append("writes to " + ", ".join(w.store for w in tp.stores))
             personal = (
                 f"{len(pii)} personal ({', '.join(cats)})" if pii else "0 personal"
             )
@@ -1552,7 +1667,9 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
             "id), `sink` (a party id when it exists, else the host or service as "
             "the code names it), `data` (inventory refs of what is sent), `note` "
             "(file:line and what the code does). It becomes a finding until the "
-            "transfer is declared. Not for declared transfers or the project's "
+            "flow is declared (a transfer, or a store write with `stores`). "
+            "Sink: `party:<id>`, `store:<slug>`, or the bare host. Not for "
+            "declared transfers or the project's "
             "own stores."
         ),
     )
@@ -1628,11 +1745,38 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
         return _guard(lambda: tools.stores(unit))
 
     @server.tool(
+        name="store_add",
+        description=(
+            "Declare a store of the project that the settings do not show: a "
+            "realtime document server, a search index, a spreadsheet export... "
+            "{unit, slug (kebab), type (database|cache|bucket|filesystem|queue|"
+            "search|realtime|external|browser), name, backend?, hosts? (the "
+            "hostnames or settings names the code reaches it by, e.g. TMW_URL), "
+            "description?}. Not for another organisation's service: that is "
+            "party_add."
+        ),
+    )
+    def store_add(
+        unit: str,
+        slug: str,
+        type: str,  # noqa: A002 - the tool's public argument name
+        name: str,
+        backend: str | None = None,
+        hosts: list[str] | None = None,
+        description: str | None = None,
+    ) -> str:
+        return _guard(
+            lambda: tools.store_add(unit, slug, type, name, backend, hosts, description)
+        )
+
+    @server.tool(
         name="touchpoint_pending",
         description=(
             "Touchpoints (routes, tasks, admin screens) that do not declare the "
-            "data they handle yet. One line each: `unit:id | kind | framework | N "
-            "fields`."
+            "data they handle yet, or whose declaration is incomplete. One line "
+            "each: `unit:id | kind | framework | N fields`, followed by WHY when "
+            "a declaration exists (a challenge, or a flow the code has that the "
+            "manifest lacks: answer THAT, do not re-declare the same data)."
         ),
     )
     def touchpoint_pending(unit: str | None = None) -> str:
@@ -1708,7 +1852,10 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
             "model. An empty list means 'checked, touches no item'. `transfers` "
             "lists what leaves to another organisation: [{party, data[], "
             "purpose?}] for every external API/provider the code calls (party "
-            "must exist: parties_list / party_add). `reason` cites file:line. "
+            "must exist: parties_list / party_add). `stores` lists what the code "
+            "copies into another store of the project: [{store, data[], "
+            "purpose?}] (store must exist: stores_list / store_add). `reason` "
+            "cites file:line. "
             "`scope` = who the touchpoint serves: subject (an authenticated end "
             "user on their own data), staff (back-office), public (anonymous), "
             "system (task); give it when touchpoint_show's inference is wrong."
@@ -1720,10 +1867,11 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
         reason: str,
         transfers: list[ExportDecision] | None = None,
         scope: str | None = None,
+        stores: list[StoreDecision] | None = None,
     ) -> str:
         return _guard(
             lambda: tools.touchpoint_set_data(
-                touchpoint, data, reason, transfers, scope
+                touchpoint, data, reason, transfers, scope, stores
             )
         )
 
@@ -1861,6 +2009,29 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
     return server
 
 
+def _pending_why(tp: Touchpoint, gaps: Sequence[Flow]) -> str:
+    """Why a declared touchpoint is still pending, as ``\n    - ...`` lines;
+    empty for one that simply has no manifest. ``gaps`` are its undeclared
+    flows (reported by a reviewer or seen by the introspection)."""
+    if tp.data is None:
+        return ""
+    reasons: list[str] = []
+    if tp.challenge is not None:
+        reasons.append(f"challenged: {tp.challenge.grounds}")
+    for gap in gaps:
+        kind = "store write" if gap.sink.startswith("store:") else "transfer"
+        fix = (
+            "`stores` (store_add if new)"
+            if gap.sink.startswith("store:")
+            else "`transfers` (party_add if new)"
+        )
+        reasons.append(
+            f"undeclared {kind} to {gap.sink} ({len(gap.items)} item(s)): "
+            f"{gap.note} -> declare it with {fix}"
+        )
+    return "".join(f"\n    - {r}" for r in reasons)
+
+
 def _log_activity(kind: str, **fields: object) -> None:
     """Append one JSON line to the activity log, when one is configured."""
     path = os.environ.get(ACTIVITY_LOG_ENV)
@@ -1916,6 +2087,7 @@ def _touchpoint_review(tp: Touchpoint, files_of: set[str]) -> str:
         f"  data: {ops or 'none'}",
     ]
     bits.extend(f"  transfer to {t.party}: {', '.join(t.data)}" for t in tp.transfers)
+    bits.extend(f"  write to {w.store}: {', '.join(w.data)}" for w in tp.stores)
     if tp.note:
         bits.append(f"  note: {tp.note}")
     if tp.answered:

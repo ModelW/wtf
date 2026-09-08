@@ -386,9 +386,7 @@ def pending_touchpoints(
     ``exporting``) count as pending too: a re-review restates the real ops.
     """
     ws = load_workspace(root, units, knowledge, python=python)
-    wanted = {
-        t.full_id for t in ws.all_touchpoints.values() if t.pending and not t.ignore
-    }
+    wanted = {t.full_id for t in ws.pending_touchpoints()}
     if stale:
         wanted.update(
             d.subject

@@ -57,6 +57,8 @@ class StoreType(StrEnum):
     FILESYSTEM = "filesystem"
     QUEUE = "queue"
     SEARCH = "search"
+    REALTIME = "realtime"
+    """A live document / collaboration server (Hocuspocus, Firebase RTDB)."""
     EXTERNAL = "external"
     BROWSER = "browser"
 
@@ -93,6 +95,14 @@ class StoreFile(StrictModel):
     description: NonEmpty | Marker | None = Field(
         default=None, description="What this store holds, in one sentence"
     )
+    hosts: list[NonEmpty] = Field(
+        default_factory=list,
+        description=(
+            "Hostnames the code reaches this store at, or the names of the "
+            "settings holding its URL (`TMW_URL`); a fetch to one of them is "
+            "a write to this store, not a transfer"
+        ),
+    )
     threats: Stamps = Field(
         default_factory=Stamps,
         description="Stamps closing the threat cells the matrix left open",
@@ -118,6 +128,8 @@ class Store:
     retention: str | None = None
     description: str | None = None
     ignore: bool = False
+    hosts: tuple[str, ...] = ()
+    """Hostnames / URL setting names that reach this store (declared)."""
     stamps: Stamps = field(default_factory=Stamps)
     """Threat stamps from ``stores/<slug>.yaml``."""
 
@@ -147,6 +159,7 @@ class Store:
             "retention": self.retention,
             "description": self.description,
             "ignore": self.ignore,
+            "hosts": list(self.hosts),
         }
 
 
@@ -228,6 +241,7 @@ def _merge(unit: Unit, slug: str, base: Store | None, declared: StoreFile) -> St
             retention=text(declared.retention),
             description=text(declared.description),
             ignore=declared.ignore,
+            hosts=tuple(declared.hosts),
             stamps=declared.threats,
         )
     return Store(
@@ -243,6 +257,7 @@ def _merge(unit: Unit, slug: str, base: Store | None, declared: StoreFile) -> St
         retention=text(declared.retention) or base.retention,
         description=text(declared.description) or base.description,
         ignore=declared.ignore,
+        hosts=tuple(declared.hosts),
         stamps=declared.threats,
     )
 

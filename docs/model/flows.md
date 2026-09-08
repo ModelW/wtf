@@ -9,7 +9,7 @@ Data, touchpoints and activities say what exists, who touches it and why.
 | kind       | ends                                  | status                    |
 |------------|---------------------------------------|---------------------------|
 | `request`  | an actor and a touchpoint             | derived (shapes)          |
-| `store`    | a touchpoint and a project store      | declared (ops)            |
+| `store`    | a touchpoint and a project store      | declared (ops, or `stores:` for a copy) |
 | `transfer` | a touchpoint and a party              | declared (`transfers`)    |
 | `call`     | a front route and an API operation    | derived (introspection)   |
 | `defer`    | a touchpoint and a background task    | derived                   |

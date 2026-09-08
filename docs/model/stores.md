@@ -22,8 +22,14 @@ skipped), a field's own `storage=` → `files-<app.Model.field>`,
 Optional `<unit>/compliance/stores/<slug>.yaml` files can override facts of an
 introspected store (`backend`, `name`, `provider`, `location` as a region or
 country, `retention`, `description`), declare a store the settings do not show
-(`type: external`, `browser`, ... — `type` is then mandatory), or hide one
-with `ignore: true`.
+(`type: realtime`, `external`, `browser`, ... — `type` is then mandatory), or
+hide one with `ignore: true`. A declared store may list `hosts`: the
+hostnames or the *settings names* (`TMW_URL`, `EMAIL_HOST`) the code reaches
+it by. A touchpoint whose code reads such a setting is then a store write to
+it (declared with the manifest's `stores:`), not a transfer to an unknown
+host — the way to model a service the project runs itself (a Hocuspocus
+board, a search index) or infrastructure whose operator is only known at
+deployment (the SMTP relay: `type: external`, `provider: !todo`).
 `check` reports `store-unknown` / `store-ignored-referenced` for data rows
 naming a slug that does not exist or is hidden, and `store-orphan` for a
 manual store file without `type`. `data override … --store <slug>` moves a

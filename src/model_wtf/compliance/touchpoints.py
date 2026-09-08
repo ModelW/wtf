@@ -23,6 +23,10 @@ to disk. What humans (or the agent) write is the optional **manifest**
       - party: mapbox           # id in compliance/parties/
         data: [api:geo.Address.position]
         purpose: geocoding      # optional, one line
+    stores:                     # what this code copies into another store
+      - store: tmw              # slug in <unit>/compliance/stores/ (or unit:slug)
+        data: [api:orders.Order.reference]
+        purpose: kitchen board  # optional, one line
     ignore: false               # health checks, static assets
 
 The operations vocabulary lives in :mod:`model_wtf.compliance.ops`. Each
@@ -37,6 +41,13 @@ from: every call to an external API, every email provider, every analytics
 beacon is a transfer of the listed items to that party. The party must exist
 in ``compliance/parties/`` (the agent creates it with ``!todo`` details when
 it meets a new one); its ``country`` drives the third-country logic.
+
+``stores`` is the sibling for the project's own second-tier stores: the
+data items already say where they *live* (``store: db-default``), a
+``stores`` entry says this touchpoint *copies* them somewhere else the
+project operates (a realtime document server, a search index, a spreadsheet
+export). It is a store flow, not a transfer: no recipient, no Chapter V,
+but the store's threat cells apply and the copy shows in the flows.
 
 A touchpoint is **pending** until its manifest has a ``data`` key; the list
 names every inventory item the code reads or writes, personal or not (the
@@ -77,7 +88,7 @@ from model_wtf.introspect.runner import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from model_wtf.compliance.data import Row
     from model_wtf.compliance.report import Unit
@@ -189,6 +200,16 @@ class Transfer(StrictModel):
 Export = Transfer
 """Former name, kept for callers."""
 
+
+class StoreWrite(StrictModel):
+    """One copy into a store of the project: these items are written there."""
+
+    store: str
+    """Store slug (``tmw``) or ``unit:slug`` when it is another unit's."""
+    data: list[str] = Field(default_factory=list)
+    purpose: str | None = None
+
+
 DataEntry = str | dict[str, Any]
 """One ``data`` entry: a bare ref (read) or ``{ref: <ops>}``."""
 
@@ -199,12 +220,14 @@ class Undeclared(StrictModel):
 
     Recorded by ``flow_report``; it is a finding (``flow-undeclared``) and
     makes the touchpoint pending: the declaration is incomplete until the
-    transfer (and its party) are declared, or the code stops sending.
+    transfer (and its party) or the store write are declared, or the code
+    stops sending.
     """
 
     sink: str
-    """Where it goes: ``party:<id>`` when the party exists, else the host or
-    service name as seen in the code (``hooks.zapier.com``)."""
+    """Where it goes: ``party:<id>`` when the party exists, ``store:<slug>``
+    when it is a store of the project, else the host or service name as seen
+    in the code (``hooks.zapier.com``)."""
     data: list[str] = Field(default_factory=list)
     """Inventory refs of what is sent (resolved to full ids)."""
     note: str
@@ -228,6 +251,12 @@ class Manifest(StrictModel):
     transfers: list[Transfer] = Field(default_factory=list)
     exporting: list[Transfer] | None = Field(
         default=None, description="Deprecated spelling of `transfers`"
+    )
+    stores: list[StoreWrite] = Field(
+        default_factory=list,
+        description="Copies of the listed items into another store of the "
+        "project (a realtime server, a search index): a store flow, not a "
+        "transfer",
     )
     scope: Scope | None = Field(
         default=None,
@@ -356,6 +385,8 @@ class Touchpoint:
     """Per full ref, what this touchpoint does to it (globs expanded)."""
     transfers: tuple[Transfer, ...] = ()
     """Outbound flows to other organisations, refs resolved to full ids."""
+    stores: tuple[StoreWrite, ...] = ()
+    """Copies into other stores of the project; store as ``unit:slug``."""
     scope: Scope = Scope.PUBLIC
     """Who it serves (see :class:`Scope`); declared or inferred."""
     scope_declared: bool = False
@@ -484,6 +515,7 @@ class Touchpoint:
             "data": list(self.data) if self.data is not None else None,
             "ops": {ref: [op.to_yaml() for op in ops] for ref, ops in self.ops.items()},
             "transfers": [e.model_dump() for e in self.transfers],
+            "stores": [e.model_dump() for e in self.stores],
             "scope": self.scope.value,
             "ignore": self.ignore,
             "pending": self.pending,
@@ -535,12 +567,14 @@ def collect_touchpoints(
     python: str | None = None,
     known_data: dict[str, set[str]] | None = None,
     known_parties: set[str] | None = None,
+    known_stores: set[str] | None = None,
 ) -> UnitTouchpoints:
     """Introspect ``unit`` and apply its manifests.
 
-    ``known_data`` maps unit id → set of data item ids and ``known_parties``
-    is the set of party ids, both used to validate what manifests
-    reference. Pass ``None`` to skip a validation.
+    ``known_data`` maps unit id → set of data item ids, ``known_parties`` is
+    the set of party ids and ``known_stores`` the set of ``unit:slug`` store
+    ids, all used to validate what manifests reference. Pass ``None`` to
+    skip a validation.
     """
     result = UnitTouchpoints(unit)
     payload = _introspect(unit, result.diagnostics, python=python)
@@ -555,7 +589,15 @@ def collect_touchpoints(
         if manifest is not None:
             used.add(stem)
         result.items.append(
-            _apply(unit, item, manifest, known_data, result.diagnostics, known_parties)
+            _apply(
+                unit,
+                item,
+                manifest,
+                known_data,
+                result.diagnostics,
+                known_parties,
+                known_stores,
+            )
         )
     for stem in sorted(set(manifests) - used):
         result.diagnostics.append(
@@ -709,6 +751,7 @@ def _apply(
     known_data: dict[str, set[str]] | None,
     diagnostics: list[Diagnostic],
     known_parties: set[str] | None = None,
+    known_stores: set[str] | None = None,
 ) -> Touchpoint:
     ignored_by_default = any(p.search(facts.id) for p in IGNORED_BY_DEFAULT)
     if manifest is None:
@@ -774,12 +817,34 @@ def _apply(
             for transfer in transfers
             if transfer.party not in known_parties
         )
+    stores = tuple(
+        StoreWrite(
+            store=write.store if ":" in write.store else f"{unit.id}:{write.store}",
+            data=_resolve_refs(write.data, unit, path, known_data, diagnostics),
+            purpose=write.purpose,
+        )
+        for write in manifest.stores
+    )
+    if known_stores is not None:
+        diagnostics.extend(
+            Diagnostic(
+                Severity.ERROR,
+                "store-unknown",
+                f"{path.name}: writes to store {write.store!r}, which no unit "
+                "declares (compliance/stores/<slug>.yaml)",
+                unit.id,
+                path,
+            )
+            for write in stores
+            if write.store not in known_stores
+        )
     return Touchpoint(
         unit=unit.id,
         facts=facts,
         data=data,
         ops={ref: tuple(o) for ref, o in ops.items()},
         transfers=transfers,
+        stores=stores,
         scope=manifest.scope or infer_scope(facts),
         scope_declared=manifest.scope is not None,
         ignore=manifest.ignore,
@@ -855,18 +920,22 @@ def write_manifest(
     *,
     ops: Mapping[str, Sequence[OpSpec]] | None = None,
     transfers: list[Transfer] | None = None,
+    stores: list[StoreWrite] | None = None,
     note: str | None = None,
     ignore: bool = False,
     scope: Scope | None = None,
     answered: ManifestChallenge | None = None,
     stamps: Stamps | None = None,
     undeclared: Sequence[Undeclared] | None = None,
+    resolve_sink: Callable[[str], str] | None = None,
 ) -> Path:
     """Create or replace the manifest of ``touchpoint``; return its path.
 
     ``undeclared`` (default: the touchpoint's current ones) are carried over
-    minus those the new ``transfers`` now declare — declaring the transfer is
-    how an undeclared flow is closed.
+    minus those the new ``transfers`` / ``stores`` now declare — declaring
+    the flow is how an undeclared one is closed. ``resolve_sink`` maps a
+    reviewer's free-text sink to its canonical ``party:``/``store:`` id so
+    entries written before the party or store existed close too.
 
     ``answered`` records the challenge this declaration closes; ``stamps``
     (default: the touchpoint's current ones) are carried over so a
@@ -887,20 +956,29 @@ def write_manifest(
     lines.append("data:" if data else "data: []")
     for ref in data:
         lines.extend(_entry_lines(ref, list(ops.get(ref, ()))))
-    if transfers:
-        lines.append("transfers:")
-        for transfer in transfers:
-            lines.append(f"  - party: {transfer.party}")
-            lines.append("    data: [" + ", ".join(transfer.data) + "]")
-            if transfer.purpose:
-                lines.append(f"    purpose: {_scalar(transfer.purpose)}")
+    lines.extend(_flow_lines("transfers", "party", transfers or []))
+    lines.extend(_flow_lines("stores", "store", stores or []))
     if note:
         lines.append(f"note: {_scalar(note)}")
     if answered is not None:
         lines.extend(_challenge_lines("answered", answered))
     kept = touchpoint.undeclared if undeclared is None else tuple(undeclared)
     declared_to = {f"party:{t.party}" for t in transfers or ()}
-    lines.extend(_undeclared_lines([u for u in kept if u.sink not in declared_to]))
+    for write in stores or ():
+        declared_to.add(f"store:{write.store}")
+        if ":" not in write.store:
+            declared_to.add(f"store:{unit.id}:{write.store}")
+    resolve = resolve_sink or (lambda sink: sink)
+    lines.extend(
+        _undeclared_lines(
+            [
+                u
+                for u in kept
+                if resolve(u.sink) not in declared_to
+                and not resolve(u.sink).startswith("own:")
+            ]
+        )
+    )
     if stamps is None:
         # From disk, not from the (possibly cached) touchpoint: a stamp
         # written by another process since must survive the rewrite.
@@ -909,6 +987,21 @@ def write_manifest(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def _flow_lines(
+    key: str, target: str, entries: Sequence[Transfer | StoreWrite]
+) -> list[str]:
+    """``transfers:`` / ``stores:`` blocks, one entry per target."""
+    if not entries:
+        return []
+    lines = [f"{key}:"]
+    for entry in entries:
+        lines.append(f"  - {target}: {getattr(entry, target)}")
+        lines.append("    data: [" + ", ".join(entry.data) + "]")
+        if entry.purpose:
+            lines.append(f"    purpose: {_scalar(entry.purpose)}")
+    return lines
 
 
 def _undeclared_lines(found: list[Undeclared]) -> list[str]:
@@ -943,6 +1036,8 @@ def report_undeclared(
         return "not declared: declare the touchpoint first (touchpoint_set_data)"
     if any(t.party == found.sink.removeprefix("party:") for t in touchpoint.transfers):
         return f"{found.sink} is already a declared transfer of this touchpoint"
+    if any(f"store:{w.store}" == found.sink for w in touchpoint.stores):
+        return f"{found.sink} is already a declared store write of this touchpoint"
     if any(u.sink == found.sink for u in touchpoint.undeclared):
         return f"{found.sink} is already reported on this touchpoint"
     path = unit.folder / TOUCHPOINTS_DIR / f"{touchpoint.slug}.yaml"

@@ -16,7 +16,12 @@ from model_wtf.cli import cli
 from model_wtf.compliance.check import run_check
 from model_wtf.compliance.flows import FlowKind, FlowStatus, build_flows, describe
 from model_wtf.compliance.knowledge import load_knowledge
-from model_wtf.compliance.mcp_server import DataRef, ExportDecision, Tools
+from model_wtf.compliance.mcp_server import (
+    DataRef,
+    ExportDecision,
+    StoreDecision,
+    Tools,
+)
 from model_wtf.compliance.report import Unit
 from model_wtf.compliance.threats import Verdict, build_elements, build_matrix
 from model_wtf.compliance.workspace import load_workspace
@@ -253,3 +258,151 @@ def test_a_host_the_code_calls_without_a_declared_transfer_is_a_finding(
     )
     ws = _ws(repo)
     assert build_flows(ws, build_elements(ws)).undeclared() == []
+
+
+def test_a_service_the_project_runs_is_a_store_write_not_a_transfer(
+    repo: Path,
+) -> None:
+    """A URL read from a setting is a flow to whatever the setting names.
+    When that is the project's own realtime server, the answer is a second
+    store plus a `stores` entry on the touchpoint — a store flow with the
+    store's threat cells, no party, no Chapter V — and it closes the gap the
+    same way a transfer closes one to a vendor."""
+    api = repo / "api" / "shop" / "api.py"
+    api.write_text(
+        api.read_text().replace(
+            "    send_receipt.defer(order_id=1)\n",
+            "    send_receipt.defer(order_id=1)\n"
+            "    from django.conf import settings\n"
+            "    import requests\n\n"
+            "    requests.post(settings.BOARD_URL, json={})\n",
+        )
+    )
+    ws = _ws(repo)
+    tp = ws.all_touchpoints["api:checkout"]
+    assert "setting:BOARD_URL" in tp.facts.fetches
+    gaps = {f.sink: f for f in build_flows(ws, build_elements(ws)).undeclared()}
+    assert set(gaps) == {"setting:BOARD_URL"}
+    assert gaps["setting:BOARD_URL"].kind is FlowKind.TRANSFER  # unknown so far
+    # The reviewer is told why the declared touchpoint is still pending.
+    tools = Tools(repo)
+    listing = tools.touchpoint_pending("api")
+    assert "api:checkout" in listing
+    # ... and declares the store, then the copy.
+    out = tools.store_add(
+        "api",
+        "board",
+        "realtime",
+        "Kitchen board",
+        backend="hocuspocus",
+        hosts=["BOARD_URL"],
+    )
+    assert "created store api:board" in out
+    assert "api:board | realtime | hocuspocus | hosts BOARD_URL" in tools.stores("api")
+    ws = _ws(repo)
+    gaps = {f.sink: f for f in build_flows(ws, build_elements(ws)).undeclared()}
+    assert set(gaps) == {"store:api:board"}  # known store now, still undeclared
+    assert gaps["store:api:board"].kind is FlowKind.STORE
+    with pytest.raises(ValueError, match="kebab"):
+        tools.store_add("api", "Bad Slug", "realtime", "x")
+    with pytest.raises(ValueError, match="type must be"):
+        tools.store_add("api", "other", "blockchain", "x")
+    refused = tools.touchpoint_set_data(
+        "api:checkout",
+        [DataRef(ref="shop.Customer.email", ops=[{"op": "create"}])],
+        reason="x",
+        transfers=[ExportDecision(party="mapbox", data=[EMAIL], purpose="geocoding")],
+        stores=[StoreDecision(store="nope", data=[EMAIL])],
+        scope="subject",
+    )
+    assert "store 'nope' is not declared" in refused
+    out = tools.touchpoint_set_data(
+        "api:checkout",
+        [DataRef(ref="shop.Customer.email", ops=[{"op": "create"}])],
+        reason="api.py:30 pushes the order to the board",
+        transfers=[ExportDecision(party="mapbox", data=[EMAIL], purpose="geocoding")],
+        stores=[StoreDecision(store="board", data=[EMAIL], purpose="live board")],
+        scope="subject",
+    )
+    assert "writes to 1 store(s)" in out
+    assert "STILL PENDING" not in out
+    text = (repo / "api" / "compliance" / "touchpoints" / "checkout.yaml").read_text()
+    assert "stores:\n  - store: api:board\n" in text
+    ws = _ws(repo)
+    tp = ws.all_touchpoints["api:checkout"]
+    assert not tp.pending
+    assert tp.stores[0].store == "api:board"
+    flows = build_flows(ws, build_elements(ws))
+    assert flows.undeclared() == []
+    copy = flows.get("api:checkout->api:board")
+    assert copy is not None
+    assert copy.kind is FlowKind.STORE
+    assert copy.status is FlowStatus.DECLARED
+    assert copy.ops == ("create",)
+    assert copy.note == "live board"
+    assert copy.items == (EMAIL,)
+    # The copy has the store's threat cells; the DB flow is untouched.
+    matrix = build_matrix(ws, register=False)
+    assert matrix.by_element("api:checkout->api:board")
+    assert not any(
+        d.code in ("flow-undeclared", "store-unknown")
+        for d in run_check(repo, strict=False).diagnostics
+    )
+    # Reporting the same flow again by hand is refused: it is declared.
+    assert "already a declared store write" in tools.flow_report(
+        "api:checkout", "store:board", [EMAIL], "api.py:30 posts it"
+    )
+
+
+def test_a_store_write_to_an_unknown_store_is_an_error(repo: Path) -> None:
+    folder = repo / "api" / "compliance" / "touchpoints"
+    (folder / "checkout.yaml").write_text(
+        f"scope: subject\ndata:\n  - {EMAIL}: create\n"
+        f"stores: [{{store: ghost, data: [{EMAIL}]}}]\n"
+    )
+    diags = run_check(repo, strict=False).diagnostics
+    bad = next(d for d in diags if d.code == "store-unknown")
+    assert "ghost" in bad.message
+
+
+def test_a_free_text_report_closes_once_its_store_or_party_exists(repo: Path) -> None:
+    """Reviewers report sinks in words before the store or party exists
+    ("TMW (Hocuspocus, settings.TMW_URL)"). Declaring the store with that
+    setting in `hosts` claims the report; the manifest's `stores` entry then
+    closes it and the stale `undeclared:` block is dropped on rewrite. A
+    report naming the project's own API host is not a gap at all."""
+    tools = Tools(repo)
+    out = tools.flow_report(
+        "api:checkout",
+        "TMW (Hocuspocus, settings.TMW_URL)",
+        [EMAIL],
+        "api.py:30 pushes it to the board",
+    )
+    assert "TMW (Hocuspocus, settings.TMW_URL)" in out  # nothing claims it yet
+    tools.flow_report(
+        "api:checkout", "http://api", [EMAIL], "cms.ts:95 calls our own API"
+    )
+    ws = _ws(repo)
+    gaps = {f.sink for f in build_flows(ws, build_elements(ws)).undeclared()}
+    assert gaps == {"TMW (Hocuspocus, settings.TMW_URL)"}  # `api` is ours
+    tools.store_add("api", "tmw", "realtime", "Kitchen board", hosts=["TMW_URL"])
+    ws = _ws(repo)
+    gaps = {f.sink: f for f in build_flows(ws, build_elements(ws)).undeclared()}
+    assert set(gaps) == {"store:api:tmw"}
+    assert gaps["store:api:tmw"].kind is FlowKind.STORE
+    assert "declare it with `stores`" in tools.touchpoint_pending("api")
+    tools.touchpoint_set_data(
+        "api:checkout",
+        [DataRef(ref="shop.Customer.email", ops=[{"op": "create"}])],
+        reason="x",
+        transfers=[ExportDecision(party="mapbox", data=[EMAIL], purpose="geocoding")],
+        stores=[StoreDecision(store="tmw", data=[EMAIL])],
+        scope="subject",
+    )
+    text = (repo / "api" / "compliance" / "touchpoints" / "checkout.yaml").read_text()
+    assert "undeclared:" not in text
+    ws = _ws(repo)
+    assert build_flows(ws, build_elements(ws)).undeclared() == []
+    assert ws.pending_touchpoints() == [] or all(
+        t.full_id != "api:checkout" for t in ws.pending_touchpoints()
+    )

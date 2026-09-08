@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from model_wtf.compliance.data import Row
+    from model_wtf.compliance.flows import Flow
     from model_wtf.compliance.knowledge import Knowledge
     from model_wtf.compliance.report import Diagnostic, Unit
     from model_wtf.compliance.schemas import App, Party
@@ -76,6 +77,27 @@ class Workspace:
         """``unit:slug`` of the store holding ``row``, if known."""
         return f"{row.unit}:{row.store}" if row.store else None
 
+    def undeclared_flows(self) -> dict[str, list[Flow]]:
+        """Touchpoint full id → flows the code has and its manifest lacks
+        (reported by a reviewer, or seen by the introspection)."""
+        from model_wtf.compliance.flows import build_flows
+        from model_wtf.compliance.threats import build_elements
+
+        out: dict[str, list[Flow]] = {}
+        for flow in build_flows(self, build_elements(self)).undeclared():
+            out.setdefault(flow.touchpoint, []).append(flow)
+        return out
+
+    def pending_touchpoints(self) -> list[Touchpoint]:
+        """Touchpoints needing a reviewer: no manifest, a challenge, a
+        reported undeclared flow, or a fetched host nothing declares."""
+        gaps = self.undeclared_flows()
+        return [
+            t
+            for t in self.all_touchpoints.values()
+            if not t.ignore and (t.pending or t.full_id in gaps)
+        ]
+
     def diagnostics(self) -> list[Diagnostic]:
         """Every diagnostic raised while loading, in unit order."""
         out: list[Diagnostic] = []
@@ -117,9 +139,19 @@ def load_workspace(
     ws.parties = declarations.parties
     ws.app = declarations.app
     parties = set(ws.parties)
+    store_ids = {
+        f"{uid}:{slug}"
+        for uid, d in ws.data.items()
+        for slug, store in d.stores.stores.items()
+        if not store.ignore
+    }
     for unit in selected:
         ws.touchpoints[unit.id] = collect_touchpoints(
-            unit, python=python, known_data=known, known_parties=parties
+            unit,
+            python=python,
+            known_data=known,
+            known_parties=parties,
+            known_stores=store_ids,
         )
     link_calls(ws.touchpoints)
     rows = ws.rows

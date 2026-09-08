@@ -423,7 +423,7 @@ def build_elements(ws: Workspace) -> dict[str, Element]:
     return elements
 
 
-def _add_flows(
+def _add_flows(  # noqa: C901 - one block per flow kind, flat
     ws: Workspace, elements: dict[str, Element], rows: dict[str, Row]
 ) -> None:
     for tp in ws.all_touchpoints.values():
@@ -465,6 +465,23 @@ def _add_flows(
                 items=held,
                 source=tp.full_id,
                 sink=store_id,
+            )
+        # declared copies into another store of the project
+        for write in tp.stores:
+            fid = f"{tp.full_id}->{write.store}"
+            if fid in elements or write.store not in elements:
+                continue
+            elements[fid] = Element(
+                fid,
+                ElementKind.FLOW,
+                tp.unit,
+                f"{tp.id} ↔ {write.store}",
+                tp,
+                files=process.files,
+                reads_from=process,
+                items=[rows[r] for r in write.data if r in rows],
+                source=tp.full_id,
+                sink=write.store,
             )
         # transfers
         for transfer in tp.transfers:

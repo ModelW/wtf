@@ -63,7 +63,8 @@ class Party(StrictModel):
         default_factory=list,
         description="Hostnames (or registrable domains) this organisation "
         "operates besides its website, e.g. `api.hubapi.com` for HubSpot: a "
-        "call the code makes to one of them is a transfer to this party",
+        "call the code makes to one of them is a transfer to this party; a "
+        "settings name (`MAILGUN_API_URL`) claims the calls reading that setting",
     )
     registration: NonEmpty | None = Field(
         default=None, description="Company registration number"
