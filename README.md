@@ -6,7 +6,12 @@ compliance of a given Git repo.
 It maintains a compliance-oriented model of the application — its data,
 components and flows — declared in YAML under `compliance/` folders next to
 the code. That model feeds static analysis and code review, and derived
-documents such as the GDPR Art. 30 registry or the pytm threat model.
+documents such as the GDPR Art. 30 registry or the threat model.
+
+**Documentation: <https://modelw.github.io/wtf/>** — the model, task-shaped
+guides (adding it to a project, a PR that failed the gate, answering a
+finding, reading the register) and the generated reference (CLI, file
+schemas, threat catalogue). What follows is the same material in one file.
 
 ## Compliance
 

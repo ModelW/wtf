@@ -34,6 +34,9 @@ test = [
     "procrastinate>=3.9.0",
     "pytest",
 ]
+docs = [
+    "zensical",
+]
 
 [tool.uv]
 default-groups = ["dev", "test"]
@@ -106,6 +109,8 @@ ignore = ["D104", "D105"]
 [tool.ruff.lint.per-file-ignores]
 # Tests: fixtures shadow args, asserts are the point, docstrings are noise.
 "tests/*" = ["ARG001", "S101", "D", "INP001"]
+# Build script for the docs: a flat file, prints its result.
+"scripts/*" = ["D103", "INP001", "T201", "C901", "PLC0415"]
 # Stdlib-only script piped into another interpreter: prints are its stderr
 # protocol, untyped helpers keep it runnable on old Pythons.
 "src/model_wtf/introspect/django_models.py" = ["T201", "ANN", "PTH"]

@@ -1,0 +1,86 @@
+[project]
+site_url = "https://modelw.github.io/wtf/"
+site_name = "model-wtf"
+site_description = "Compliance as code for Model W projects: data inventory, processing register, threat model, and a gate on every pull request."
+repo_url = "https://github.com/ModelW/wtf"
+repo_name = "ModelW/wtf"
+edit_uri = "edit/develop/docs/"
+
+nav = [
+  { "Overview" = "index.md" },
+  { "Model" = [
+    { "The cycle" = "model/cycle.md" },
+    { "Units and files" = "model/units.md" },
+    { "Data items" = "model/data.md" },
+    { "Stores" = "model/stores.md" },
+    { "Touchpoints" = "model/touchpoints.md" },
+    { "Flows" = "model/flows.md" },
+    { "Activities and legal bases" = "model/activities.md" },
+    { "Rights coverage" = "model/rights.md" },
+    { "Threats" = "model/threats.md" },
+    { "The gate and the challenger" = "model/gate.md" },
+  ] },
+  { "Guides" = [
+    { "Add model-wtf to a project" = "guides/add-to-project.md" },
+    { "Before opening a pull request" = "guides/before-pr.md" },
+    { "My PR failed the gate" = "guides/pr-failed.md" },
+    { "The challenger re-opened my review" = "guides/challenged.md" },
+    { "I changed a touchpoint" = "guides/changed-touchpoint.md" },
+    { "Add a third-party service" = "guides/third-party.md" },
+    { "Answer a threat finding" = "guides/threat-finding.md" },
+    { "Run the reviewer swarm" = "guides/swarm.md" },
+    { "Read the register (DPO / CISO)" = "guides/dpo.md" },
+  ] },
+  { "Reference" = [
+    { "CLI" = "reference/cli.md" },
+    { "File schemas" = "reference/schemas.md" },
+    { "Threat catalogue" = "reference/threats.md" },
+    { "Exit codes" = "reference/exit-codes.md" },
+  ] },
+]
+
+[project.theme]
+language = "en"
+features = [
+  "content.code.annotate",
+  "content.code.copy",
+  "content.tabs.link",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "toc.follow",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+[project.markdown_extensions]
+admonition = {}
+attr_list = {}
+def_list = {}
+footnotes = {}
+md_in_html = {}
+tables = {}
+toc.permalink = true
+pymdownx.details = {}
+pymdownx.highlight.anchor_linenums = true
+pymdownx.highlight.pygments_lang_class = true
+pymdownx.inlinehilite = {}
+pymdownx.superfences.custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
+pymdownx.tabbed.alternate_style = true
