@@ -9,6 +9,14 @@ from click.testing import CliRunner
 
 from model_wtf.cli import cli
 
+
+@pytest.fixture(autouse=True)
+def _no_introspection_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fixture repos are rewritten between calls within the same second;
+    the on-disk cache would serve stale payloads."""
+    monkeypatch.setenv("MODEL_WTF_NO_CACHE", "1")
+
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from pathlib import Path

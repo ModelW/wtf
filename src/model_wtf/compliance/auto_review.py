@@ -79,6 +79,8 @@ REVIEWER_STEPS = 80
 TP_REVIEWER_STEPS = 120
 GROUPER_STEPS = 200
 CHALLENGER_STEPS = 150
+THREAT_REVIEWER_STEPS = 80
+TOPIC_REVIEWER_STEPS = 250
 NO_PROGRESS_LIMIT = 2
 ROUND_TIMEOUT = 1800
 
@@ -205,6 +207,59 @@ def sandbox(
                     "model-wtf_data_model": "deny",
                     "model-wtf_data_review_model": "deny",
                     "model-wtf_data_changed": "deny",
+                },
+            ),
+            "threat_dispatcher": Agent(
+                description="Dispatches one threat_reviewer per touchpoint.",
+                mode="primary",
+                prompt=_prompt("threat_dispatcher.md", repo),
+                steps=batch * 2 + 4,
+                permission={
+                    "read": "deny",
+                    "glob": "deny",
+                    "grep": "deny",
+                    "model-wtf_*": "deny",
+                },
+            ),
+            "threat_reviewer": Agent(
+                description="Reviews one touchpoint against its open threats.",
+                mode="subagent",
+                prompt=_prompt("threat_reviewer.md", repo),
+                steps=THREAT_REVIEWER_STEPS,
+                permission={
+                    "task": "deny",
+                    "model-wtf_*": "deny",
+                    "model-wtf_threat_cells": "allow",
+                    "model-wtf_threat_stamp": "allow",
+                    "model-wtf_touchpoint_show": "allow",
+                    "model-wtf_data_search": "allow",
+                    "model-wtf_data_why": "allow",
+                },
+            ),
+            "topic_dispatcher": Agent(
+                description="Dispatches one topic_reviewer per topic batch.",
+                mode="primary",
+                prompt=_prompt("topic_dispatcher.md", repo),
+                steps=batch * 2 + 4,
+                permission={
+                    "read": "deny",
+                    "glob": "deny",
+                    "grep": "deny",
+                    "model-wtf_*": "deny",
+                },
+            ),
+            "topic_reviewer": Agent(
+                description="Reviews one security topic across several touchpoints.",
+                mode="subagent",
+                prompt=_prompt("topic_reviewer.md", repo),
+                steps=TOPIC_REVIEWER_STEPS,
+                permission={
+                    "task": "deny",
+                    "model-wtf_*": "deny",
+                    "model-wtf_threat_topic": "allow",
+                    "model-wtf_threat_stamp": "allow",
+                    "model-wtf_touchpoint_show": "allow",
+                    "model-wtf_data_search": "allow",
                 },
             ),
             "grouper": Agent(
@@ -363,33 +418,61 @@ def orphan_touchpoints(
 
 @dataclass(frozen=True)
 class Target:
-    """What a run reviews: data models or touchpoints."""
+    """What a run reviews: data models, touchpoints, or threat cells.
 
-    kind: Literal["data", "touchpoints"]
+    Threats come in two topologies: ``threats`` dispatches one reviewer per
+    touchpoint with all its open SIDs; ``topics`` dispatches one reviewer
+    per topic (access, auth, input...) over a list of touchpoints. Work
+    items are touchpoint ids in the first case, ``topic:<name>`` in the
+    second (a topic with many touchpoints is split into several items,
+    ``topic:<name>#<k>``).
+    """
+
+    kind: Literal["data", "touchpoints", "threats", "topics"]
     stale: bool = False
     """Touchpoints only: also re-review manifests in a superseded form."""
+    topic_batch: int = 12
+    """Topics only: touchpoints per topic reviewer session."""
+    only_elements: frozenset[str] = frozenset()
+    """Threats/topics: restrict the work to these stamp-carrying elements."""
 
     @property
     def dispatcher(self) -> str:
         """Primary agent for a round."""
-        return "dispatcher" if self.kind == "data" else "tp_dispatcher"
+        return {
+            "data": "dispatcher",
+            "touchpoints": "tp_dispatcher",
+            "threats": "threat_dispatcher",
+            "topics": "topic_dispatcher",
+        }[self.kind]
 
     @property
     def closing_tool(self) -> str:
         """The MCP tool whose success advances the progress bar."""
-        return "data_review_model" if self.kind == "data" else "touchpoint_set_data"
+        if self.kind == "data":
+            return "data_review_model"
+        if self.kind == "touchpoints":
+            return "touchpoint_set_data"
+        return "threat_stamp"
 
     @property
     def noun(self) -> str:
         """For messages."""
-        return "model" if self.kind == "data" else "touchpoint"
+        return {
+            "data": "model",
+            "touchpoints": "touchpoint",
+            "threats": "touchpoint",
+            "topics": "topic batch",
+        }[self.kind]
 
     @property
     def round_message(self) -> str:
         """What the dispatcher is told each round."""
         if self.kind == "data":
             return "Review all pending models."
-        return "Review all pending touchpoints."
+        if self.kind == "touchpoints":
+            return "Review all pending touchpoints."
+        return "Review every listed item."
 
     def shard_message(self, ids: list[str]) -> str:
         """The message for one worker: an explicit list, no discovery call."""
@@ -402,13 +485,61 @@ class Target:
         """Pending ids and readable roots."""
         if self.kind == "data":
             return pending_models(units, knowledge, python=python)
-        return pending_touchpoints(
-            root, units, knowledge, python=python, stale=self.stale
+        if self.kind == "touchpoints":
+            return pending_touchpoints(
+                root, units, knowledge, python=python, stale=self.stale
+            )
+        return pending_threats(
+            root,
+            units,
+            knowledge,
+            python=python,
+            by_topic=self.kind == "topics",
+            topic_batch=self.topic_batch,
+            only=self.only_elements,
         )
 
 
 DATA_TARGET = Target("data")
 TOUCHPOINTS_TARGET = Target("touchpoints")
+THREATS_TARGET = Target("threats")
+TOPICS_TARGET = Target("topics")
+
+
+def pending_threats(
+    root: Path,
+    units: list[Unit],
+    knowledge: Knowledge,
+    *,
+    python: str | None,
+    by_topic: bool,
+    topic_batch: int,
+    only: frozenset[str] = frozenset(),
+) -> tuple[list[str], list[Path]]:
+    """Work items for the threat swarm and the import roots to make readable.
+
+    Per touchpoint: the ids of declared touchpoints (and stores/parties)
+    with open cells. Per topic: ``topic:<name>|<id>,<id>,...`` items, each
+    naming at most ``topic_batch`` touchpoints so a session stays small.
+    """
+    from model_wtf.compliance.threats import (
+        build_matrix,
+        work_by_topic,
+        work_by_touchpoint,
+    )
+
+    ws = load_workspace(root, units, knowledge, python=python)
+    matrix = build_matrix(ws)
+    roots = [Path(p) for d in ws.data.values() for p in d.sys_path]
+    if not by_topic:
+        ids = sorted(work_by_touchpoint(matrix))
+        return [i for i in ids if not only or i in only], roots
+    items: list[str] = []
+    for topic, per_element in work_by_topic(matrix).items():
+        ids = sorted(e for e in per_element if not only or e in only)
+        for k in range(0, len(ids), topic_batch):
+            items.append(f"topic:{topic}|{','.join(ids[k : k + topic_batch])}")
+    return items, roots
 
 
 def shard(remaining: list[str], *, batch: int, workers: int) -> list[list[str]]:
@@ -576,6 +707,11 @@ def narrate(  # noqa: C901 - one branch per tool, flat on purpose
             ),
             closing_tool == "touchpoint_set_data",
         )
+    if name == "threat_stamp":
+        return None  # narrated from the activity log, with the threat title
+    if name in ("threat_cells", "threat_topic"):
+        what = event.args.get("element") or event.args.get("topic") or ""
+        return Text.assemble(("    threats of ", "dim"), (str(what), "dim")), False
     if name == "activity_create":
         slug = str(event.args.get("slug") or "")
         n = len(event.args.get("touchpoints") or [])
@@ -671,6 +807,26 @@ def narrate_write(  # noqa: C901 - one branch per kind
             ("  ★ ", "magenta"),
             f"{entry.get('touchpoints', 0)} touchpoint(s) added to ",
             (ident, "bold"),
+        )
+    if kind == "threat_stamp":
+        status = str(entry.get("status", ""))
+        sid = str(entry.get("sid", ""))
+        title = str(entry.get("title") or sid)
+        note = str(entry.get("note") or "")
+        if len(note) > 110:
+            note = note[:107] + "..."
+        mark, colour = {
+            "missing": ("  ! ", "red"),
+            "mitigated": ("  ✓ ", "green"),
+            "accepted": ("  ~ ", "yellow"),
+            "n/a": ("  - ", "dim"),
+        }.get(status, ("  ? ", "dim"))
+        return Text.assemble(
+            (mark, colour),
+            (ident, "bold"),
+            f" {sid} ({title}) ",
+            (status, colour),
+            (f"  {note}", "dim") if note else "",
         )
     return Text(f"  {kind}: {ident}", style="dim")
 

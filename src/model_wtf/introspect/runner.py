@@ -13,6 +13,7 @@ The settings module comes from the environment, then ``manage.py``, then
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -24,6 +25,8 @@ from importlib import resources
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from model_wtf.introspect import cache
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -268,7 +271,14 @@ def run_django_script(
     settings = detect_settings(context)
     script = resources.files("model_wtf.introspect").joinpath(script_name).read_text()
     env = {**os.environ, "DJANGO_SETTINGS_MODULE": settings, "PYTHONUNBUFFERED": "1"}
-    return _run_json([*runner.argv, "-"], script, context, env, runner.kind)
+    kind = f"{_context_tag(context)}-{script_name.rsplit('.', 1)[0]}"
+    key = cache.tree_key(context, script, " ".join(runner.argv), settings)
+    cached = cache.load(context, key, kind)
+    if cached is not None:
+        return cached
+    payload = _run_json([*runner.argv, "-"], script, context, env, runner.kind)
+    cache.store(context, key, kind, payload)
+    return payload
 
 
 def run_node_script(context: Path, script_name: str) -> dict[str, Any]:
@@ -292,6 +302,12 @@ def run_node_script(context: Path, script_name: str) -> dict[str, Any]:
     if node is None:
         msg = "node is not on PATH"
         raise IntrospectionUnavailable(msg)
+    script = resources.files("model_wtf.introspect").joinpath(script_name).read_text()
+    kind = f"{_context_tag(context)}-{script_name.rsplit('.', 1)[0]}"
+    key = cache.tree_key(context, script, node)
+    cached = cache.load(context, key, kind)
+    if cached is not None:
+        return cached
     sync = context / "node_modules" / ".bin" / "svelte-kit"
     if sync.is_file():
         subprocess.run(  # noqa: S603 - the unit's own binary
@@ -301,10 +317,16 @@ def run_node_script(context: Path, script_name: str) -> dict[str, Any]:
             check=False,
             timeout=TIMEOUT_SECONDS,
         )
-    script = resources.files("model_wtf.introspect").joinpath(script_name).read_text()
-    return _run_json(
+    payload = _run_json(
         [node, "--input-type=module", "-"], script, context, dict(os.environ), "node"
     )
+    cache.store(context, key, kind, payload)
+    return payload
+
+
+def _context_tag(context: Path) -> str:
+    """A short stable name for a unit folder, for cache file names."""
+    return hashlib.sha256(str(context.resolve()).encode()).hexdigest()[:8]
 
 
 def _run_json(

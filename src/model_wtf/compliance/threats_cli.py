@@ -32,6 +32,7 @@ from model_wtf.compliance.threats import (
 from model_wtf.compliance.threats_gen import GenError, generate
 from model_wtf.compliance.workspace import SHARED_FOLDER, load_workspace
 from model_wtf.introspect.runner import IntrospectionFailed
+from model_wtf.opencode import DEFAULT_MODEL
 
 _VERDICT_STYLE = {
     Verdict.NEVER: "dim",
@@ -385,6 +386,116 @@ def stamp_cmd(
         Text.assemble(("stamped", "green"), f"  {element_id} {sid}  → {path}")
     )
     ctx.exit(0)
+
+
+@threats.command("auto-review")
+@click.option("--unit", "only", default=None, help="Restrict to one unit.")
+@click.option(
+    "--by",
+    "topology",
+    type=click.Choice(["topic", "touchpoint"]),
+    default="topic",
+    show_default=True,
+    help="One reviewer per security topic across touchpoints, or one per "
+    "touchpoint across its open threats.",
+)
+@click.option(
+    "--topic-batch",
+    default=12,
+    show_default=True,
+    type=int,
+    help="Touchpoints per topic reviewer session (--by topic).",
+)
+@click.option(
+    "--elements",
+    default=None,
+    help="Comma-separated element ids to restrict the review to (an eval subset).",
+)
+@click.option("--max-rounds", default=10, show_default=True, type=int)
+@click.option(
+    "--batch",
+    default=8,
+    show_default=True,
+    type=int,
+    help="Items per worker per round.",
+)
+@click.option(
+    "--model", default=DEFAULT_MODEL, show_default=True, help="provider/model."
+)
+@click.option(
+    "--max-tokens",
+    default=None,
+    type=int,
+    help="Stop starting new rounds once this many tokens were used.",
+)
+@click.option(
+    "--workers",
+    default=16,
+    show_default=True,
+    type=click.IntRange(1, 32),
+    help="Parallel OpenCode sessions per round.",
+)
+@click.option("--keep-scratch", is_flag=True, hidden=True)
+@click.option("--python", default=None, help="Interpreter to use for introspection.")
+@ROOT_OPTION
+@click.pass_context
+def auto_review_cmd(
+    ctx: click.Context,
+    *,
+    only: str | None,
+    topology: str,
+    topic_batch: int,
+    elements: str | None,
+    max_rounds: int,
+    batch: int,
+    model: str,
+    max_tokens: int | None,
+    workers: int,
+    keep_scratch: bool,
+    python: str | None,
+    root: Path | None,
+) -> None:
+    """Have agents stamp the open threat cells.
+
+    Each reviewer reads the code and calls `threat_stamp` per open SID:
+    mitigated (with file:line), n/a, accepted, or a `missing` finding. Same
+    sandbox and exit codes as the other auto-reviews.
+    """
+    from dataclasses import replace
+
+    from model_wtf.compliance.auto_review import (
+        THREATS_TARGET,
+        TOPICS_TARGET,
+    )
+    from model_wtf.compliance.data_cli import run_auto_review
+
+    resolved, units, knowledge = load_context(root)
+    if only is not None:
+        units = [u for u in units if u.id == only]
+        if not units:
+            msg = f"unknown unit {only!r}"
+            raise click.ClickException(msg)
+    target = TOPICS_TARGET if topology == "topic" else THREATS_TARGET
+    target = replace(target, topic_batch=topic_batch)
+    if elements:
+        target = replace(
+            target, only_elements=frozenset(e.strip() for e in elements.split(","))
+        )
+    run_auto_review(
+        ctx,
+        resolved,
+        units,
+        knowledge,
+        base=None,
+        max_rounds=max_rounds,
+        batch=batch,
+        model=model,
+        python=python,
+        max_tokens=max_tokens,
+        keep_scratch=keep_scratch,
+        target=target,
+        workers=workers,
+    )
 
 
 __all__ = ["threats"]

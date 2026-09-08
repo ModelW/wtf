@@ -21,6 +21,7 @@ takes judgement, the cell stays open.
 
 from __future__ import annotations
 
+import functools
 import re
 from collections import Counter
 from dataclasses import dataclass, field, replace
@@ -34,6 +35,7 @@ from model_wtf.compliance.stamps import Stamp, Stamps, read_stamps, write_stamps
 from model_wtf.compliance.threats_gen import (
     MAPPING_FILE,
     RULES_FILE,
+    TOPICS_FILE,
     builtin_threats_dir,
 )
 from model_wtf.compliance.touchpoints import Kind
@@ -56,6 +58,11 @@ _AUDIT_MODEL = re.compile(r"LogEntry|Revision|Change$|History$|Audit|Log$")
 _ID_FIELD = re.compile(r"(^|_)(id|uuid|pk|slug)$")
 _FILE_TYPE = re.compile(r"file|upload|image|blob", re.IGNORECASE)
 _MAX_FILE_BYTES = 400_000
+
+
+@functools.lru_cache(maxsize=512)
+def _compiled(pattern: str) -> re.Pattern[str]:
+    return re.compile(pattern)
 
 
 # ---------------------------------------------------------------------------
@@ -224,9 +231,15 @@ class Element:
     extra: dict[str, Any] = field(default_factory=dict)
 
     _text: str | None = field(default=None, repr=False)
+    _greps: dict[str, bool] = field(default_factory=dict, repr=False)
+    reads_from: Element | None = field(default=None, repr=False)
+    """Another element whose files (and grep memo) this one shares: a flow
+    reads its touchpoint's."""
 
     def text(self) -> str:
         """The element's source files, concatenated (once, capped)."""
+        if self.reads_from is not None:
+            return self.reads_from.text()
         if self._text is None:
             chunks = []
             for path in self.files:
@@ -236,6 +249,21 @@ class Element:
                     continue
             self._text = "\n".join(chunks)[: _MAX_FILE_BYTES * 4]
         return self._text
+
+    def matches(self, pattern: str) -> bool:
+        """Whether ``pattern`` occurs in the files; memoised per pattern.
+
+        Many threats share the same rules, and many flows share their
+        touchpoint's files: the same regex over the same text would
+        otherwise run thousands of times per matrix.
+        """
+        if self.reads_from is not None:
+            return self.reads_from.matches(pattern)
+        hit = self._greps.get(pattern)
+        if hit is None:
+            hit = _compiled(pattern).search(self.text()) is not None
+            self._greps[pattern] = hit
+        return hit
 
 
 class Verdict(StrEnum):
@@ -368,6 +396,7 @@ def _add_flows(
                 f"{tp.scope.value} ↔ {tp.id}",
                 tp,
                 files=process.files,
+                reads_from=process,
                 items=items,
                 source=actor,
                 sink=tp.full_id,
@@ -387,6 +416,7 @@ def _add_flows(
                 f"{tp.id} ↔ {store_id}",
                 tp,
                 files=process.files,
+                reads_from=process,
                 items=held,
                 source=tp.full_id,
                 sink=store_id,
@@ -401,6 +431,7 @@ def _add_flows(
                 f"{tp.id} → {transfer.party}",
                 tp,
                 files=process.files,
+                reads_from=process,
                 items=[rows[r] for r in transfer.data if r in rows],
                 source=tp.full_id,
                 sink=f"party:{transfer.party}",
@@ -418,6 +449,7 @@ def _add_flows(
                 f"{tp.id} → {callee}",
                 tp,
                 files=process.files,
+                reads_from=process,
                 items=[r for r in elements[callee].items if r in items] or items,
                 source=tp.full_id,
                 sink=callee,
@@ -583,14 +615,14 @@ def _fires(when: RuleWhen, element: Element, ws: Workspace) -> bool:  # noqa: C9
         re.search(p, element.id.lower()) for p in when.id_regex_absent
     ):
         return False
-    if when.grep_absent is not None:
-        text = element.text()
-        if any(re.search(p, text) for p in when.grep_absent):
-            return False
-    if when.grep_present is not None:
-        text = element.text()
-        if not any(re.search(p, text) for p in when.grep_present):
-            return False
+    if when.grep_absent is not None and any(
+        element.matches(p) for p in when.grep_absent
+    ):
+        return False
+    if when.grep_present is not None and not any(
+        element.matches(p) for p in when.grep_present
+    ):
+        return False
     if when.store_type is not None and (
         element.store is None or element.store.type.value not in when.store_type
     ):
@@ -827,3 +859,59 @@ def _holder_path(holder: Element, units: dict[str, Unit], shared: Path) -> Path 
     if holder.party is not None:
         return shared / "parties" / f"{holder.id.removeprefix('party:')}.yaml"
     return None
+
+
+# ---------------------------------------------------------------------------
+# work for the swarm
+# ---------------------------------------------------------------------------
+
+
+class Topic(BaseModel):
+    """One ``_topics.yaml`` entry: what a per-topic reviewer looks for."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
+    checklist: list[str]
+    sids: list[str] = Field(default_factory=list)
+
+
+def load_topics(folder: Path | None = None) -> dict[str, Topic]:
+    """``knowledge/threats/_topics.yaml``."""
+    folder = folder or builtin_threats_dir()
+    raw = load_yaml(folder / TOPICS_FILE) or {}
+    return {name: Topic.model_validate(v) for name, v in raw.items()}
+
+
+def reviewable(matrix: Matrix) -> list[Cell]:
+    """Open cells an agent can work on: declared touchpoints (their flows
+    included), stores and parties. Undeclared touchpoints wait for their
+    data review first."""
+    out = []
+    for cell in matrix.open():
+        holder, _ = _stamp_holder(matrix.elements[cell.element], matrix.elements)
+        tp = holder.touchpoint
+        if tp is not None and tp.data is None:
+            continue
+        out.append(cell)
+    return out
+
+
+def work_by_touchpoint(matrix: Matrix) -> dict[str, list[Cell]]:
+    """Open cells grouped by the element that carries their stamp."""
+    out: dict[str, list[Cell]] = {}
+    for cell in reviewable(matrix):
+        holder, _ = _stamp_holder(matrix.elements[cell.element], matrix.elements)
+        out.setdefault(holder.id, []).append(cell)
+    return dict(sorted(out.items()))
+
+
+def work_by_topic(matrix: Matrix) -> dict[str, dict[str, list[Cell]]]:
+    """Open cells grouped by topic, then by the element carrying the stamp."""
+    out: dict[str, dict[str, list[Cell]]] = {}
+    for cell in reviewable(matrix):
+        holder, _ = _stamp_holder(matrix.elements[cell.element], matrix.elements)
+        out.setdefault(cell.topic or "review", {}).setdefault(holder.id, []).append(
+            cell
+        )
+    return {t: dict(sorted(v.items())) for t, v in sorted(out.items())}

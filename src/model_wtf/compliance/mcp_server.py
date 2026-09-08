@@ -508,10 +508,23 @@ class Tools:
         except StampError as exc:
             raise ValueError(str(exc)) from exc
         _log_activity(
-            "threat_stamp", element=element, sid=sid, status=status or "missing"
+            "threat_stamp",
+            id=element,
+            sid=sid,
+            status=status or "missing",
+            note=(missing or note or "").strip(),
+            title=self._threat_title(sid),
         )
         self._workspace = None
         return f"Stamped {element} {sid} in {self._rel(path)}."
+
+    def _threat_title(self, sid: str) -> str:
+        from model_wtf.compliance.threats import load_catalogue
+
+        try:
+            return load_catalogue().threats[sid].title
+        except Exception:
+            return sid
 
     def threat_cells(self, element: str) -> str:
         """``threat_cells``: the open cells of one element with the threat's
@@ -542,6 +555,61 @@ class Tools:
                 )
             )
         return "\n".join(lines) or "Nothing open on this element."
+
+    def threat_topic(self, topic: str, elements: list[str]) -> str:
+        """``threat_topic``: one topic's checklist and, per element, its open
+        SIDs on that topic with the code location."""
+        from model_wtf.compliance.threats import (
+            build_matrix,
+            load_catalogue,
+            load_topics,
+            work_by_topic,
+        )
+
+        topics = load_topics()
+        if topic not in topics:
+            msg = f"no topic {topic!r}; topics: {', '.join(sorted(topics))}"
+            raise ValueError(msg)
+        spec = topics[topic]
+        catalogue = load_catalogue()
+        ws = self.workspace()
+        matrix = build_matrix(ws, catalogue)
+        per_element = work_by_topic(matrix).get(topic, {})
+        lines = [f"# {spec.title}", "", "Checklist:"]
+        lines.extend(f"- {item}" for item in spec.checklist)
+        lines.append("")
+        wanted = [e for e in elements if e] or sorted(per_element)
+        for eid in wanted:
+            cells = per_element.get(eid)
+            if not cells:
+                lines.append(f"{eid}: nothing open on this topic")
+                continue
+            element = matrix.elements[eid]
+            where = ""
+            if element.touchpoint is not None:
+                where = element.touchpoint.location(self.root) or ""
+                facts = element.touchpoint.facts
+                where += (
+                    f"  ({facts.kind.value}, {', '.join(facts.methods) or '-'}, "
+                    f"scope {element.touchpoint.scope.value}, "
+                    f"auth {', '.join(facts.auth) or 'none'})"
+                )
+            sids: dict[str, list[str]] = {}
+            for c in cells:
+                target = "" if c.element == eid else f"@{_other_end(c.element, eid)}"
+                sids.setdefault(c.sid, []).append(target)
+            listed = ", ".join(
+                f"{sid} ({catalogue.threats[sid].title})"
+                + (
+                    ""
+                    if targets == [""]
+                    else " on " + "/".join(t for t in targets if t)
+                )
+                for sid, targets in sorted(sids.items())
+            )
+            lines.append(f"{eid}  {where}")
+            lines.append(f"  open: {listed}")
+        return "\n".join(lines)
 
     def challenge(self, ref: str, grounds: str) -> str:
         """``challenge``: put a reviewed item or touchpoint back to pending."""
@@ -1309,6 +1377,17 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
         return _guard(lambda: tools.threat_cells(element))
 
     @server.tool(
+        name="threat_topic",
+        description=(
+            "For a per-topic review: the topic's checklist, then for each element "
+            "given (touchpoint ids) its open SIDs on that topic and where its code "
+            "lives. Elements omitted: every element with something open on the topic."
+        ),
+    )
+    def threat_topic(topic: str, elements: list[str] | None = None) -> str:
+        return _guard(lambda: tools.threat_topic(topic, elements or []))
+
+    @server.tool(
         name="threat_stamp",
         description=(
             "Close one open threat cell on an element after reading the code: "
@@ -1616,6 +1695,12 @@ def _rights_notes(row: Row) -> list[tuple[str, str]]:
         elif isinstance(value, Exemption) and value.note:
             out.append((right.value, f"exempt {value.exempt.value}: {value.note}"))
     return out
+
+
+def _other_end(flow_id: str, holder: str) -> str:
+    """The end of a flow ``a->b`` that is not ``holder``."""
+    source, _, sink = flow_id.partition("->")
+    return sink if source == holder else source
 
 
 def _touchpoint_review(tp: Touchpoint, files_of: set[str]) -> str:

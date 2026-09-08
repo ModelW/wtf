@@ -25,12 +25,15 @@ stamping time when written by the tool: a moved fingerprint makes the stamp
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+import fcntl
+import io
+from typing import TYPE_CHECKING, Any, Literal
 
-import yaml
 from pydantic import BaseModel, ConfigDict, Field, RootModel, model_validator
+from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap, TaggedScalar
 
-from model_wtf.compliance.yaml_io import Missing, load_yaml
+from model_wtf.compliance.yaml_io import MISSING_TAG, Missing, load_yaml
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -98,75 +101,97 @@ class Stamps(RootModel[dict[str, Stamp | Missing]]):
         return {k.partition("@")[0] for k in self.root}
 
 
-def stamp_lines(stamps: Stamps) -> list[str]:
-    """YAML lines for a ``threats:`` block, one entry per line."""
-    if not stamps.root:
-        return []
-    lines = ["threats:"]
+def stamps_to_yaml(stamps: Stamps) -> CommentedMap:
+    """The ``threats:`` block as a ruamel node: block style, ``!missing`` tagged."""
+    block = CommentedMap()
     for key, value in sorted(stamps.root.items()):
         if isinstance(value, Missing):
-            lines.append(f"  {key}: !missing {_scalar(value.note or '')}")
+            block[key] = TaggedScalar(value=value.note or "", tag=MISSING_TAG)
             continue
-        parts = [f"status: {value.status}"]
+        entry = CommentedMap()
+        entry["status"] = value.status
         if value.note:
-            parts.append(f"note: {_scalar(value.note)}")
+            entry["note"] = value.note
         if value.commit:
-            parts.append(f"commit: {value.commit}")
+            entry["commit"] = value.commit
         if value.fingerprint:
-            parts.append(f"fingerprint: {_scalar(value.fingerprint)}")
+            entry["fingerprint"] = value.fingerprint
         if value.by:
-            parts.append(f"by: {value.by}")
-        lines.append(f"  {key}: {{{', '.join(parts)}}}")
-    return lines
+            entry["by"] = value.by
+        block[key] = entry
+    return block
 
 
-def _scalar(value: str) -> str:
-    return (
-        yaml.safe_dump(value, default_style=None, width=10**6)
-        .strip()
-        .removesuffix("\n...")
-    )
+def stamp_lines(stamps: Stamps) -> list[str]:
+    """YAML lines for a ``threats:`` block (for writers that build files
+    line by line, like ``write_manifest``)."""
+    if not stamps.root:
+        return []
+    doc = CommentedMap()
+    doc["threats"] = stamps_to_yaml(stamps)
+    return _dump(doc).rstrip("\n").splitlines()
 
 
-__all__ = [
-    "NOTE_REQUIRED",
-    "STAMP_STATUSES",
-    "Stamp",
-    "Stamps",
-    "read_stamps",
-    "stamp_lines",
-    "write_stamps",
-]
+def _yaml() -> YAML:
+    y = YAML()
+    y.preserve_quotes = True
+    y.width = 4096  # never fold a note across lines
+    y.indent(mapping=2, sequence=4, offset=2)  # `  - item` like write_manifest
+    return y
 
 
-def write_stamps(path: Path, stamps: Stamps) -> None:
-    """Replace (or append) the ``threats:`` block of ``path``, textually.
+def _dump(node: Any) -> str:
+    buf = io.StringIO()
+    _yaml().dump(node, buf)
+    return buf.getvalue()
 
-    The block is ours and formatted deterministically, so it is spliced as a
-    whole; the rest of the file (a reviewer's note, the ops) is left byte
-    for byte as it was.
+
+def write_stamps(path: Path, stamps: Stamps, *, merge: bool = True) -> None:
+    """Set (or drop) the ``threats:`` key of ``path`` with a round-trip YAML
+    editor: comments, quoting and ordering of the other keys are kept.
+
+    Under an exclusive lock, and by default **merged** with what is on disk
+    (several reviewer sessions may stamp the same touchpoint at once): the
+    given stamps win, the others stay.
     """
-    text = path.read_text(encoding="utf-8") if path.is_file() else ""
-    lines = text.splitlines()
-    start = next((i for i, ln in enumerate(lines) if ln.rstrip() == "threats:"), None)
-    if start is not None:
-        end = start + 1
-        while end < len(lines) and (
-            lines[end].startswith((" ", "\t")) or not lines[end].strip()
-        ):
-            end += 1
-        # keep a trailing blank line out of the block
-        while end > start + 1 and not lines[end - 1].strip():
-            end -= 1
-        del lines[start:end]
-    else:
-        start = len(lines)
-        while start > 0 and not lines[start - 1].strip():
-            start -= 1
-    block = stamp_lines(stamps)
-    lines[start:start] = block
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines).rstrip("\n") + "\n", encoding="utf-8")
+    guard = path.with_suffix(".lock")
+    with guard.open("a+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            doc: Any = None
+            if path.is_file():
+                doc = _yaml().load(path.read_text(encoding="utf-8"))
+            if doc is None:
+                doc = CommentedMap()
+            if not isinstance(doc, CommentedMap):
+                msg = f"{path}: expected a mapping at the top level"
+                raise ValueError(msg)
+            final = stamps
+            if merge:
+                on_disk = Stamps.model_validate(_plain(doc.get("threats") or {}))
+                final = Stamps({**on_disk.root, **stamps.root})
+            if final.root:
+                doc["threats"] = stamps_to_yaml(final)
+            else:
+                doc.pop("threats", None)
+            path.write_text(_dump(doc), encoding="utf-8")
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+    guard.unlink(missing_ok=True)
+
+
+def _plain(node: Any) -> Any:
+    """A ruamel tree as plain Python, ``!missing`` scalars as :class:`Missing`."""
+    if isinstance(node, TaggedScalar):
+        if str(node.tag) == MISSING_TAG:
+            return Missing(str(node.value))
+        return str(node.value)
+    if isinstance(node, dict):
+        return {str(k): _plain(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_plain(v) for v in node]
+    return node
 
 
 def read_stamps(path: Path) -> Stamps:
@@ -176,3 +201,15 @@ def read_stamps(path: Path) -> Stamps:
     raw = load_yaml(path) or {}
     block = raw.get("threats") if isinstance(raw, dict) else None
     return Stamps.model_validate(block or {})
+
+
+__all__ = [
+    "NOTE_REQUIRED",
+    "STAMP_STATUSES",
+    "Stamp",
+    "Stamps",
+    "read_stamps",
+    "stamp_lines",
+    "stamps_to_yaml",
+    "write_stamps",
+]
