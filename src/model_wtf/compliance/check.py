@@ -84,6 +84,7 @@ def run_check(
     shared = root / SHARED_FOLDER
     diagnostics.extend(load_declarations(shared).diagnostics)
     items = _check_data(shared, units, diagnostics, python=python)
+    _check_codeowners(root, units, diagnostics)
 
     scopes = [_scope(SHARED_SCOPE_ID, ScopeKind.SHARED, shared, None, diagnostics)]
     scopes.extend(
@@ -108,6 +109,33 @@ def run_check(
         scopes=tuple(scopes),
         diagnostics=tuple(diagnostics),
         exit_code=exit_code_for(diagnostics, allow_todo=allow_todo),
+    )
+
+
+def _check_codeowners(
+    root: Path, units: list[Unit], diagnostics: list[Diagnostic]
+) -> None:
+    """A GitHub-only concern, hence info: compliance folders no CODEOWNERS
+    line covers, when the repo has a CODEOWNERS at all (a unit added after
+    ``init`` is the usual case)."""
+    from model_wtf.compliance.codeowners import (
+        CODEOWNERS_PATH,
+        uncovered_paths,
+    )
+
+    missing = uncovered_paths(root, units)
+    if not missing:
+        return
+    diagnostics.append(
+        Diagnostic(
+            Severity.INFO,
+            "codeowners",
+            f"{len(missing)} compliance folder(s) without a CODEOWNERS owner: "
+            + ", ".join(missing),
+            SHARED_SCOPE_ID,
+            root / CODEOWNERS_PATH,
+            hint="model-wtf compliance init  (rewrites the managed block)",
+        )
     )
 
 

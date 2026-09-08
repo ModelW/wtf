@@ -13,6 +13,7 @@ documents such as the GDPR Art. 30 registry or the pytm threat model.
 ```
 uv run model-wtf compliance init  [--name X] [--controller-name X --controller-country CC]
                                   [--processor-name X --processor-country CC | --no-processor]
+                                  [--codeowners | --no-codeowners] [--owner-dpo @org/team] [--owner-ciso @org/team]
 uv run model-wtf compliance check [--strict] [--allow-todo] [--todo] [-v] [--format text|json|github] [--root PATH]
 ```
 
@@ -24,6 +25,18 @@ overwrites anything; re-run it to add what is missing. Values left for a human
 are written as the YAML tag `!todo`. The processor defaults to
 `default_processor: {name, country, address, email}` from
 `~/.config/model-wtf/config.yml`.
+
+When `origin` is on GitHub, `init` also writes a managed block into
+`.github/CODEOWNERS` (between `# model-wtf compliance (managed)` markers,
+hand-written rules untouched, re-runs rewrite it in place): the register
+(`activities/`, `parties/`, `data/`, `data.lock.yaml`) to the DPO team, the
+posture (`stores/`, `findings.lock.yaml`, `snow.yml`) to the CISO team,
+`app.yaml` and `touchpoints/` to both. Teams default to `@<org>/dpo` and
+`@<org>/ciso`; `--owner-dpo`/`--owner-ciso` override and are recorded as
+`owners:` in `app.yaml`, which decides on later runs. `--codeowners` makes
+a missing owner an error; `--no-codeowners` skips. `check` prints an info
+line when a compliance folder (a unit added later) has no owner and a
+`CODEOWNERS` exists.
 
 `check` is the to-do list. It discovers the units, validates every
 declaration file against its schema (pydantic; unknown keys are errors) and
@@ -54,11 +67,14 @@ established non-compliance, which always fails the gate).
 ### Files
 
 - `compliance/app.yaml` — `name`, `description`, `controller` (party id, the
-  client), optional `processor` (party id, the agency) and `large_scale`
+  client), optional `processor` (party id, the agency), `large_scale`
   (Art. 35(3)(b); absent means no: a DPIA is then only required for
-  special-category data; `!todo` asks the question once).
+  special-category data; `!todo` asks the question once) and `owners`
+  (`dpo`/`ciso` GitHub teams for `CODEOWNERS`).
 - `compliance/parties/<id>.yaml` — `name`, `country` (ISO alpha-2),
-  `address`, `email`; optional `phone`, `website`, `registration`, `dpa`
+  `address`, `email`; optional `phone`, `website`, `hosts` (API hostnames the
+  code calls when they differ from the website, e.g. `api.hubapi.com`: a
+  call to one is a transfer to this party), `registration`, `dpa`
   (where the processing agreement lives), `safeguard`/`dpf_certified`,
   `dpo` and `representative` contact blocks. A party is role-less:
   controller, processor or recipient is decided per processing activity. A

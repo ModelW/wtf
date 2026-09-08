@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
 from click.testing import CliRunner
 
 from conftest import SNOW_FRONT_UNDECLARED
@@ -290,3 +291,136 @@ def test_init_writes_the_gate_workflow_unless_told_not_to(make_repo: MakeRepo) -
     workflow.write_text("mine\n")
     run_init(root, **spec)
     assert workflow.read_text() == "mine\n"
+
+
+def _git(root: Path, *args: str) -> None:
+    import subprocess
+
+    subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)  # noqa: S603, S607
+
+
+def test_codeowners_block_follows_the_github_org_and_is_idempotent(
+    make_repo: MakeRepo,
+) -> None:
+    from model_wtf.compliance.check import run_check
+    from model_wtf.compliance.codeowners import (
+        BLOCK_END,
+        BLOCK_START,
+        github_org,
+        resolve_owners,
+    )
+
+    root = make_repo(snow=SNOW_FRONT_UNDECLARED, git=False)
+    _git(root, "init", "-q")
+    _git(root, "remote", "add", "origin", "git@github.com:WithAgency/fah.git")
+    assert github_org(root) == "WithAgency"
+    owners = resolve_owners(root)
+    assert owners is not None
+    assert (owners.dpo, owners.ciso) == ("@WithAgency/dpo", "@WithAgency/ciso")
+
+    # A hand-written rule survives; the block is appended.
+    (root / ".github").mkdir(exist_ok=True)
+    (root / ".github" / "CODEOWNERS").write_text("*.py  @WithAgency/backend\n")
+    run_init(
+        root,
+        app_name="FAH",
+        controller=PartySpec(name="FAH", country="FR"),
+        processor=None,
+    )
+    text = (root / ".github" / "CODEOWNERS").read_text()
+    assert text.startswith("*.py  @WithAgency/backend\n")
+    assert BLOCK_START in text
+    assert BLOCK_END in text
+    assert "/compliance/activities/" in text
+    assert "@WithAgency/dpo\n" in text
+    assert "/api/compliance/stores/" in text
+    assert "/snow.yml" in text
+    assert text.count(BLOCK_START) == 1
+
+    # Re-running changes nothing.
+    again = run_init(
+        root,
+        app_name="FAH",
+        controller=PartySpec(name="FAH", country="FR"),
+        processor=None,
+    )
+    assert (root / ".github" / "CODEOWNERS").read_text() == text
+    assert any(p.name == "CODEOWNERS" for p in again.skipped)
+
+    # Flags win and are recorded in app.yaml; the block is rewritten in place.
+    run_init(
+        root,
+        app_name="FAH",
+        controller=PartySpec(name="FAH", country="FR"),
+        processor=None,
+        owner_dpo="WithAgency/legal",
+    )
+    text = (root / ".github" / "CODEOWNERS").read_text()
+    assert "@WithAgency/legal" in text
+    assert "@WithAgency/dpo" not in text
+    assert text.count(BLOCK_START) == 1
+    assert "owners:\n  dpo: '@WithAgency/legal'" in (
+        root / "compliance" / "app.yaml"
+    ).read_text().replace('"', "'")
+    # app.yaml now decides on the next run without flags.
+    assert resolve_owners(root, declared={"dpo": "@WithAgency/legal"}).dpo == (  # type: ignore[union-attr]
+        "@WithAgency/legal"
+    )
+    # Nothing uncovered: no info line.
+    assert not any(
+        d.code == "codeowners" for d in run_check(root, strict=False).diagnostics
+    )
+
+
+def test_codeowners_skipped_off_github_and_required_when_asked(
+    make_repo: MakeRepo,
+) -> None:
+    from model_wtf.compliance.init_cmd import InitError
+
+    root = make_repo(snow=SNOW_FRONT_UNDECLARED, git=False)
+    _git(root, "init", "-q")
+    _git(root, "remote", "add", "origin", "git@gitlab.com:acme/x.git")
+    result = run_init(
+        root, app_name="X", controller=PartySpec(name="X", country="FR"), processor=None
+    )
+    assert not (root / ".github" / "CODEOWNERS").exists()
+    assert any("not on GitHub" in n for n in result.notes)
+    with pytest.raises(InitError, match="no owner"):
+        run_init(
+            root,
+            app_name="X",
+            controller=PartySpec(name="X", country="FR"),
+            processor=None,
+            codeowners=True,
+        )
+    # Explicit owners work anywhere.
+    run_init(
+        root,
+        app_name="X",
+        controller=PartySpec(name="X", country="FR"),
+        processor=None,
+        codeowners=True,
+        owner_dpo="@acme/dpo",
+        owner_ciso="@acme/sec",
+    )
+    assert "@acme/sec" in (root / ".github" / "CODEOWNERS").read_text()
+
+
+def test_check_reports_a_unit_the_codeowners_file_misses(make_repo: MakeRepo) -> None:
+    from model_wtf.compliance.check import run_check
+
+    root = make_repo(snow=SNOW_FRONT_UNDECLARED, git=False)
+    run_init(
+        root,
+        app_name="X",
+        controller=PartySpec(name="X", country="FR"),
+        processor=None,
+        codeowners=False,
+    )
+    (root / ".github").mkdir(exist_ok=True)
+    (root / ".github" / "CODEOWNERS").write_text("/compliance/  @acme/dpo\n")
+    info = next(
+        d for d in run_check(root, strict=False).diagnostics if d.code == "codeowners"
+    )
+    listed = info.message.split(":", 1)[1].strip().split(", ")
+    assert listed == ["/api/compliance/", "/front/compliance/"]
