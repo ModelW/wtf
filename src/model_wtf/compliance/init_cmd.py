@@ -101,6 +101,7 @@ class InitResult:
 
     created: list[Path] = field(default_factory=list)
     patched: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
     skipped: list[Path] = field(default_factory=list)
 
     @property
@@ -196,6 +197,9 @@ def run_init(
     custom_sensitivity: bool = False,
     custom_categories: bool = False,
     workflow: bool = True,
+    codeowners: bool | None = None,
+    owner_dpo: str | None = None,
+    owner_ciso: str | None = None,
 ) -> InitResult:
     """Scaffold ``root``; see module docstring for the exact file set.
 
@@ -210,6 +214,12 @@ def run_init(
     workflow
         Also write ``.github/workflows/compliance.yml`` running the gate on
         pull requests (never overwrites an existing file).
+    codeowners
+        Write the managed ``CODEOWNERS`` block (see :mod:`codeowners`).
+        ``None``: when the remote is GitHub; ``True``: required (an error
+        when no owner can be resolved); ``False``: skip.
+    owner_dpo, owner_ciso
+        Override the reviewing teams; also recorded in ``app.yaml``.
     """
     result = InitResult()
     shared = root / SHARED_FOLDER
@@ -237,7 +247,87 @@ def run_init(
             folder.mkdir(parents=True)
             (folder / ".gitkeep").write_text("", encoding="utf-8")
             result.created.append(folder)
+    if codeowners is not False:
+        _codeowners(
+            root, result, required=codeowners is True, dpo=owner_dpo, ciso=owner_ciso
+        )
     return result
+
+
+class InitError(Exception):
+    """A requested step cannot be done."""
+
+
+def _codeowners(
+    root: Path,
+    result: InitResult,
+    *,
+    required: bool,
+    dpo: str | None,
+    ciso: str | None,
+) -> None:
+    from model_wtf.compliance.codeowners import (
+        managed_block,
+        resolve_owners,
+        write_codeowners,
+    )
+    from model_wtf.compliance.discovery import (
+        load_units,
+        select_manifest,
+    )
+
+    declared = _declared_owners(root)
+    owners = resolve_owners(root, dpo=dpo, ciso=ciso, declared=declared)
+    if owners is None:
+        if required:
+            msg = (
+                "CODEOWNERS: origin is not a GitHub remote and no owner is declared; "
+                "pass --owner-dpo/--owner-ciso or set `owners:` in app.yaml"
+            )
+            raise InitError(msg)
+        result.notes.append("CODEOWNERS skipped: origin is not on GitHub")
+        return
+    if dpo or ciso:
+        _record_owners(root, owners, result)
+    try:
+        units, _ = load_units(select_manifest(root), root, strict=False)
+    except Exception:
+        units = []
+    path, changed = write_codeowners(root, managed_block(units, owners, root))
+    if changed:
+        result.patched.append(f"{path.relative_to(root)} ({owners.dpo}, {owners.ciso})")
+    else:
+        result.skipped.append(path)
+
+
+def _declared_owners(root: Path) -> dict[str, str]:
+    from model_wtf.compliance.yaml_io import load_yaml
+
+    raw = load_yaml(root / SHARED_FOLDER / APP_FILE) or {}
+    owners = raw.get("owners") if isinstance(raw, dict) else None
+    return (
+        {str(k): str(v) for k, v in owners.items()} if isinstance(owners, dict) else {}
+    )
+
+
+def _record_owners(root: Path, owners: object, result: InitResult) -> None:
+    """Write ``owners:`` into ``app.yaml`` with a round-trip editor."""
+    import io
+
+    from ruamel.yaml import YAML
+
+    path = root / SHARED_FOLDER / APP_FILE
+    if not path.is_file():
+        return
+    y = YAML()
+    y.preserve_quotes = True
+    y.width = 4096
+    doc = y.load(path.read_text(encoding="utf-8")) or {}
+    doc["owners"] = {"dpo": owners.dpo, "ciso": owners.ciso}  # type: ignore[attr-defined]
+    buf = io.StringIO()
+    y.dump(doc, buf)
+    path.write_text(buf.getvalue(), encoding="utf-8")
+    result.patched.append(f"{path.relative_to(root)} (owners)")
 
 
 def _copy_knowledge(name: str, shared: Path, result: InitResult) -> None:

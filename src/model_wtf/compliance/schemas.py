@@ -117,6 +117,12 @@ class App(StrictModel):
         "(Art. 35(3)(b)): true, false, or !todo while unknown. Absent means "
         "false: a DPIA is then only required for special-category data",
     )
+    owners: dict[str, NonEmpty] = Field(
+        default_factory=dict,
+        description="GitHub handles reviewing the compliance files: `dpo` "
+        "(register: activities, parties, data) and `ciso` (posture: stores, "
+        "threats, the gate). Default: @<org>/dpo and @<org>/ciso",
+    )
 
 
 def is_valid_id(value: str) -> bool:

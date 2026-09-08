@@ -25,6 +25,7 @@ from model_wtf.compliance.gate import (
     write_github_outputs,
 )
 from model_wtf.compliance.init_cmd import (
+    InitError,
     PartySpec,
     detect_dockerfiles,
     load_default_processor,
@@ -350,6 +351,17 @@ def challenge_cmd(
     help="Do not write .github/workflows/compliance.yml (the PR gate).",
 )
 @click.option(
+    "--codeowners/--no-codeowners",
+    "codeowners",
+    default=None,
+    help="Write the managed CODEOWNERS block (default: when origin is on GitHub; "
+    "--codeowners makes it an error when no owner can be resolved).",
+)
+@click.option("--owner-dpo", default=None, help="GitHub team reviewing the register.")
+@click.option(
+    "--owner-ciso", default=None, help="GitHub team reviewing the security posture."
+)
+@click.option(
     "--custom-sensitivity",
     is_flag=True,
     help="Copy the built-in sensitivity scale to compliance/sensitivity/ for editing.",
@@ -371,6 +383,9 @@ def init(
     processor_country: str | None,
     no_processor: bool,
     no_workflow: bool,
+    codeowners: bool | None,
+    owner_dpo: str | None,
+    owner_ciso: str | None,
     custom_sensitivity: bool,
     custom_categories: bool,
     root: Path | None,
@@ -407,16 +422,25 @@ def init(
     if not (resolved_root / "snow.yml").is_file():
         proposed = detect_dockerfiles(resolved_root)
 
-    result = run_init(
-        resolved_root,
-        app_name=app_name,
-        controller=controller,
-        processor=processor,
-        manifest_units=proposed,
-        custom_sensitivity=custom_sensitivity,
-        workflow=not no_workflow,
-        custom_categories=custom_categories,
-    )
+    try:
+        result = run_init(
+            resolved_root,
+            app_name=app_name,
+            controller=controller,
+            processor=processor,
+            manifest_units=proposed,
+            custom_sensitivity=custom_sensitivity,
+            workflow=not no_workflow,
+            custom_categories=custom_categories,
+            codeowners=codeowners,
+            owner_dpo=owner_dpo,
+            owner_ciso=owner_ciso,
+        )
+    except InitError as exc:
+        Console(stderr=True).print(Text.assemble(("Error: ", "red"), str(exc)))
+        ctx.exit(2)
+    for note in result.notes:
+        console.print(Text.assemble(("note", "dim"), "     ", note))
     for path in result.created:
         console.print(
             Text.assemble(("created", "green"), "  ", _rel(path, resolved_root))
