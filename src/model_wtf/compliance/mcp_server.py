@@ -791,6 +791,14 @@ class Tools:
         from model_wtf.compliance.flows import resolve_sink
 
         target = resolve_sink(ws, tp.unit, sink)
+        if target.startswith("own:"):
+            host = target.removeprefix("own:")
+            return (
+                f"Not a flow to report: {host} is the project itself (its own "
+                "API / a deployment service name; `http://api` is rewritten to "
+                "the API by the front's middleware). Calls between the "
+                "project's units are the `calls` edges. Nothing written."
+            )
         at = datetime.now(tz=UTC).replace(microsecond=0).isoformat()
         found = Undeclared(
             sink=target,

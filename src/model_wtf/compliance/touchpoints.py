@@ -397,6 +397,10 @@ class Touchpoint:
     answered: ManifestChallenge | None = None
     undeclared: tuple[Undeclared, ...] = ()
     """Flows found in the code and missing from the declaration."""
+    stale_undeclared: frozenset[str] = frozenset()
+    """Sinks of ``undeclared`` entries the workspace resolved to a declared
+    flow or to the project's own host (set by the workspace after linking):
+    they do not keep the touchpoint pending and vanish on the next rewrite."""
     stamps: Stamps = field(default_factory=Stamps)
     """Threat stamps declared in the manifest."""
     calls: tuple[str, ...] = ()
@@ -425,7 +429,11 @@ class Touchpoint:
         a challenge)."""
         if self.ignore:
             return False
-        return self.data is None or self.challenge is not None or bool(self.undeclared)
+        return (
+            self.data is None
+            or self.challenge is not None
+            or any(u.sink not in self.stale_undeclared for u in self.undeclared)
+        )
 
     @property
     def vendor(self) -> bool:

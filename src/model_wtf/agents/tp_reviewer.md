@@ -190,6 +190,8 @@ is not a finding (another touchpoint may serve it): the tool derives that.
   out (an email address it mails to is `read`).
 - Calls to this project's own API from the front unit are NOT transfers
   (they stay inside the product); calls to another company's servers are.
+  In Model W fronts, `http://api/...` is the project's API: the middleware
+  rewrites that host to the real API URL. Never report it as a flow.
   A URL taken from a setting (`settings.TMW_URL`) is a flow to whatever
   that setting names: the project's own service → `stores`; a vendor →
   `transfers`.

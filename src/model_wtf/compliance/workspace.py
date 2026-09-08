@@ -154,6 +154,7 @@ def load_workspace(
             known_stores=store_ids,
         )
     link_calls(ws.touchpoints)
+    _settle_undeclared(ws)
     rows = ws.rows
     ws.activities = load_activities(
         ws.shared,
@@ -164,3 +165,28 @@ def load_workspace(
         parties=parties,
     )
     return ws
+
+
+def _settle_undeclared(ws: Workspace) -> None:
+    """Mark the reported flows that resolve to a declared transfer / store
+    write or to the project's own host: stale, not pending."""
+    from dataclasses import replace
+
+    from model_wtf.compliance.flows import resolve_sink
+
+    for unit_tps in ws.touchpoints.values():
+        for index, tp in enumerate(unit_tps.items):
+            if not tp.undeclared:
+                continue
+            declared = {f"party:{t.party}" for t in tp.transfers}
+            declared |= {f"store:{w.store}" for w in tp.stores}
+            resolved = {
+                u.sink: resolve_sink(ws, tp.unit, u.sink) for u in tp.undeclared
+            }
+            stale = frozenset(
+                sink
+                for sink, target in resolved.items()
+                if target in declared or target.startswith("own:")
+            )
+            if stale:
+                unit_tps.items[index] = replace(tp, stale_undeclared=stale)

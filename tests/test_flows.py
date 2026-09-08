@@ -379,12 +379,14 @@ def test_a_free_text_report_closes_once_its_store_or_party_exists(repo: Path) ->
         "api.py:30 pushes it to the board",
     )
     assert "TMW (Hocuspocus, settings.TMW_URL)" in out  # nothing claims it yet
-    tools.flow_report(
+    own = tools.flow_report(
         "api:checkout", "http://api", [EMAIL], "cms.ts:95 calls our own API"
     )
+    assert own.startswith("Not a flow to report")  # `api` is ours: refused
     ws = _ws(repo)
     gaps = {f.sink for f in build_flows(ws, build_elements(ws)).undeclared()}
-    assert gaps == {"TMW (Hocuspocus, settings.TMW_URL)"}  # `api` is ours
+    assert gaps == {"TMW (Hocuspocus, settings.TMW_URL)"}
+    assert ws.all_touchpoints["api:checkout"].pending  # the TMW report stands
     tools.store_add("api", "tmw", "realtime", "Kitchen board", hosts=["TMW_URL"])
     ws = _ws(repo)
     gaps = {f.sink: f for f in build_flows(ws, build_elements(ws)).undeclared()}
@@ -403,6 +405,17 @@ def test_a_free_text_report_closes_once_its_store_or_party_exists(repo: Path) ->
     assert "undeclared:" not in text
     ws = _ws(repo)
     assert build_flows(ws, build_elements(ws)).undeclared() == []
-    assert ws.pending_touchpoints() == [] or all(
-        t.full_id != "api:checkout" for t in ws.pending_touchpoints()
+    assert not ws.all_touchpoints["api:checkout"].pending
+    assert "api:checkout" not in {t.full_id for t in ws.pending_touchpoints()}
+    # A report written before the party/store existed does not keep the
+    # touchpoint pending once it resolves to something declared.
+    folder = repo / "api" / "compliance" / "touchpoints"
+    (folder / "getCustomer.yaml").write_text(
+        f"data: [{EMAIL}]\ntransfers: [{{party: mapbox, data: [{EMAIL}]}}]\n"
+        "undeclared:\n  - sink: geocoder at api.mapbox.com\n"
+        f"    data: [{EMAIL}]\n    note: x.py:1 posts it\n"
     )
+    ws = _ws(repo)
+    tp = ws.all_touchpoints["api:getCustomer"]
+    assert tp.stale_undeclared == {"geocoder at api.mapbox.com"}
+    assert not tp.pending
