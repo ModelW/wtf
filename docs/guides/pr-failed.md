@@ -88,12 +88,21 @@ uv run model-wtf compliance threats stamp api:setFavoriteAddress AC01 --status m
 api:checkout->api.hubapi.com: api:checkout sends ... to api.hubapi.com, which the manifest does not declare
 ```
 
-Your code calls a host no party owns. If it is meant to: declare the party
-(`compliance/parties/hubspot.yaml`: name, country, website, `hosts`, and a
-Chapter V safeguard when outside the EEA) and add the transfer to the
-touchpoint's `transfers:`. If it is the project's own host, add it to the
-settings the introspection reads (`ALLOWED_HOSTS`, a `*_URL`). If it is
-not meant to, remove the call.
+Your code calls a host (or reads a `*_URL` / `*_HOST` setting) nothing
+declares. Three honest answers:
+
+- another organisation's service: declare the party
+  (`compliance/parties/hubspot.yaml`: name, country, website, `hosts`, and a
+  Chapter V safeguard when outside the EEA) and add the transfer to the
+  touchpoint's `transfers:`;
+- a service the project runs itself, or infrastructure whose operator is a
+  deployment fact (a realtime server, the SMTP relay): declare a store
+  (`<unit>/compliance/stores/tmw.yaml`: `type`, `name`, `hosts: [TMW_URL]`)
+  and add the copy to the touchpoint's `stores:`;
+- the project's own API: add the host to the settings the introspection
+  reads (`ALLOWED_HOSTS`, a `*_URL`).
+
+If it is not meant to call it, remove the call.
 
 ### `missing` — a rights gap, `todo` — a question
 

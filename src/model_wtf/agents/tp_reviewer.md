@@ -49,8 +49,26 @@ Repository: `{repo}`. Paths in tool output are relative to it.
    cache or queue — whoever hosts them (S3-compatible bucket, managed
    Postgres) is the hosting layer, covered elsewhere; that is a `store`,
    already known from the inventory. Do not dig up the hosting provider.
+   A service the PROJECT ITSELF runs (its own realtime/collaboration
+   server, a search index, another of its units reached by URL) is not a
+   party either: it is a second store. `stores_list`; if it is not there,
+   `store_add` it (unit, kebab slug, `type` such as `realtime`/`search`,
+   name, and `hosts`: the setting name or hostname the code reaches it by,
+   e.g. `TMW_URL`). Then list the copy under `stores` with the refs sent.
+   Infrastructure whose operator is only known at deployment (the SMTP
+   relay behind `EMAIL_HOST`, a CDN purge behind `WAGTAILFRONTENDCACHE`, an
+   S3-compatible endpoint) is the same case: `store_add` it with type
+   `external` and the setting name as `hosts`; a human fills the provider.
+   NEVER `party_add` a placeholder ("SMTP mail server", "Email delivery
+   service"): a party is a named organisation you can point at.
 6. Call `touchpoint_set_data` once with every ref and its `ops`, `transfers`
-   when anything leaves, and a `reason` citing file:line.
+   when anything leaves to another organisation, `stores` when the code
+   copies data into another store of the project, and a `reason` citing
+   file:line.
+   - If the tool answers STILL PENDING, read the reason under it: it names
+     the flow the manifest lacks. Declare THAT flow (party_add/store_add
+     then the `transfers`/`stores` entry); re-sending the same data changes
+     nothing.
    - An endpoint that touches no inventory item at all (a health check that
      slipped through, a static page): `data: []` with the reason.
 7. When the code shows a right is NOT served, or proves it does not apply,
@@ -172,5 +190,10 @@ is not a finding (another touchpoint may serve it): the tool derives that.
   out (an email address it mails to is `read`).
 - Calls to this project's own API from the front unit are NOT transfers
   (they stay inside the product); calls to another company's servers are.
+  In Model W fronts, `http://api/...` is the project's API: the middleware
+  rewrites that host to the real API URL. Never report it as a flow.
+  A URL taken from a setting (`settings.TMW_URL`) is a flow to whatever
+  that setting names: the project's own service → `stores`; a vendor →
+  `transfers`.
 - Never guess beyond the code you read. When a call is opaque, declare what
   the shapes prove and say so in the reason.

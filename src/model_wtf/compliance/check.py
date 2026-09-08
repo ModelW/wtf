@@ -387,29 +387,34 @@ def _check_touchpoints(
 ) -> None:
     """Pending manifests and PII-touching touchpoints in no activity."""
     folder = unit.folder / TOUCHPOINTS_DIR
-    from model_wtf.compliance.flows import build_flows
-    from model_wtf.compliance.threats import build_elements
-
     by_id = {t.full_id: t for t in touchpoints}
     gaps = [
         f
-        for f in build_flows(ws, build_elements(ws)).undeclared()
+        for flows in ws.undeclared_flows().values()
+        for f in flows
         if f.touchpoint in by_id
     ]
     for gap in gaps:
         t = by_id[gap.touchpoint]
         what = ", ".join(r.split(":", 1)[-1] for r in gap.items) or "data"
+        to_store = gap.sink.startswith("store:")
+        fix = (
+            "declare the store write (and the store)"
+            if to_store
+            else "declare the transfer (and the party)"
+        )
         diagnostics.append(
             Diagnostic(
                 Severity.WARNING,
                 "flow-undeclared",
                 f"{t.full_id} sends {what} to {gap.sink}, which the manifest "
-                f"does not declare ({gap.note}); declare the transfer (and the "
-                "party) or stop sending",
+                f"does not declare ({gap.note}); {fix} or stop sending",
                 unit.id,
                 folder / f"{t.slug}.yaml",
                 subject=gap.id,
-                hint="touchpoint_set_data with `transfers`, party_add if new",
+                hint="touchpoint_set_data with `stores`, store_add if new"
+                if to_store
+                else "touchpoint_set_data with `transfers`, party_add if new",
                 origin="declared",
             )
         )

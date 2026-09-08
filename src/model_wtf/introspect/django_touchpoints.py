@@ -349,7 +349,8 @@ SDK_CLIENTS = re.compile(
 
 def _fetches(func):
     """Outbound calls visible in the body of ``func`` itself: hostnames of
-    URL literals and the names of well-known third-party SDK clients.
+    URL literals, the names of well-known third-party SDK clients and the
+    ``settings.*_URL`` / ``*_HOST`` values it reads (``setting:TMW_URL``).
 
     Facts, not hints: a host that matches no declared party is an
     undeclared flow by itself, no reading needed. Only the function's own
@@ -373,6 +374,16 @@ def _fetches(func):
             root = root.value
         if isinstance(root, ast.Name) and SDK_CLIENTS.match(root.id):
             found.add(root.id.lower())
+    for node in ast.walk(tree):
+        # `settings.TMW_URL`: the code reaches whatever that setting names;
+        # reported as `setting:TMW_URL` so a store or party can claim it.
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "settings"
+            and node.attr.endswith(("_URL", "_HOST", "_ENDPOINT", "_ORIGIN"))
+        ):
+            found.add(f"setting:{node.attr}")
     return sorted(found)
 
 

@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from model_wtf.compliance.data import Row
+    from model_wtf.compliance.flows import Flow
     from model_wtf.compliance.knowledge import Knowledge
     from model_wtf.compliance.report import Diagnostic, Unit
     from model_wtf.compliance.schemas import App, Party
@@ -76,6 +77,27 @@ class Workspace:
         """``unit:slug`` of the store holding ``row``, if known."""
         return f"{row.unit}:{row.store}" if row.store else None
 
+    def undeclared_flows(self) -> dict[str, list[Flow]]:
+        """Touchpoint full id → flows the code has and its manifest lacks
+        (reported by a reviewer, or seen by the introspection)."""
+        from model_wtf.compliance.flows import build_flows
+        from model_wtf.compliance.threats import build_elements
+
+        out: dict[str, list[Flow]] = {}
+        for flow in build_flows(self, build_elements(self)).undeclared():
+            out.setdefault(flow.touchpoint, []).append(flow)
+        return out
+
+    def pending_touchpoints(self) -> list[Touchpoint]:
+        """Touchpoints needing a reviewer: no manifest, a challenge, a
+        reported undeclared flow, or a fetched host nothing declares."""
+        gaps = self.undeclared_flows()
+        return [
+            t
+            for t in self.all_touchpoints.values()
+            if not t.ignore and (t.pending or t.full_id in gaps)
+        ]
+
     def diagnostics(self) -> list[Diagnostic]:
         """Every diagnostic raised while loading, in unit order."""
         out: list[Diagnostic] = []
@@ -117,11 +139,22 @@ def load_workspace(
     ws.parties = declarations.parties
     ws.app = declarations.app
     parties = set(ws.parties)
+    store_ids = {
+        f"{uid}:{slug}"
+        for uid, d in ws.data.items()
+        for slug, store in d.stores.stores.items()
+        if not store.ignore
+    }
     for unit in selected:
         ws.touchpoints[unit.id] = collect_touchpoints(
-            unit, python=python, known_data=known, known_parties=parties
+            unit,
+            python=python,
+            known_data=known,
+            known_parties=parties,
+            known_stores=store_ids,
         )
     link_calls(ws.touchpoints)
+    _settle_undeclared(ws)
     rows = ws.rows
     ws.activities = load_activities(
         ws.shared,
@@ -132,3 +165,28 @@ def load_workspace(
         parties=parties,
     )
     return ws
+
+
+def _settle_undeclared(ws: Workspace) -> None:
+    """Mark the reported flows that resolve to a declared transfer / store
+    write or to the project's own host: stale, not pending."""
+    from dataclasses import replace
+
+    from model_wtf.compliance.flows import resolve_sink
+
+    for unit_tps in ws.touchpoints.values():
+        for index, tp in enumerate(unit_tps.items):
+            if not tp.undeclared:
+                continue
+            declared = {f"party:{t.party}" for t in tp.transfers}
+            declared |= {f"store:{w.store}" for w in tp.stores}
+            resolved = {
+                u.sink: resolve_sink(ws, tp.unit, u.sink) for u in tp.undeclared
+            }
+            stale = frozenset(
+                sink
+                for sink, target in resolved.items()
+                if target in declared or target.startswith("own:")
+            )
+            if stale:
+                unit_tps.items[index] = replace(tp, stale_undeclared=stale)

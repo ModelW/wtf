@@ -45,9 +45,16 @@ declared in the manifest). `write`, `rectify`, `access`, `erase`, `object`,
 lists what leaves to another organisation's API — `- {party: mapbox, data:
 [...], purpose: ...}`, the party being a `compliance/parties/` id, which is
 where the register's recipients come from (`exporting:` still loads, with a
-deprecation warning); plus `ignore`, `note`. The project's own database,
-file storage, cache and queue are *stores*, not transfers, whoever hosts
-them: hosting is a separate layer, taken as adequate here. Every inventory item the code
+deprecation warning). `stores:` is the sibling for the project's *own*
+second-tier stores — `- {store: tmw, data: [...], purpose: ...}` says this
+touchpoint **copies** the items into another store the project operates (a
+realtime document server, a search index, the SMTP relay behind
+`EMAIL_HOST`), the slug being a `<unit>/compliance/stores/` file (or
+`unit:slug` for another unit's). A store write is a store flow: no
+recipient, no Chapter V, but the store's threat cells apply. Plus `ignore`,
+`note`. The project's own database, file storage, cache and queue are
+*stores*, not transfers, whoever hosts them: hosting is a separate layer,
+taken as adequate here. Every inventory item the code
 touches is listed, personal or not: the register filters on `pii`
 downstream, the data-flow model needs all of it. A touchpoint is
 **pending** until it has a `data` key — an explicit `[]` means "touches no

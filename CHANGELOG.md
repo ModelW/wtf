@@ -15,7 +15,8 @@ change undermines.
 - Data inventory from Django models with rules, reviews, JSON contents and
   overrides (KFF-194–199).
 - Touchpoints from Django URL confs, task registries and SvelteKit trees;
-  declarations with ops, scope and transfers; activities and legal bases;
+  declarations with ops, scope, transfers and store writes (`stores:` for
+  the project's own second-tier stores, declared with `hosts`); activities and legal bases;
   rights coverage derived from ops × scope (KFF-200–208).
 - The gate: `ghate` compares base and head by finding identity; the
   challenger re-opens data items, touchpoint declarations and threat stamps
