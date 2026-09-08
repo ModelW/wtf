@@ -38,6 +38,7 @@ nav = [
     { "Threat catalogue" = "reference/threats.md" },
     { "Exit codes" = "reference/exit-codes.md" },
   ] },
+  { "Contributing" = "contributing.md" },
 ]
 
 [project.theme]
