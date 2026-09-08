@@ -189,6 +189,7 @@ def build_flows(ws: Workspace, elements: dict[str, Element]) -> Flows:
                 safeguarded=safeguarded,
             )
         )
+    flows.items.extend(_fetched_undeclared(ws, flows, rows))
     for tp in ws.all_touchpoints.values():
         for found in tp.undeclared:
             fid = f"{tp.full_id}->{found.sink}"
@@ -209,6 +210,86 @@ def build_flows(ws: Workspace, elements: dict[str, Element]) -> Flows:
                 )
             )
     return flows
+
+
+def _fetched_undeclared(
+    ws: Workspace, flows: Flows, rows: dict[str, Row]
+) -> list[Flow]:
+    """Transfers the introspection sees in the code (URL literals, SDK
+    clients) that no manifest declares: undeclared by construction."""
+    out: list[Flow] = []
+    party_hosts = _party_hosts(ws)
+    for unit_tps in ws.touchpoints.values():
+        own = set(unit_tps.own_hosts) | _LOCAL_HOSTS
+        for tp in unit_tps.items:
+            if tp.ignore or tp.data is None or tp.vendor:
+                continue
+            declared = {f"party:{t.party}" for t in tp.transfers}
+            reported = {u.sink for u in tp.undeclared}
+            for host in tp.facts.fetches:
+                sink = _sink_of(host, party_hosts)
+                if sink in declared or sink in reported:
+                    continue
+                if host in own or any(host.endswith("." + o) for o in own):
+                    continue
+                fid = f"{tp.full_id}->{sink}"
+                if flows.get(fid) is not None:
+                    continue
+                out.append(
+                    Flow(
+                        id=fid,
+                        source=tp.full_id,
+                        sink=sink,
+                        kind=FlowKind.TRANSFER,
+                        status=FlowStatus.UNDECLARED,
+                        touchpoint=tp.full_id,
+                        items=tuple(tp.data),
+                        sensitivity=_top_sensitivity(
+                            ws, [rows[r] for r in tp.data if r in rows]
+                        ),
+                        note=f"the code calls {host} (seen by introspection); "
+                        "no transfer declared to it",
+                        safeguarded=False,
+                    )
+                )
+    return out
+
+
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "api", "front", "web", "db"})
+"""Hostnames that only exist inside the deployment (docker-compose service
+names, loopback): never a transfer."""
+
+
+def _party_hosts(ws: Workspace) -> dict[str, str]:
+    """Registrable domain of each party's website → ``party:<id>``."""
+    out: dict[str, str] = {}
+    for party_id, party in ws.parties.items():
+        website = getattr(party, "website", None)
+        if isinstance(website, str) and website:
+            out[_domain(website)] = f"party:{party_id}"
+        for host in getattr(party, "hosts", None) or []:
+            out[_domain(host)] = f"party:{party_id}"
+            out[host.lower()] = f"party:{party_id}"
+    return out
+
+
+def _domain(url_or_host: str) -> str:
+    host = url_or_host.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+    parts = host.split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+
+def _sink_of(host: str, party_hosts: dict[str, str]) -> str:
+    """``party:<id>`` when the host belongs to a declared party's domain,
+    the bare host for an unknown organisation, ``sdk:<name>`` for an SDK
+    client no party claims."""
+    if "." not in host:
+        # An SDK client name (`stripe`, `hubspot`): a party of that id?
+        return next(
+            (pid for dom, pid in party_hosts.items() if dom.startswith(host)),
+            f"sdk:{host}",
+        )
+    return party_hosts.get(host.lower()) or party_hosts.get(_domain(host), host)
 
 
 def _classify(

@@ -68,6 +68,7 @@ class PartySpec:
     email: str | None = None
     phone: str | None = None
     website: str | None = None
+    hosts: list[str] = field(default_factory=list)
     registration: str | None = None
     safeguard: str | None = None
     dpf_certified: bool | None = None
@@ -87,6 +88,8 @@ class PartySpec:
             value = getattr(self, key)
             if value:
                 lines.append(f"{key}: {_scalar(value)}")
+        if self.hosts:
+            lines.append("hosts: [" + ", ".join(_scalar(h) for h in self.hosts) + "]")
         if self.dpf_certified is not None:
             lines.append(f"dpf_certified: {'true' if self.dpf_certified else 'false'}")
         return "\n".join(lines) + "\n"

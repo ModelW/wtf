@@ -339,6 +339,9 @@ class Payload(BaseModel):
 
     schema_version: int = Field(alias="schema")
     touchpoints: list[Introspected] = Field(default_factory=list)
+    own_hosts: list[str] = Field(default_factory=list)
+    """Hostnames that are the project itself (ALLOWED_HOSTS, *_URL settings):
+    a fetch to one of them is not a transfer."""
 
 
 @dataclass(frozen=True)
@@ -498,6 +501,8 @@ class UnitTouchpoints:
     items: list[Touchpoint] = field(default_factory=list)
     diagnostics: list[Diagnostic] = field(default_factory=list)
     introspected: bool = False
+    own_hosts: tuple[str, ...] = ()
+    """The project's own hostnames, from the introspection."""
 
     def get(self, touchpoint_id: str) -> Touchpoint | None:
         """Lookup by local id."""
@@ -538,8 +543,10 @@ def collect_touchpoints(
     reference. Pass ``None`` to skip a validation.
     """
     result = UnitTouchpoints(unit)
-    facts = _introspect(unit, result.diagnostics, python=python)
+    payload = _introspect(unit, result.diagnostics, python=python)
+    facts = payload.touchpoints if payload is not None else None
     result.introspected = facts is not None
+    result.own_hosts = tuple(payload.own_hosts) if payload is not None else ()
     manifests = _load_manifests(unit, result.diagnostics)
     used: set[str] = set()
     for item in facts or []:
@@ -594,7 +601,7 @@ def _camel(snake: str) -> str:
 
 def _introspect(
     unit: Unit, diagnostics: list[Diagnostic], *, python: str | None
-) -> list[Introspected] | None:
+) -> Payload | None:
     code_root = unit.code_root or unit.folder.parent
     discover = unit.discover
     if discover == "none" and is_django_unit(code_root):
@@ -623,7 +630,7 @@ def _introspect(
     if payload.schema_version != SCHEMA:
         msg = f"unsupported touchpoint schema {payload.schema_version}"
         raise IntrospectionFailed(msg)
-    return payload.touchpoints
+    return payload
 
 
 def _resolve_refs(

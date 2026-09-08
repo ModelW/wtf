@@ -1090,6 +1090,7 @@ class Tools:
         country: str | None = None,
         safeguard: str | None = None,
         dpf_certified: bool | None = None,
+        hosts: list[str] | None = None,
     ) -> str:
         """``party_add``: a new external party with ``!todo`` contact details."""
         from model_wtf.compliance.init_cmd import PartySpec
@@ -1120,6 +1121,7 @@ class Tools:
             name=name.strip(),
             country=country,
             website=website,
+            hosts=[h.strip().lower() for h in hosts or [] if h.strip()],
             safeguard=safeguard,
             dpf_certified=dpf_certified,
         )
@@ -1760,7 +1762,9 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
         description=(
             "Declare an external organisation data is sent to (a SaaS, an API "
             "provider): {id (kebab), name, website?, country? (ISO-2, only if "
-            "sure)}. Contact details are left !todo for a human."
+            "sure), hosts? (API hostnames the code calls, e.g. api.hubapi.com, "
+            "when they differ from the website's domain)}. Contact details are "
+            "left !todo for a human."
         ),
     )
     def party_add(
@@ -1770,10 +1774,11 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
         country: str | None = None,
         safeguard: str | None = None,
         dpf_certified: bool | None = None,
+        hosts: list[str] | None = None,
     ) -> str:
         return _guard(
             lambda: tools.party_add(
-                id, name, website, country, safeguard, dpf_certified
+                id, name, website, country, safeguard, dpf_certified, hosts
             )
         )
 

@@ -59,6 +59,12 @@ class Party(StrictModel):
     )
     phone: NonEmpty | None = None
     website: NonEmpty | None = None
+    hosts: list[NonEmpty] = Field(
+        default_factory=list,
+        description="Hostnames (or registrable domains) this organisation "
+        "operates besides its website, e.g. `api.hubapi.com` for HubSpot: a "
+        "call the code makes to one of them is a transfer to this party",
+    )
     registration: NonEmpty | None = Field(
         default=None, description="Company registration number"
     )

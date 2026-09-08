@@ -35,7 +35,9 @@ Repository: `{repo}`. Paths in tool output are relative to it.
    (geocoding, maps, payments, email/SMS provider, analytics, error
    tracking, an LLM), `requests.`/`httpx.`/`fetch(` to a third-party host,
    an SDK client. For each one: `parties_list`; if the organisation is not
-   there, `party_add` it (kebab id like `mapbox`, its name, website, and
+   there, `party_add` it (kebab id like `mapbox`, its name, website, its
+   API `hosts` when they differ from the website's domain — HubSpot's
+   `api.hubapi.com`, Stripe's `api.stripe.com` — and
    its `country` — public knowledge for a SaaS: Mapbox US, Stripe US/IE,
    Scaleway FR, OVH FR, Brevo FR, Mailgun US; give it, the transfer check
    needs it). Then list it under `transfers` with the refs that
