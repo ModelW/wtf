@@ -39,7 +39,7 @@ def repo(make_repo: MakeRepo, monkeypatch: pytest.MonkeyPatch) -> Path:
     (root / "compliance" / "activities").mkdir()
     (root / "compliance" / "parties" / "mapbox.yaml").write_text(
         "name: Mapbox\ncountry: US\naddress: a\nemail: e@x\n"
-        "safeguard: dpf\ndpf_certified: true\n"
+        "website: https://www.mapbox.com\nsafeguard: dpf\ndpf_certified: true\n"
     )
     folder = root / "api" / "compliance" / "touchpoints"
     folder.mkdir(parents=True, exist_ok=True)
@@ -197,3 +197,59 @@ def test_undeclared_flow_to_a_known_party_closes_when_declared(repo: Path) -> No
         c for c in matrix.by_element("api:checkout->party:zapier") if c.sid == "DS06"
     )
     assert cell.verdict is Verdict.DISMISSED
+
+
+def test_a_host_the_code_calls_without_a_declared_transfer_is_a_finding(
+    repo: Path,
+) -> None:
+    """Deterministic net under the challenger: the introspection lists the
+    hosts a view calls; one that matches no party's website is an undeclared
+    flow by construction. The project's own hosts and docker service names
+    are not transfers; a party whose website matches closes it."""
+    api = repo / "api" / "shop" / "api.py"
+    api.write_text(
+        api.read_text().replace(
+            "    send_receipt.defer(order_id=1)\n",
+            "    send_receipt.defer(order_id=1)\n"
+            "    import requests\n\n"
+            '    requests.post("https://api.hubapi.com/crm/v3/objects", json={})\n'
+            '    requests.get("http://localhost:8000/health")\n'
+            '    requests.get("https://api.mapbox.com/geocode")\n',
+        )
+    )
+    ws = _ws(repo)
+    tp = ws.all_touchpoints["api:checkout"]
+    assert "api.hubapi.com" in tp.facts.fetches
+    assert "localhost" not in tp.facts.fetches  # no TLD: never a transfer
+    flows = build_flows(ws, build_elements(ws))
+    gaps = {f.sink: f for f in flows.undeclared()}
+    assert set(gaps) == {"api.hubapi.com"}  # mapbox declared, localhost is ours
+    assert gaps["api.hubapi.com"].touchpoint == "api:checkout"
+    assert "seen by introspection" in (gaps["api.hubapi.com"].note or "")
+    diags = run_check(repo, strict=False).diagnostics
+    gap = next(d for d in diags if d.code == "flow-undeclared")
+    assert gap.subject == "api:checkout->api.hubapi.com"
+    pending = next(d for d in diags if d.code == "touchpoint-pending")
+    assert "api:checkout" in pending.items
+    # Declaring HubSpot as a party with its website and the transfer closes it.
+    (repo / "compliance" / "parties" / "hubspot.yaml").write_text(
+        "name: HubSpot\ncountry: US\naddress: a\nemail: e@x\n"
+        "website: https://www.hubspot.com\nhosts: [api.hubapi.com]\n"
+        "safeguard: dpf\ndpf_certified: true\n"
+    )
+    ws = _ws(repo)
+    gaps = {f.sink: f for f in build_flows(ws, build_elements(ws)).undeclared()}
+    assert set(gaps) == {"party:hubspot"}  # known party now, still undeclared here
+    tools = Tools(repo)
+    tools.touchpoint_set_data(
+        "api:checkout",
+        [DataRef(ref="shop.Customer.email", ops=[{"op": "create"}])],
+        reason="x",
+        transfers=[
+            ExportDecision(party="mapbox", data=[EMAIL], purpose="geocoding"),
+            ExportDecision(party="hubspot", data=[EMAIL], purpose="crm"),
+        ],
+        scope="subject",
+    )
+    ws = _ws(repo)
+    assert build_flows(ws, build_elements(ws)).undeclared() == []

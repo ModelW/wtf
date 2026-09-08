@@ -335,6 +335,66 @@ def _wrapper_auth(callback):
     return sorted(found)
 
 
+URL_LITERAL = re.compile(
+    r"https?://([A-Za-z0-9.-]+\.[A-Za-z]{2,})(?::\d+)?(?:/|$|[\"'?])"
+)
+SDK_CLIENTS = re.compile(
+    r"^(stripe|mapbox|sentry_sdk|twilio|sendgrid|mailgun|brevo|sib_api_v3_sdk|"
+    r"klaviyo|slack_sdk|openai|anthropic|algoliasearch|mixpanel|segment|analytics|"
+    r"posthog|boto3|botocore|google|firebase_admin|onesignal|intercom|hubspot|"
+    r"mailchimp|mailjet|postmark|resend|paypalrestsdk|braintree|adyen|mollie)$",
+    re.I,
+)
+
+
+def _fetches(func):
+    """Outbound calls visible in the body of ``func`` itself: hostnames of
+    URL literals and the names of well-known third-party SDK clients.
+
+    Facts, not hints: a host that matches no declared party is an
+    undeclared flow by itself, no reading needed. Only the function's own
+    source is scanned — following the call graph is where fingerprinting
+    ends and guessing begins; deeper indirections are the challenger's.
+    """
+    try:
+        src = inspect.getsource(inspect.unwrap(func))
+    except (OSError, TypeError):
+        return []
+    found = set(URL_LITERAL.findall(src))
+    try:
+        tree = ast.parse(inspect.cleandoc(src) if src[:1].isspace() else src)
+    except SyntaxError:
+        return sorted(found)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        root = node.func
+        while isinstance(root, ast.Attribute):
+            root = root.value
+        if isinstance(root, ast.Name) and SDK_CLIENTS.match(root.id):
+            found.add(root.id.lower())
+    return sorted(found)
+
+
+def _own_hosts():
+    """Hostnames that are the project itself: ALLOWED_HOSTS, BASE_URL and
+    the usual URL settings. A fetch to one of them is not a transfer."""
+    from django.conf import settings
+
+    hosts = set()
+    for name in ("ALLOWED_HOSTS", "CSRF_TRUSTED_ORIGINS", "CORS_ALLOWED_ORIGINS"):
+        for value in getattr(settings, name, None) or []:
+            hosts.add(re.sub(r"^https?://", "", str(value)).split("/")[0].lstrip("."))
+    for name in dir(settings):
+        if name.endswith(("_URL", "_HOST", "_ORIGIN")) and isinstance(
+            getattr(settings, name, None), str
+        ):
+            match = URL_LITERAL.search(getattr(settings, name) + "/")
+            if match:
+                hosts.add(match.group(1))
+    return sorted(h for h in hosts if h and h != "*")
+
+
 def _route_touchpoints():
     from django.conf import settings
     from django.urls import get_resolver
@@ -383,6 +443,7 @@ def _route_touchpoints():
                         "params": facts.get("params", []),
                         "summary": facts.get("summary"),
                         "defers": _defers(fn),
+                        "fetches": _fetches(fn),
                         "hints": _method_hints([method])
                         + _body_hints(fn)
                         + _scope_hints(fn),
@@ -417,6 +478,7 @@ def _route_touchpoints():
                 "params": params,
                 "summary": None,
                 "defers": _defers(target),
+                "fetches": _fetches(target),
                 "hints": _method_hints(methods)
                 + _body_hints(target)
                 + _scope_hints(target),
@@ -625,6 +687,7 @@ def _task_touchpoints():
                 "periodic": name in periodic,
                 "request": _signature(task.func),
                 "defers": _defers(task.func),
+                "fetches": _fetches(task.func),
                 "queue": getattr(task, "queue", None),
                 "hints": _task_name_hints(name) + _body_hints(task.func),
             }
@@ -648,6 +711,7 @@ def _task_touchpoints():
                     "periodic": False,
                     "request": _signature(func),
                     "defers": _defers(func),
+                    "fetches": _fetches(func),
                     "queue": getattr(task, "queue", None),
                     "hints": _task_name_hints(name) + _body_hints(func),
                 }
@@ -714,6 +778,7 @@ def main() -> int:
             "schema": SCHEMA,
             "django": django.get_version(),
             "settings": os.environ.get("DJANGO_SETTINGS_MODULE"),
+            "own_hosts": _own_hosts(),
             "touchpoints": [
                 *_route_touchpoints(),
                 *_task_touchpoints(),
