@@ -281,6 +281,60 @@ def _normalise_path(text):
     return text.strip("/")
 
 
+AUTH_WRAPPERS = re.compile(
+    r"login_required|staff_member_required|permission_required|user_passes_test|"
+    r"require_admin_access|superuser_required|"
+    r"LoginRequired|PermissionRequired|StaffRequired|UserPassesTest",
+)
+AUTH_WRAPPER_FILES = re.compile(
+    r"django/contrib/auth/decorators\.py|django/contrib/admin/views/decorators\.py|"
+    r"wagtail/admin/auth\.py"
+)
+
+
+def _wrapper_auth(callback):
+    """Auth decorators applied *around* the view — in ``urls.py`` or by the
+    framework's URL conf (Wagtail's ``require_admin_access``): the view body
+    does not show them, only the callback's wrapper chain does.
+
+    ``functools.wraps`` copies the view's name onto each wrapper, so the
+    wrapper is recognised by where its code lives (Django's / Wagtail's auth
+    decorator modules) or by an un-wrapped qualified name.
+    """
+    found = set()
+    obj = callback
+    for _ in range(12):
+        if obj is None:
+            break
+        code = getattr(obj, "__code__", None)
+        filename = (getattr(code, "co_filename", "") or "").replace("\\", "/")
+        if AUTH_WRAPPER_FILES.search(filename):
+            found.add(
+                {
+                    "auth/decorators.py": "login_required",
+                    "admin/views/decorators.py": "staff_member_required",
+                    "wagtail/admin/auth.py": "require_admin_access",
+                }.get(
+                    next(
+                        k
+                        for k in (
+                            "auth/decorators.py",
+                            "admin/views/decorators.py",
+                            "wagtail/admin/auth.py",
+                        )
+                        if k in filename
+                    ),
+                    "auth_wrapper",
+                )
+            )
+        qualname = getattr(obj, "__qualname__", "") or ""
+        match = AUTH_WRAPPERS.search(qualname)
+        if match:
+            found.add(match.group(0))
+        obj = getattr(obj, "__wrapped__", None)
+    return sorted(found)
+
+
 def _route_touchpoints():
     from django.conf import settings
     from django.urls import get_resolver
@@ -357,7 +411,7 @@ def _route_touchpoints():
                 "line": line,
                 "framework": facts.get("framework") or ("form" if form else "django"),
                 "operation_id": None,
-                "auth": facts.get("auth", []),
+                "auth": sorted({*facts.get("auth", []), *_wrapper_auth(cb)}),
                 "request": facts.get("request") or form or {},
                 "response": facts.get("response", {}),
                 "params": params,

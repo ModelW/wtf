@@ -304,7 +304,7 @@ def findings_cmd(
         # One stamp covers the touchpoint and every flow of it: one row,
         # on the element that carries the stamp, worst flow's weight.
         holder, _ = _stamp_holder(matrix.elements[cell.element], matrix.elements)
-        cell = _heaviest(matrix, holder.id, cell)
+        cell, label = _heaviest(matrix, holder.id, cell)
         if (holder.id, cell.stamp_key or cell.sid) in seen:
             continue
         seen.add((holder.id, cell.stamp_key or cell.sid))
@@ -317,7 +317,7 @@ def findings_cmd(
         if finding is not None and rank > cutoff:
             continue
         fid = matrix.finding_id(cell)
-        rows.append(Row(rank, cell, finding, [fid] if fid else []))
+        rows.append(Row(rank, cell, finding, [fid] if fid else [], label))
     rows.sort(key=lambda r: (r.rank, -(r.finding.impact or 0) if r.finding else 0))
     rows = _fold_same_evidence(rows)
     if output_format == "json":
@@ -326,7 +326,7 @@ def findings_cmd(
                 [
                     {
                         "ids": row.ids,
-                        "element": row.cell.element,
+                        "element": row.label,
                         "sid": row.cell.sid,
                         "title": _titles(row.cell.sid, catalogue),
                         "topic": row.cell.topic,
@@ -375,7 +375,7 @@ def findings_cmd(
                 style="bold",
             ),
             Text(sev, style=_SEVERITY_STYLE.get(sev, "dim")),
-            cell.element,
+            row.label,
             _titles(cell.sid, catalogue),
             effect,
             who,
@@ -394,6 +394,9 @@ class Row:
     cell: Cell
     finding: Finding | None
     ids: list[str]
+    label: str = ""
+    """What to print as the element: the holder, plus the flow that carried
+    the weight when the stamp names one (``api:x → party:mapbox``)."""
 
 
 def _fold_same_evidence(rows: list[Row]) -> list[Row]:
@@ -415,9 +418,10 @@ def _fold_same_evidence(rows: list[Row]) -> list[Row]:
     return out
 
 
-def _heaviest(matrix: Matrix, holder_id: str, cell: Cell) -> Cell:
+def _heaviest(matrix: Matrix, holder_id: str, cell: Cell) -> tuple[Cell, str]:
     """Among the cells the same stamp covers, the one with the highest impact
-    (a flow to the store may carry more than the request)."""
+    (a flow to the store may carry more than the request), and the label to
+    print: the holder, with the flow when the stamp names one."""
     key = cell.stamp_key or cell.sid
     best = cell
     for other in matrix.missing():
@@ -430,12 +434,10 @@ def _heaviest(matrix: Matrix, holder_id: str, cell: Cell) -> Cell:
             _impact(other) == _impact(best) and other.element == holder_id
         ):
             best = other
-    # Report on the holder's id, with the flow that carried the weight when
-    # the stamp names one (`SID@sink`).
     label = holder_id
     if "@" in key:
         label = f"{holder_id} → {key.split('@', 1)[1]}"
-    return replace(best, element=label)
+    return replace(best, element=holder_id), label
 
 
 def _titles(sids: str, catalogue: Catalogue) -> str:

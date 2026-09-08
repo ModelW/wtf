@@ -49,6 +49,7 @@ unit; unknown ones are declaration errors.
 from __future__ import annotations
 
 import hashlib
+import io
 import re
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -59,6 +60,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from ruamel.yaml import YAML as RuamelYAML
 
 from model_wtf.compliance.declarations import format_errors
 from model_wtf.compliance.ops import OpError, OpSpec, Read, parse_ops, render_ops
@@ -104,6 +106,15 @@ IGNORED_BY_DEFAULT = (
 documents, static assets, the admin's own URL patterns): hidden unless a
 manifest says otherwise. The admin's data exposure is carried by the
 ``admin:<app.Model>`` screen touchpoints instead."""
+
+
+_VENDOR_DIRS = re.compile(
+    r"(^|/)(site-packages|dist-packages|node_modules|\.venv|venv)/"
+)
+
+
+def _is_vendor_path(path: str | None) -> bool:
+    return bool(path) and bool(_VENDOR_DIRS.search(str(path).replace("\\", "/")))
 
 
 class Kind(StrEnum):
@@ -182,6 +193,26 @@ DataEntry = str | dict[str, Any]
 """One ``data`` entry: a bare ref (read) or ``{ref: <ops>}``."""
 
 
+class Undeclared(StrictModel):
+    """A flow a reviewer found in the code that the manifest does not declare:
+    data going to a sink (usually a host or a service) nobody accounted for.
+
+    Recorded by ``flow_report``; it is a finding (``flow-undeclared``) and
+    makes the touchpoint pending: the declaration is incomplete until the
+    transfer (and its party) are declared, or the code stops sending.
+    """
+
+    sink: str
+    """Where it goes: ``party:<id>`` when the party exists, else the host or
+    service name as seen in the code (``hooks.zapier.com``)."""
+    data: list[str] = Field(default_factory=list)
+    """Inventory refs of what is sent (resolved to full ids)."""
+    note: str
+    """The evidence: file:line and what the code does."""
+    commit: str | None = None
+    at: str | None = None
+
+
 class ManifestChallenge(StrictModel):
     """See :class:`model_wtf.compliance.review.Challenge`."""
 
@@ -219,6 +250,12 @@ class Manifest(StrictModel):
         default_factory=Stamps,
         description="Stamps closing the threat cells the matrix left open "
         "(`SID` or `SID@sink` -> {status, note} or !missing)",
+    )
+    undeclared: list[Undeclared] = Field(
+        default_factory=list,
+        description="Flows a reviewer found in the code that this manifest "
+        "does not declare (see `flow_report`); each is a finding until the "
+        "transfer is declared or the code stops sending",
     )
 
     @model_validator(mode="after")
@@ -324,6 +361,8 @@ class Touchpoint:
     challenge: ManifestChallenge | None = None
     """Open doubt on the declaration; makes the touchpoint pending."""
     answered: ManifestChallenge | None = None
+    undeclared: tuple[Undeclared, ...] = ()
+    """Flows found in the code and missing from the declaration."""
     stamps: Stamps = field(default_factory=Stamps)
     """Threat stamps declared in the manifest."""
     calls: tuple[str, ...] = ()
@@ -352,7 +391,20 @@ class Touchpoint:
         a challenge)."""
         if self.ignore:
             return False
-        return self.data is None or self.challenge is not None
+        return self.data is None or self.challenge is not None or bool(self.undeclared)
+
+    @property
+    def vendor(self) -> bool:
+        """Whether the code behind it is a dependency's (Django's, Wagtail's,
+        a node package's), not the project's.
+
+        Its controls are the framework's, kept by dependency updates and
+        usually placed where a view-level read cannot see them (Wagtail
+        wraps its admin URL conf in ``require_admin_access``); reviewing the
+        view alone yields false findings. What stays ours: the data it
+        exposes (the declaration) and the surface it sits on.
+        """
+        return _is_vendor_path(self.facts.file)
 
     @property
     def fingerprint(self) -> str:
@@ -432,6 +484,7 @@ class Touchpoint:
             "scope": self.scope.value,
             "ignore": self.ignore,
             "pending": self.pending,
+            "vendor": self.vendor,
             "note": self.note,
             "fingerprint": self.fingerprint,
         }
@@ -726,6 +779,7 @@ def _apply(
         note=manifest.note,
         challenge=manifest.challenge,
         answered=manifest.answered,
+        undeclared=tuple(manifest.undeclared),
         stamps=manifest.threats,
         calls=tuple(facts.calls),
         code_root=unit.code_root,
@@ -799,8 +853,13 @@ def write_manifest(
     scope: Scope | None = None,
     answered: ManifestChallenge | None = None,
     stamps: Stamps | None = None,
+    undeclared: Sequence[Undeclared] | None = None,
 ) -> Path:
     """Create or replace the manifest of ``touchpoint``; return its path.
+
+    ``undeclared`` (default: the touchpoint's current ones) are carried over
+    minus those the new ``transfers`` now declare — declaring the transfer is
+    how an undeclared flow is closed.
 
     ``answered`` records the challenge this declaration closes; ``stamps``
     (default: the touchpoint's current ones) are carried over so a
@@ -832,6 +891,9 @@ def write_manifest(
         lines.append(f"note: {_scalar(note)}")
     if answered is not None:
         lines.extend(_challenge_lines("answered", answered))
+    kept = touchpoint.undeclared if undeclared is None else tuple(undeclared)
+    declared_to = {f"party:{t.party}" for t in transfers or ()}
+    lines.extend(_undeclared_lines([u for u in kept if u.sink not in declared_to]))
     if stamps is None:
         # From disk, not from the (possibly cached) touchpoint: a stamp
         # written by another process since must survive the rewrite.
@@ -842,12 +904,60 @@ def write_manifest(
     return path
 
 
+def _undeclared_lines(found: list[Undeclared]) -> list[str]:
+    if not found:
+        return []
+    lines = ["undeclared:"]
+    for entry in found:
+        lines.append(f"  - sink: {_scalar(entry.sink)}")
+        lines.append("    data: [" + ", ".join(entry.data) + "]")
+        lines.append(f"    note: {_scalar(entry.note)}")
+        if entry.commit:
+            lines.append(f"    commit: {entry.commit}")
+        if entry.at:
+            lines.append(f"    at: {_scalar(entry.at)}")
+    return lines
+
+
 def _challenge_lines(key: str, challenge: ManifestChallenge) -> list[str]:
     lines = [f"{key}:", f"  commit: {challenge.commit}"]
     if challenge.at:
         lines.append(f"  at: {_scalar(challenge.at)}")
     lines.append(f"  grounds: {_scalar(challenge.grounds)}")
     return lines
+
+
+def report_undeclared(
+    unit: Unit, touchpoint: Touchpoint, found: Undeclared
+) -> str | None:
+    """Append an ``undeclared:`` entry to an existing manifest; the reason it
+    was refused, if so (no manifest, or the sink already declared/reported)."""
+    if touchpoint.data is None or touchpoint.ignore:
+        return "not declared: declare the touchpoint first (touchpoint_set_data)"
+    if any(t.party == found.sink.removeprefix("party:") for t in touchpoint.transfers):
+        return f"{found.sink} is already a declared transfer of this touchpoint"
+    if any(u.sink == found.sink for u in touchpoint.undeclared):
+        return f"{found.sink} is already reported on this touchpoint"
+    path = unit.folder / TOUCHPOINTS_DIR / f"{touchpoint.slug}.yaml"
+    doc = _yaml().load(path.read_text(encoding="utf-8")) or {}
+    entry = {"sink": found.sink, "data": list(found.data), "note": found.note}
+    if found.commit:
+        entry["commit"] = found.commit
+    if found.at:
+        entry["at"] = found.at
+    doc.setdefault("undeclared", []).append(entry)
+    buf = io.StringIO()
+    _yaml().dump(doc, buf)
+    path.write_text(buf.getvalue(), encoding="utf-8")
+    return None
+
+
+def _yaml() -> RuamelYAML:
+    y = RuamelYAML()
+    y.preserve_quotes = True
+    y.width = 4096
+    y.indent(mapping=2, sequence=4, offset=2)
+    return y
 
 
 def challenge_manifest(

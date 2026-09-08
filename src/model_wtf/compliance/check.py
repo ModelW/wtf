@@ -359,6 +359,23 @@ def _check_touchpoints(
 ) -> None:
     """Pending manifests and PII-touching touchpoints in no activity."""
     folder = unit.folder / TOUCHPOINTS_DIR
+    for t in touchpoints:
+        for found in t.undeclared:
+            what = ", ".join(r.split(":", 1)[-1] for r in found.data) or "data"
+            diagnostics.append(
+                Diagnostic(
+                    Severity.WARNING,
+                    "flow-undeclared",
+                    f"{t.full_id} sends {what} to {found.sink}, which the "
+                    f"manifest does not declare ({found.note}); declare the "
+                    "transfer (and the party) or stop sending",
+                    unit.id,
+                    folder / f"{t.slug}.yaml",
+                    subject=f"{t.full_id}->{found.sink}",
+                    hint="touchpoint_set_data with `transfers`, party_add if new",
+                    origin="declared",
+                )
+            )
     pending = [t for t in touchpoints if t.pending]
     if pending:
         diagnostics.append(

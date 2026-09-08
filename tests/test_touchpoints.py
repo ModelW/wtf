@@ -823,3 +823,41 @@ def test_exports_and_parties(repo: Path) -> None:
     ).read_text()
     assert "party: mapbox" in text
     assert "purpose: lookup" in text
+
+
+def test_auth_wrappers_applied_around_the_view_are_facts() -> None:
+    """`login_required` in urls.py (or Wagtail's `require_admin_access` in its
+    URL conf) is invisible from the view body; the introspection reads the
+    callback's wrapper chain so `auth` tells the truth."""
+    import functools
+
+    from model_wtf.introspect.django_touchpoints import _wrapper_auth
+
+    def view(request):
+        return None
+
+    assert _wrapper_auth(view) == []
+
+    def fake_login_required(fn):
+        @functools.wraps(fn)
+        def wrapper(request, *a, **k):
+            return fn(request, *a, **k)
+
+        return wrapper
+
+    # Recognised by the qualified name when wraps() did not hide it...
+    def login_required(fn):
+        def _wrapped_view(request, *a, **k):
+            return fn(request, *a, **k)
+
+        _wrapped_view.__wrapped__ = fn
+        _wrapped_view.__qualname__ = "login_required.<locals>._wrapped_view"
+        return _wrapped_view
+
+    assert _wrapper_auth(login_required(view)) == ["login_required"]
+    # ...and by the decorator module's file when it did.
+    wrapped = fake_login_required(view)
+    wrapped.__code__ = wrapped.__code__.replace(
+        co_filename="/x/site-packages/django/contrib/auth/decorators.py"
+    )
+    assert _wrapper_auth(wrapped) == ["login_required"]

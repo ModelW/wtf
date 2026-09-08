@@ -14,8 +14,8 @@ access:
 auth:
   title: Authentication enforcement
   checklist:
-    - Is the auth the scope implies actually enforced on this route (auth class, `login_required`, admin wrapper), including on every method the view handles?
-    - "`auth=None` or an empty permission list on a route that returns or writes personal data is a gap unless it is public by design."
+    - "The `auth` listed for the endpoint is what the framework enforces (auth classes, permission classes, `login_required`/admin wrappers applied in the URL conf), resolved from the running app, not from the view body. When it lists one, authentication IS enforced: do not conclude `missing` because the view code does not show it; check that the enforced auth matches the scope (a staff screen behind session auth only, a subject route behind an admin wrapper)."
+    - "`auth none` on a route that returns or writes personal data is a gap unless it is public by design (catalogue, signup, login, health)."
     - "Login / token endpoints: throttling or lockout against dictionary attacks; tokens random and checked server-side."
   sids: [AA01, AA02, AC11, CR03]
 
