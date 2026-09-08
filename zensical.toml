@@ -33,6 +33,7 @@ nav = [
   ] },
   { "Reference" = [
     { "CLI" = "reference/cli.md" },
+    { "MCP tools" = "reference/mcp.md" },
     { "File schemas" = "reference/schemas.md" },
     { "Threat catalogue" = "reference/threats.md" },
     { "Exit codes" = "reference/exit-codes.md" },

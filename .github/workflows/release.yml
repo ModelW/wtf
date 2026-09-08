@@ -3,13 +3,19 @@
 # the `v1` floating branch and tag so `uses: ModelW/wtf@v1` follows the
 # latest 1.x, and create the GitHub release with the changelog section.
 #
-# Cut a release:   git tag v1.2.3 && git push origin v1.2.3
+# Cut a release:            git tag v1.2.3 && git push origin v1.2.3
+# Cut a release candidate:  git tag v1.2.3rc1 && git push origin v1.2.3rc1
+#
+# A pre-release (PEP 440 `rc`, `a`, `b`) publishes to PyPI (pip only installs
+# it with --pre or a pinned version) and creates a GitHub pre-release, but
+# does NOT move `v1`: the gate in other repositories keeps following the
+# last final release.
 
 name: release
 
 on:
     push:
-        tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+        tags: ["v[0-9]+.[0-9]+.[0-9]+", "v[0-9]+.[0-9]+.[0-9]+[abr][c0-9]*"]
 
 permissions:
     contents: write # the release and the moved v1 refs
@@ -20,6 +26,7 @@ jobs:
         runs-on: ubuntu-latest
         outputs:
             version: ${{ steps.version.outputs.version }}
+            prerelease: ${{ steps.version.outputs.prerelease }}
         steps:
             - uses: actions/checkout@v4
               with:
@@ -29,6 +36,10 @@ jobs:
               run: |
                   version="${GITHUB_REF_NAME#v}"
                   echo "version=$version" >> "$GITHUB_OUTPUT"
+                  case "$version" in
+                      *[abr]*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+                      *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+                  esac
                   # The tag is the source of truth; pyproject keeps a placeholder.
                   uv version "$version" --no-sync
             - run: uv build
@@ -52,7 +63,8 @@ jobs:
             - uses: pypa/gh-action-pypi-publish@release/v1
 
     floating-refs:
-        needs: publish
+        needs: [build, publish]
+        if: needs.build.outputs.prerelease == 'false'
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v4
@@ -80,7 +92,10 @@ jobs:
                   path: dist/
             - name: Changelog section for this version
               run: |
+                  # A pre-release reads the section of the final version it
+                  # leads to (1.0.0rc1 -> "## 1.0.0").
                   version="${{ needs.build.outputs.version }}"
+                  version="$(printf '%s' "$version" | sed -E 's/(a|b|rc)[0-9]*$//')"
                   awk -v v="$version" '
                       $0 ~ "^## \\[?" v "\\]?" {on=1; next}
                       on && /^## / {exit}
@@ -93,3 +108,4 @@ jobs:
               with:
                   files: dist/*
                   body_path: notes.md
+                  prerelease: ${{ needs.build.outputs.prerelease == 'true' }}
