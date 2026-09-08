@@ -304,3 +304,15 @@ def test_global_root_option(make_repo: MakeRepo) -> None:
         cli, ["--root", str(root), "compliance", "data", "list", "--format", "json"]
     )
     assert listed.exit_code == 0, listed.output
+
+
+def test_version_flag_reports_the_installed_distribution() -> None:
+    from click.testing import CliRunner
+
+    from model_wtf.cli import cli
+
+    out = CliRunner().invoke(cli, ["--version"])
+    assert out.exit_code == 0, out.output
+    # The number itself comes from the tag at release time (0.0.0 in a
+    # checkout); the flag must exist and name the distribution.
+    assert out.output.startswith("model-wtf, version ")

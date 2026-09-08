@@ -1,13 +1,28 @@
 [project]
 name = "model-wtf"
-version = "0.1.0"
-description = "Model W Transformation Facilitator"
+# Placeholder: the release workflow sets the version from the git tag
+# (`uv version "${TAG#v}"`) before building. Never bump it by hand.
+version = "0.0.0"
+description = "Compliance as code for Model W projects: data inventory, processing register, threat model, and a gate on every pull request"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
     { name = "Rémy Sanchez", email = "remy.sanchez@hyperthese.net" },
 ]
 requires-python = ">=3.12"
+keywords = ["gdpr", "compliance", "threat-model", "django", "sveltekit", "security"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Legal Industry",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+    "Topic :: Software Development :: Quality Assurance",
+]
 dependencies = [
     "rich",
     "rich-click",
@@ -18,6 +33,12 @@ dependencies = [
     "ruamel-yaml>=0.19.1",
     "mcp>=1.2",
 ]
+
+[project.urls]
+Documentation = "https://modelw.github.io/wtf/"
+Source = "https://github.com/ModelW/wtf"
+Changelog = "https://github.com/ModelW/wtf/blob/develop/CHANGELOG.md"
+Issues = "https://github.com/ModelW/wtf/issues"
 
 [project.scripts]
 model-wtf = "model_wtf.cli:cli"

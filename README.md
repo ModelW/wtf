@@ -697,4 +697,21 @@ uv run model-wtf compliance challenge --merge-into develop [--commit]
 uv sync
 make clean   # format + lint + typecheck
 make test
+make docs    # generate the reference pages and build the site into site/
 ```
+
+### Releasing
+
+The version is the git tag; `pyproject.toml` carries a `0.0.0` placeholder
+that the release workflow replaces before building. To cut a release:
+
+```
+git tag v1.2.3 && git push origin v1.2.3
+```
+
+`release.yml` builds, publishes to PyPI through trusted publishing (the
+PyPI project trusts this repository's `release.yml` in the `pypi`
+environment; no token is stored), moves the `v1` branch and tag so
+`uses: ModelW/wtf@v1` follows the latest 1.x, and creates the GitHub
+release with the matching `CHANGELOG.md` section. Write that section
+before tagging.
