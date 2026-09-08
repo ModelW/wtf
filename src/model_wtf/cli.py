@@ -10,6 +10,7 @@ from model_wtf.compliance.cli import compliance
 
 
 @click.group()
+@click.version_option(package_name="model-wtf", prog_name="model-wtf")
 @click.option(
     "--root",
     type=click.Path(exists=True, file_okay=False, path_type=Path),

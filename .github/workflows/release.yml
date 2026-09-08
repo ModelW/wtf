@@ -1,0 +1,95 @@
+# Release on a version tag: build with the version taken from the tag,
+# publish to PyPI through trusted publishing (OIDC, no token stored), move
+# the `v1` floating branch and tag so `uses: ModelW/wtf@v1` follows the
+# latest 1.x, and create the GitHub release with the changelog section.
+#
+# Cut a release:   git tag v1.2.3 && git push origin v1.2.3
+
+name: release
+
+on:
+    push:
+        tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+    contents: write # the release and the moved v1 refs
+    id-token: write # PyPI trusted publishing
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        outputs:
+            version: ${{ steps.version.outputs.version }}
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+            - uses: astral-sh/setup-uv@v5
+            - id: version
+              run: |
+                  version="${GITHUB_REF_NAME#v}"
+                  echo "version=$version" >> "$GITHUB_OUTPUT"
+                  # The tag is the source of truth; pyproject keeps a placeholder.
+                  uv version "$version" --no-sync
+            - run: uv build
+            - run: uv run --with dist/*.whl --no-project model-wtf --version
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: dist
+                  path: dist/
+
+    publish:
+        needs: build
+        runs-on: ubuntu-latest
+        environment:
+            name: pypi
+            url: https://pypi.org/project/model-wtf/${{ needs.build.outputs.version }}/
+        steps:
+            - uses: actions/download-artifact@v4
+              with:
+                  name: dist
+                  path: dist/
+            - uses: pypa/gh-action-pypi-publish@release/v1
+
+    floating-refs:
+        needs: publish
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+            - name: Move v<major> branch and tag to this release
+              run: |
+                  major="v${GITHUB_REF_NAME#v}"; major="${major%%.*}"
+                  git config user.name "github-actions[bot]"
+                  git config user.email "github-actions[bot]@users.noreply.github.com"
+                  git branch -f "$major" "$GITHUB_SHA"
+                  git tag -f "$major" "$GITHUB_SHA"
+                  git push -f origin "refs/heads/$major" "refs/tags/$major"
+
+    github-release:
+        needs: [build, publish]
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+            - uses: actions/download-artifact@v4
+              with:
+                  name: dist
+                  path: dist/
+            - name: Changelog section for this version
+              run: |
+                  version="${{ needs.build.outputs.version }}"
+                  awk -v v="$version" '
+                      $0 ~ "^## \\[?" v "\\]?" {on=1; next}
+                      on && /^## / {exit}
+                      on {print}
+                  ' CHANGELOG.md > notes.md
+                  if [ ! -s notes.md ]; then
+                      echo "No CHANGELOG.md section for $version; see the commits since the previous tag." > notes.md
+                  fi
+            - uses: softprops/action-gh-release@v2
+              with:
+                  files: dist/*
+                  body_path: notes.md
