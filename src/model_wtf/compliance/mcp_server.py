@@ -56,7 +56,7 @@ from model_wtf.compliance.rights import (
     Right,
     set_right,
 )
-from model_wtf.compliance.stamps import Finding
+from model_wtf.compliance.stamps import Finding, Stamps
 from model_wtf.compliance.touchpoints import (
     Scope,
     Touchpoint,
@@ -72,6 +72,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from model_wtf.compliance.report import Unit
+    from model_wtf.compliance.stores import Store
 
 SHARED_FOLDER = "compliance"
 DEFAULT_BATCH = 8
@@ -452,9 +453,24 @@ class Tools:
             files_of = {self._rel(Path(p)) for p in _touchpoint_files(tp)} & wanted
             if files_of:
                 out.append(_touchpoint_review(tp, files_of))
+        out.extend(self._store_reviews(wanted))
         if not out:
             return "No reviewed item or declared touchpoint depends on these files."
         return "\n\n".join(out)
+
+    def _store_reviews(self, wanted: set[str]) -> list[str]:
+        """Stores are configured, not coded: their stamps (session cookie
+        flags, cache keys, bucket ACLs) cite settings. A settings file in the
+        change puts every stamped store on the list."""
+        settings_files = {f for f in wanted if "settings" in Path(f).name}
+        if not settings_files:
+            return []
+        return [
+            _store_review(store, settings_files)
+            for unit in self.units
+            for store in self.data(unit).stores.visible()
+            if store.stamps.root
+        ]
 
     def _item_review(self, unit: Unit, reviewed: Reviewed) -> str:
         row, entry = reviewed.row, reviewed.entry
@@ -667,7 +683,24 @@ class Tools:
         """``challenge``: put a reviewed item or touchpoint back to pending."""
         commit = git_head(self.root) or "unknown"
         ws = self.workspace()
-        if ref in ws.all_touchpoints:
+        if "#" in ref:
+            # `element#SID[@sink]`: one threat stamp, not the declaration.
+            from model_wtf.compliance.threats import (
+                build_matrix,
+                challenge_stamp,
+            )
+
+            element, _, key = ref.partition("#")
+            refused = challenge_stamp(
+                build_matrix(ws, register=False),
+                {u.id: u for u in self.units},
+                self.root / SHARED_FOLDER,
+                element,
+                key,
+                commit=commit,
+                grounds=grounds,
+            )
+        elif ref in ws.all_touchpoints:
             tp = ws.all_touchpoints[ref]
             refused = challenge_manifest(
                 self.unit(tp.unit), tp, commit=commit, grounds=grounds
@@ -1479,7 +1512,9 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
             "touchpoint (`unit:id`) back to pending because a change casts doubt "
             "on what its review asserted. `grounds`: one line citing the change "
             "(file:line) and the assertion it undermines. You do not reclassify; "
-            "a reviewer will. Refused when already challenged or already answered."
+            "a reviewer will. `element#SID` (or `element#SID@sink`), as `reviews` "
+            "prints them, re-opens one threat stamp instead of the declaration. "
+            "Refused when already challenged or already answered."
         ),
     )
     def challenge(ref: str, grounds: str) -> str:
@@ -1797,16 +1832,44 @@ def _touchpoint_review(tp: Touchpoint, files_of: set[str]) -> str:
         bits.append(
             f"  answered challenge at {tp.answered.commit}: {tp.answered.grounds}"
         )
-    for key, stamp in sorted(tp.stamps.root.items()):
-        if isinstance(stamp, Missing):
-            bits.append(f"  threat {key}: !missing {stamp.note or ''}")
-        elif isinstance(stamp, Finding):
-            bits.append(f"  threat {key}: missing [{stamp.severity}] {stamp.missing}")
-        else:
-            bits.append(
-                f"  threat {key}: {stamp.status} — {stamp.note or ''}".rstrip(" —")
-            )
+    bits.extend(_stamp_lines(tp.full_id, tp.stamps))
     return "\n".join(bits)
+
+
+def _store_review(store: Store, files: set[str]) -> str:
+    """A stamped store as the challenger sees it: which settings files in the
+    diff configure it, then each stamp with its challengeable ref."""
+    bits = [
+        f"{store.unit}:{store.slug} (store, {store.type.value} {store.backend}) "
+        f"configured by {', '.join(sorted(files))}",
+    ]
+    bits.extend(_stamp_lines(f"{store.unit}:{store.slug}", store.stamps))
+    return "\n".join(bits)
+
+
+def _stamp_lines(element: str, stamps: Stamps) -> list[str]:
+    """The stamps as assertions, each with the ref `challenge` takes."""
+    bits = []
+    for key, stamp in sorted(stamps.root.items()):
+        ref = f"{element}#{key}"
+        if isinstance(stamp, Missing):
+            bits.append(f"  threat {ref}: !missing {stamp.note or ''} (a finding)")
+        elif isinstance(stamp, Finding):
+            text = f"missing [{stamp.severity}] {stamp.missing}"
+            bits.append(f"  threat {ref}: {text} (a finding)")
+        else:
+            line = f"  threat {ref}: {stamp.status} — {stamp.note or ''}".rstrip(" —")
+            if stamp.commit:
+                line += f" (stamped at {stamp.commit})"
+            if stamp.challenge:
+                line += f" [challenged at {stamp.challenge.commit}]"
+            elif stamp.answered:
+                line += (
+                    f" [answered challenge at {stamp.answered.commit}: "
+                    f"{stamp.answered.grounds}]"
+                )
+            bits.append(line)
+    return bits
 
 
 def _touchpoint_files(tp: Touchpoint) -> list[str]:

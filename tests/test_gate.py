@@ -461,3 +461,89 @@ def test_parallel_challenges_through_separate_locks_all_survive(repo: Path) -> N
     second.save()
     text = (repo / "api" / "compliance" / "data.lock.yaml").read_text()
     assert text.count("challenge:") == 2
+
+
+def test_challenge_on_a_threat_stamp_reopens_the_cell_until_re_stamped(
+    repo: Path,
+) -> None:
+    """KFF-217: the challenger re-opens one stamp (`element#SID`), the gate
+    fails on it as an introduced open threat, a re-stamp answers it."""
+    from model_wtf.compliance.mcp_server import DataRef, Tools
+    from model_wtf.compliance.threats import Verdict, build_matrix
+    from model_wtf.compliance.workspace import load_workspace
+
+    tools = Tools(repo)
+    tools.touchpoint_set_data(
+        "api:getCustomer",
+        [DataRef(ref="shop.Customer.email")],
+        reason="api.py:32 returns the record",
+        scope="subject",
+    )
+    tools.threat_stamp(
+        "api:getCustomer",
+        "AC01",
+        status="mitigated",
+        note="api.py:33 queryset scoped to request.user",
+    )
+    commit(repo, "declared and stamped")
+    listing = tools.reviews(["api/shop/api.py"])
+    assert "threat api:getCustomer#AC01: mitigated — api.py:33" in listing
+    assert "(stamped at" in listing
+
+    # Not a stamp; a finding; unknown element.
+    assert "no stamp" in tools.challenge("api:getCustomer#AA03", "x")
+    assert "no element" in tools.challenge("api:nope#AC01", "x")
+
+    out = tools.challenge(
+        "api:getCustomer#AC01", "api.py:33 the filter(user=request.user) is gone"
+    )
+    assert out.startswith("Challenged")
+    manifest = repo / "api" / "compliance" / "touchpoints" / "getCustomer.yaml"
+    text = manifest.read_text()
+    assert "challenge:" in text
+    assert "filter(user=request.user) is gone" in text
+    assert "already challenged" in tools.challenge("api:getCustomer#AC01", "again")
+
+    def cell():
+        ws = load_workspace(repo, tools.units, tools.knowledge)
+        matrix = build_matrix(ws, register=False)
+        return next(c for c in matrix.by_element("api:getCustomer") if c.sid == "AC01")
+
+    stale = cell()
+    assert stale.verdict is Verdict.STALE
+    assert "challenged at" in stale.reason
+    assert "is gone" in stale.reason
+    # The gate sees it as an introduced open threat with the grounds.
+    result = run_gate(repo, base_ref="develop")
+    keys = [(f.code, f.subject) for f in result.introduced]
+    assert ("threat-open", "api:getCustomer#AC01") in keys
+    assert result.exit_code is ExitCode.FINDINGS
+    # The declaration itself is not re-opened by a stamp challenge.
+    assert ("touchpoint-pending", "api:getCustomer") not in keys
+    # `reviews` shows the open challenge so it is not raised twice.
+    assert "[challenged at" in tools.reviews(["api/shop/api.py"])
+
+    # Re-stamping answers it.
+    tools.threat_stamp(
+        "api:getCustomer", "AC01", status="mitigated", note="api.py:33 scoped again"
+    )
+    text = manifest.read_text()
+    assert "answered:" in text
+    assert "    challenge:" not in text
+    assert cell().verdict is Verdict.STAMPED
+    assert "already answered" in tools.challenge("api:getCustomer#AC01", "again")
+    assert run_gate(repo, base_ref="develop").introduced == []
+
+
+def test_challenge_on_a_finding_is_refused(repo: Path) -> None:
+    from model_wtf.compliance.mcp_server import DataRef, Tools
+
+    tools = Tools(repo)
+    tools.touchpoint_set_data(
+        "api:getCustomer",
+        [DataRef(ref="shop.Customer.email")],
+        reason="x",
+        scope="subject",
+    )
+    tools.threat_stamp("api:getCustomer", "AC01", missing="no ownership check")
+    assert "a finding" in tools.challenge("api:getCustomer#AC01", "x")

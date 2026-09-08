@@ -588,8 +588,8 @@ that are already clean.
 
 #### The challenger
 
-Fingerprints catch shape changes (a new field, a serializer that returns
-more); they cannot catch a view that starts mailing an address to a new
+Fingerprints catch shape changes on data items (a field's type or
+nullability); they cannot catch a view that starts mailing an address to a new
 provider, a purge task that gets disabled, or a column re-purposed with the
 same type. That is a reading job, so with an API key the gate first runs
 the **challenger**: an agent with the full git checkout, `git diff` and
@@ -598,9 +598,22 @@ files: classifications with their reasons, declared ops, transfers,
 exemption notes — every one citing code) and one write tool, `challenge`.
 It does not reclassify; it re-opens, with grounds citing the hunk.
 
+`reviews` lists three kinds of assertion: data classifications, touchpoint
+declarations and **threat stamps** (`threat api:getOrder#AC01: mitigated —
+orders/api.py:283 scoped to request.user`). `challenge` takes any of the
+three refs. A hunk that changes what a touchpoint reads, writes, returns or
+sends re-opens the declaration; a hunk that removes the control a stamp
+cites (a queryset scope, an auth class, a throttle, a validator, a cookie
+setting) re-opens that one stamp — `element#SID` — and the cell is stale
+(`threats why` shows the grounds) until re-stamped; both when both. A
+`!missing` is a finding, not a claim: it cannot be challenged. Stores are
+listed when a settings file is in the diff, since their stamps cite
+settings.
+
 A challenge is recorded in `data.lock.yaml` (`challenge: {commit,
-grounds}`) or in the touchpoint manifest and makes the item
-`pending:challenged`, which the gate counts as introduced. The record is
+grounds}`), in the touchpoint manifest, or on the stamp itself, and makes
+the item `pending:challenged` (the cell `stale`), which the gate counts as
+introduced. The record is
 what keeps the non-determinism out of the gate: an item is challenged at
 most once per change, a re-review (confirming is fine) moves the challenge
 to `answered:` and the same grounds are refused afterwards — a false
