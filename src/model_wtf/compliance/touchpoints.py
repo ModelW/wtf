@@ -192,9 +192,11 @@ def infer_scope(facts: Introspected) -> Scope:
 class Transfer(StrictModel):
     """One outbound flow: these items go to that party (another organisation)."""
 
-    party: str
-    data: list[str] = Field(default_factory=list)
-    purpose: str | None = None
+    party: str = Field(description="Party id, a file in `compliance/parties/`")
+    data: list[str] = Field(
+        default_factory=list, description="Inventory refs of what is sent"
+    )
+    purpose: str | None = Field(default=None, description="Why, in one line")
 
 
 Export = Transfer
@@ -204,10 +206,13 @@ Export = Transfer
 class StoreWrite(StrictModel):
     """One copy into a store of the project: these items are written there."""
 
-    store: str
-    """Store slug (``tmw``) or ``unit:slug`` when it is another unit's."""
-    data: list[str] = Field(default_factory=list)
-    purpose: str | None = None
+    store: str = Field(
+        description="Store slug (`tmw`) or `unit:slug` when it is another unit's"
+    )
+    data: list[str] = Field(
+        default_factory=list, description="Inventory refs of what is written"
+    )
+    purpose: str | None = Field(default=None, description="Why, in one line")
 
 
 DataEntry = str | dict[str, Any]
@@ -247,8 +252,15 @@ class ManifestChallenge(StrictModel):
 class Manifest(StrictModel):
     """``touchpoints/<slug>.yaml``."""
 
-    data: list[DataEntry] | None = None
-    transfers: list[Transfer] = Field(default_factory=list)
+    data: list[DataEntry] | None = Field(
+        default=None,
+        description="Every inventory item touched, as `ref` (a read) or "
+        "`{ref: op | [ops]}`; `[]` = checked, touches none; absent = pending",
+    )
+    transfers: list[Transfer] = Field(
+        default_factory=list,
+        description="What leaves to another organisation's API",
+    )
     exporting: list[Transfer] | None = Field(
         default=None, description="Deprecated spelling of `transfers`"
     )
@@ -263,8 +275,12 @@ class Manifest(StrictModel):
         description="Who this touchpoint serves (subject | staff | public | "
         "system); inferred from auth when absent",
     )
-    ignore: bool = False
-    note: str | None = None
+    ignore: bool = Field(
+        default=False, description="Plumbing (health check, static asset): skip"
+    )
+    note: str | None = Field(
+        default=None, description="The reviewer's reason, citing file:line"
+    )
     challenge: ManifestChallenge | None = Field(
         default=None,
         description="A doubt cast by the challenger on this declaration; the "

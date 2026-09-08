@@ -711,7 +711,8 @@ The version is the git tag; `pyproject.toml` carries a `0.0.0` placeholder
 that the release workflow replaces before building. To cut a release:
 
 ```
-git tag v1.2.3 && git push origin v1.2.3
+git tag v1.2.3 && git push origin v1.2.3        # a release
+git tag v1.2.3rc1 && git push origin v1.2.3rc1  # a release candidate
 ```
 
 `release.yml` builds, publishes to PyPI through trusted publishing (the
@@ -719,4 +720,7 @@ PyPI project trusts this repository's `release.yml` in the `pypi`
 environment; no token is stored), moves the `v1` branch and tag so
 `uses: ModelW/wtf@v1` follows the latest 1.x, and creates the GitHub
 release with the matching `CHANGELOG.md` section. Write that section
-before tagging.
+before tagging. A candidate (`rc`, `a`, `b`) is published and released as a
+pre-release under the final version's changelog section but does **not**
+move `v1`: try it with `uses: ModelW/wtf@v1.2.3rc1` or `pip install
+model-wtf==1.2.3rc1`.

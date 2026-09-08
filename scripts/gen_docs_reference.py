@@ -8,6 +8,7 @@ dismissal rules from ``knowledge/threats``. Run before ``zensical build``
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -92,7 +93,13 @@ def schema_page() -> str:
     from model_wtf.compliance.activities import ActivityFile
     from model_wtf.compliance.data import Override
     from model_wtf.compliance.stamps import Finding, Stamp, StampChallenge
-    from model_wtf.compliance.touchpoints import Manifest, Undeclared
+    from model_wtf.compliance.stores import StoreFile
+    from model_wtf.compliance.touchpoints import (
+        Manifest,
+        StoreWrite,
+        Transfer,
+        Undeclared,
+    )
 
     lines = [
         "# File schemas",
@@ -110,7 +117,10 @@ def schema_page() -> str:
             "`<unit>/compliance/touchpoints/<slug>.yaml`",
             Manifest,
         ),
+        ("Transfer", "`transfers:` items of a manifest", Transfer),
+        ("Store write", "`stores:` items of a manifest", StoreWrite),
         ("Undeclared flow entry", "`undeclared:` items of a manifest", Undeclared),
+        ("Store", "`<unit>/compliance/stores/<slug>.yaml`", StoreFile),
         ("Threat stamp", "`threats:` entries (mitigated / accepted / n/a)", Stamp),
         ("Stamp challenge", "`challenge:` / `answered:` on a stamp", StampChallenge),
         ("Finding", "`threats:` entries written from a `!missing`", Finding),
@@ -133,7 +143,8 @@ def schema_page() -> str:
 
 def _annotation(annotation: Any) -> str:
     text = str(annotation).replace("typing.", "").replace("model_wtf.compliance.", "")
-    for noise in ("schemas.", "yaml_io.", "stamps.", "touchpoints.", "ops."):
+    text = re.sub(r"Annotated\[str, StringConstraints\([^)]*\)\]", "str", text)
+    for noise in ("schemas.", "yaml_io.", "stamps.", "touchpoints.", "ops.", "stores."):
         text = text.replace(noise, "")
     text = text.replace("<class '", "").replace("'>", "")
     return text.replace("|", "\\|")
@@ -217,8 +228,59 @@ def exit_codes_page() -> str:
     return "\n".join(lines) + "\n"
 
 
+def mcp_page() -> str:
+    """The MCP tools, from the server itself, bound to an empty repository."""
+    import asyncio
+    import tempfile
+
+    from model_wtf.compliance.mcp_server import build_server
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / ".git").mkdir()
+        (root / "snow.yml").write_text("units: []\n", encoding="utf-8")
+        tools = asyncio.run(build_server(root).list_tools())
+    lines = [
+        "# MCP tools",
+        "",
+        "The write path of the reviewer agents (`compliance mcp`; the swarm "
+        "starts it for every worker). Generated from the server's tool list.",
+        "",
+    ]
+    for tool in sorted(tools, key=lambda t: t.name):
+        schema = tool.input_schema or {}
+        props = schema.get("properties", {})
+        required = set(schema.get("required", []))
+        lines.append(f"## `{tool.name}`")
+        lines.append("")
+        lines.append((tool.description or "").strip())
+        lines.append("")
+        if props:
+            lines.append("| Argument | Type | Required |")
+            lines.append("|---|---|---|")
+            for name, prop in props.items():
+                kind = _json_type(prop, schema.get("$defs", {}))
+                lines.append(
+                    f"| `{name}` | `{kind}` | {'yes' if name in required else 'no'} |"
+                )
+            lines.append("")
+    return "\n".join(lines)
+
+
+def _json_type(prop: dict[str, Any], defs: dict[str, Any]) -> str:
+    if "$ref" in prop:
+        return prop["$ref"].rsplit("/", 1)[-1]
+    if "anyOf" in prop:
+        return " \\| ".join(_json_type(p, defs) for p in prop["anyOf"])
+    kind = str(prop.get("type", "any"))
+    if kind == "array" and "items" in prop:
+        return f"list[{_json_type(prop['items'], defs)}]"
+    return kind
+
+
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
+    (OUT / "mcp.md").write_text(mcp_page(), encoding="utf-8")
     (OUT / "cli.md").write_text(cli_page(), encoding="utf-8")
     (OUT / "schemas.md").write_text(schema_page(), encoding="utf-8")
     (OUT / "threats.md").write_text(threats_page(), encoding="utf-8")

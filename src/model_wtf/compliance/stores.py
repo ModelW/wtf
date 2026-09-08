@@ -78,8 +78,13 @@ class StoreFile(StrictModel):
     store (slug unknown to the config) must at least carry ``type``.
     """
 
-    type: StoreType | None = None
-    backend: NonEmpty | None = None
+    type: StoreType | None = Field(
+        default=None, description="Mandatory for a store the settings do not show"
+    )
+    backend: NonEmpty | None = Field(
+        default=None,
+        description="Conceptual backend: postgresql, redis, s3, hocuspocus",
+    )
     name: NonEmpty | Marker | None = Field(
         default=None, description="Human name of the store"
     )
@@ -107,7 +112,7 @@ class StoreFile(StrictModel):
         default_factory=Stamps,
         description="Stamps closing the threat cells the matrix left open",
     )
-    ignore: bool = False
+    ignore: bool = Field(default=False, description="Hide the store (a test database)")
 
 
 @dataclass(frozen=True)
