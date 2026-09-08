@@ -16,3 +16,5 @@ build/
 tests/fixtures/skproj/node_modules/
 tests/fixtures/skproj/.svelte-kit/
 tests/fixtures/skproj/pnpm-lock.yaml
+site/
+docs/reference/

@@ -1,0 +1,45 @@
+# The documentation site: reference pages generated from the code, the rest
+# from docs/, built with Zensical and published to GitHub Pages on every
+# push to develop.
+
+name: docs
+
+on:
+    push:
+        branches: [develop]
+    pull_request:
+        paths: [docs/**, zensical.toml, scripts/gen_docs_reference.py, .github/workflows/docs.yml]
+
+permissions:
+    contents: read
+    pages: write
+    id-token: write
+
+concurrency:
+    group: docs-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: astral-sh/setup-uv@v5
+              with:
+                  enable-cache: true
+            - run: uv sync --frozen --group docs
+            - run: uv run python scripts/gen_docs_reference.py
+            - run: uv run zensical build --clean
+            - uses: actions/upload-pages-artifact@v3
+              with:
+                  path: site
+    deploy:
+        if: github.event_name == 'push'
+        needs: build
+        runs-on: ubuntu-latest
+        environment:
+            name: github-pages
+            url: ${{ steps.deployment.outputs.page_url }}
+        steps:
+            - uses: actions/deploy-pages@v4
+              id: deployment

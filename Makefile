@@ -1,4 +1,4 @@
-.PHONY: help clean format lint typecheck test prettier
+.PHONY: help clean format lint typecheck test prettier docs docs-serve
 
 PYTHON_BIN ?= uv run python
 
@@ -23,3 +23,11 @@ typecheck: ## Type-check with mypy
 
 test: ## Run the test suite
 	uv run pytest
+
+docs: ## Generate the reference pages and build the site into site/
+	uv run --group docs python scripts/gen_docs_reference.py
+	uv run --group docs zensical build --clean
+
+docs-serve: ## Serve the documentation locally with live reload
+	uv run --group docs python scripts/gen_docs_reference.py
+	uv run --group docs zensical serve
