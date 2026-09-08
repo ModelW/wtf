@@ -103,6 +103,9 @@ class Diagnostic:
         For a line that folds several things (``12 data item(s) pending``),
         their stable ids. The text renderer keeps the fold; JSON and the
         gate see each item, so a PR is judged on the items it adds.
+    risk
+        For a weighed threat finding: ``critical`` … ``info``. Renderers
+        sort on it and tag the line; the gate carries it through.
     """
 
     severity: Severity
@@ -115,6 +118,7 @@ class Diagnostic:
     note: str | None = None
     origin: str | None = None
     items: tuple[str, ...] = ()
+    risk: str | None = None
 
     @property
     def section(self) -> Section:
@@ -385,6 +389,7 @@ class Report:
             "note": diag.note,
             "origin": diag.origin,
             "items": list(diag.items),
+            "risk": diag.risk,
         }
 
     def by_section(self) -> dict[Section, list[Diagnostic]]:

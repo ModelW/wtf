@@ -1,0 +1,30 @@
+# Who can reach a touchpoint, and how much we fear them. `malice` is the
+# propensity to attack (0..1); `reach` how easy it is to be that actor at
+# all (anyone can be anonymous; a staff account has to be obtained). Both
+# multiply into the likelihood side of a finding's severity.
+#
+# A project overrides any of these in `compliance/actors.yaml` (same keys).
+
+anonymous:
+  title: Anyone on the internet
+  malice: 1.0
+  reach: 1.0
+  note: Bots and opportunists included; every public route is probed.
+
+subject:
+  title: An authenticated end user
+  malice: 0.6
+  reach: 0.8
+  note: Accounts are usually free to create; a hostile user is a normal user.
+
+staff:
+  title: A member of staff
+  malice: 0.2
+  reach: 0.4
+  note: Under contract and identified; insider risk, not hostile by default.
+
+system:
+  title: The system itself
+  malice: 0.05
+  reach: 0.2
+  note: Tasks and webhooks; only reachable through another touchpoint.

@@ -56,6 +56,7 @@ from model_wtf.compliance.rights import (
     Right,
     set_right,
 )
+from model_wtf.compliance.stamps import Finding
 from model_wtf.compliance.touchpoints import (
     Scope,
     Touchpoint,
@@ -482,8 +483,16 @@ class Tools:
         status: str | None = None,
         note: str | None = None,
         missing: str | None = None,
+        effect: str | None = None,
+        degree: str | None = None,
+        actor: str | None = None,
     ) -> str:
-        """``threat_stamp``: close one open threat cell, or record a finding."""
+        """``threat_stamp``: close one open threat cell, or record a finding.
+
+        A finding is weighed by the tool (effect x degree x sensitivity x
+        actor); ``effect``/``degree``/``actor`` narrow that when the code
+        shows less is at stake.
+        """
         from model_wtf.compliance.threats import (
             StampError,
             build_matrix,
@@ -492,21 +501,60 @@ class Tools:
 
         ws = self.workspace(refresh=True)
         matrix = build_matrix(ws)
+        # `SID@sink` names one flow of the element: stamp that flow.
+        target = element
+        if "@" in sid:
+            sid, _, sink = sid.partition("@")
+            flow = next(
+                (
+                    e
+                    for e in matrix.elements
+                    if e in (f"{element}->{sink}", f"{sink}->{element}")
+                ),
+                None,
+            )
+            if flow is None:
+                msg = f"{element} has no flow with {sink!r}"
+                raise ValueError(msg)
+            target = flow
         try:
-            path = stamp_cell(
+            path, key, written = stamp_cell(
                 matrix,
                 {u.id: u for u in self.units},
                 self.root / "compliance",
-                element,
+                target,
                 sid,
                 status=status,
                 note=note,
                 missing=missing,
                 by="agent",
                 commit=git_head(self.root),
+                ws=ws,
+                effect=effect,
+                degree=degree,
+                actor=actor,
             )
-        except StampError as exc:
+        except (StampError, ValueError) as exc:
             raise ValueError(str(exc)) from exc
+        severity = getattr(written, "severity", None) or ""
+        fid = ""
+        if missing:
+            # Allocate the finding's id now so the narration and the reply
+            # can cite it.
+            fresh = build_matrix(self.workspace(refresh=True))
+            fid = (
+                next(
+                    (
+                        fresh.finding_id(c)
+                        for c in fresh.missing()
+                        if c.sid == sid
+                        and (c.stamp_key or c.sid) == key
+                        and c.element == element
+                    ),
+                    None,
+                )
+                or ""
+            )
         _log_activity(
             "threat_stamp",
             id=element,
@@ -514,9 +562,12 @@ class Tools:
             status=status or "missing",
             note=(missing or note or "").strip(),
             title=self._threat_title(sid),
+            severity=severity,
+            fid=fid,
         )
         self._workspace = None
-        return f"Stamped {element} {sid} in {self._rel(path)}."
+        tail = f" ({severity}{', ' + fid if fid else ''})" if severity else ""
+        return f"Stamped {element} {sid} in {self._rel(path)}{tail}."
 
     def _threat_title(self, sid: str) -> str:
         from model_wtf.compliance.threats import load_catalogue
@@ -536,18 +587,21 @@ class Tools:
         )
 
         catalogue = load_catalogue()
-        matrix = build_matrix(self.workspace(), catalogue)
+        matrix = build_matrix(self.workspace(), catalogue, register=False)
         if element not in matrix.elements:
             msg = f"no element {element!r}"
             raise ValueError(msg)
         lines = []
-        for cell in matrix.by_element(element):
+        for cell in _cells_carried_by(matrix, element):
             if not cell.verdict.needs_review and cell.verdict is not Verdict.MISSING:
                 continue
             spec = catalogue.threats[cell.sid]
             note = catalogue.mapping[cell.sid].note or ""
+            key = cell.sid
+            if cell.element != element:
+                key = f"{cell.sid}@{_other_end(cell.element, element)}"
             lines.append(
-                f"{cell.sid} [{cell.topic}] {spec.title}: {note}".rstrip(": ")
+                f"{key} [{cell.topic}] {spec.title}: {note}".rstrip(": ")
                 + (
                     f"  (currently {cell.verdict.value}: {cell.reason})"
                     if cell.verdict is not Verdict.OPEN
@@ -594,18 +648,16 @@ class Tools:
                     f"scope {element.touchpoint.scope.value}, "
                     f"auth {', '.join(facts.auth) or 'none'})"
                 )
-            sids: dict[str, list[str]] = {}
+            keys: list[str] = []
             for c in cells:
-                target = "" if c.element == eid else f"@{_other_end(c.element, eid)}"
-                sids.setdefault(c.sid, []).append(target)
+                key = c.sid
+                if c.element != eid:
+                    key = f"{c.sid}@{_other_end(c.element, eid)}"
+                if key not in keys:
+                    keys.append(key)
             listed = ", ".join(
-                f"{sid} ({catalogue.threats[sid].title})"
-                + (
-                    ""
-                    if targets == [""]
-                    else " on " + "/".join(t for t in targets if t)
-                )
-                for sid, targets in sorted(sids.items())
+                f"{k} ({catalogue.threats[k.split('@', 1)[0]].title})"
+                for k in sorted(keys)
             )
             lines.append(f"{eid}  {where}")
             lines.append(f"  open: {listed}")
@@ -1390,12 +1442,15 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
     @server.tool(
         name="threat_stamp",
         description=(
-            "Close one open threat cell on an element after reading the code: "
-            "`status` mitigated (note cites file:line of the control), accepted "
-            "(note says why the risk is acceptable) or n/a (note says why the "
-            "threat does not apply here). Or record a finding with `missing`: "
-            "one line on what is exploitable and where. A flow (`a->b`) is "
-            "stamped on its source touchpoint keyed `SID@sink`."
+            "Record your verdict on one threat of one element: `sid` exactly as "
+            "listed (`DS06`, or `DS06@party:mapbox` for one flow). Either "
+            "`status`: mitigated (note = the file:line that handles it), n/a "
+            "(note = why it cannot happen here) or accepted (note = the comment "
+            "or setting that accepts the risk); or `missing`: one line, file:line, "
+            "what an attacker gets. Optional, only when the code shows less is at "
+            "stake than the default: `degree` existence (a yes/no leaks) or "
+            "attribute (one field), `effect` denial (nothing read or written), "
+            "`actor` subject (unreachable anonymously)."
         ),
     )
     def threat_stamp(
@@ -1404,8 +1459,18 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
         status: Literal["mitigated", "accepted", "n/a"] | None = None,
         note: str | None = None,
         missing: str | None = None,
+        effect: Literal[
+            "disclosure", "tampering", "destruction", "denial", "escalation"
+        ]
+        | None = None,
+        degree: Literal["existence", "attribute", "record", "bulk"] | None = None,
+        actor: Literal["anonymous", "subject", "staff", "system"] | None = None,
     ) -> str:
-        return _guard(lambda: tools.threat_stamp(element, sid, status, note, missing))
+        return _guard(
+            lambda: tools.threat_stamp(
+                element, sid, status, note, missing, effect, degree, actor
+            )
+        )
 
     @server.tool(
         name="challenge",
@@ -1697,6 +1762,18 @@ def _rights_notes(row: Row) -> list[tuple[str, str]]:
     return out
 
 
+def _cells_carried_by(matrix: Any, element: str) -> list[Any]:
+    """The element's own cells plus those of the flows it carries stamps for."""
+    from model_wtf.compliance.threats import _stamp_holder
+
+    out = []
+    for cell in matrix.cells:
+        holder, _ = _stamp_holder(matrix.elements[cell.element], matrix.elements)
+        if holder.id == element:
+            out.append(cell)
+    return out
+
+
 def _other_end(flow_id: str, holder: str) -> str:
     """The end of a flow ``a->b`` that is not ``holder``."""
     source, _, sink = flow_id.partition("->")
@@ -1723,6 +1800,8 @@ def _touchpoint_review(tp: Touchpoint, files_of: set[str]) -> str:
     for key, stamp in sorted(tp.stamps.root.items()):
         if isinstance(stamp, Missing):
             bits.append(f"  threat {key}: !missing {stamp.note or ''}")
+        elif isinstance(stamp, Finding):
+            bits.append(f"  threat {key}: missing [{stamp.severity}] {stamp.missing}")
         else:
             bits.append(
                 f"  threat {key}: {stamp.status} — {stamp.note or ''}".rstrip(" —")

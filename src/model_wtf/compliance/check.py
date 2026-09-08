@@ -23,8 +23,10 @@ from model_wtf.compliance.report import (
 )
 from model_wtf.compliance.review import LOCK_FILE, Lock, ReviewStatus
 from model_wtf.compliance.rights import AGENT_PREFIX, check_rights, is_agent_note
+from model_wtf.compliance.stamps import Finding
 from model_wtf.compliance.threats import (
     CatalogueError,
+    Cell,
     Element,
     Matrix,
     Verdict,
@@ -191,24 +193,33 @@ def _check_threats(
         eid: (e.unit if e.unit in scopes else SHARED_SCOPE_ID)
         for eid, e in matrix.elements.items()
     }
-    for cell in matrix.missing():
+    for cell in sorted(matrix.missing(), key=_by_severity):
         element = matrix.elements[cell.element]
         note = cell.reason
         origin = "claimed" if is_agent_note(note) else "declared"
         if origin == "claimed":
             note = note.removeprefix(AGENT_PREFIX).strip()
+        finding = cell.stamp if isinstance(cell.stamp, Finding) else None
+        weight = ""
+        if finding is not None and finding.severity:
+            weight = f" [{finding.severity}: {finding.effect}"
+            if finding.degree:
+                weight += f"/{finding.degree}"
+            weight += f" by {', '.join(finding.actors) or '-'}]"
+        fid = matrix.finding_id(cell)
         diagnostics.append(
             Diagnostic(
                 Severity.WARNING,
                 "threat-missing",
-                f"{cell.element}: {cell.sid} {catalogue_title(matrix, cell.sid)} "
-                f"[{origin}]",
+                f"{fid + ' ' if fid else ''}{cell.element}: {cell.sid} "
+                f"{catalogue_title(matrix, cell.sid)}{weight} [{origin}]",
                 scopes_by_element[cell.element],
                 _element_path(element, scopes),
                 subject=f"{cell.element}#{cell.sid}",
                 note=note,
                 origin=origin,
-                hint=f"threats why {cell.element} {cell.sid}",
+                hint=f"threats why {fid or cell.element + ' ' + cell.sid}",
+                risk=finding.severity if finding else None,
             )
         )
     for unit in units:
@@ -239,6 +250,14 @@ def _check_threats(
                 items=tuple(sorted(f"{c.element}#{c.sid}" for c in cells)),
             )
         )
+
+
+_SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+
+def _by_severity(cell: Cell) -> tuple[int, str, str]:
+    rank = _SEVERITY_ORDER.get(cell.severity or "", 5)
+    return (rank, cell.element, cell.sid)
 
 
 def catalogue_title(matrix: Matrix, sid: str) -> str:

@@ -31,7 +31,22 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from model_wtf.compliance.stamps import Stamp, Stamps, read_stamps, write_stamps
+from model_wtf.compliance.findings import assign_ids
+from model_wtf.compliance.severity import (
+    Actor,
+    Assessment,
+    Degree,
+    Effect,
+    assess,
+    load_actors,
+)
+from model_wtf.compliance.stamps import (
+    Finding,
+    Stamp,
+    Stamps,
+    read_stamps,
+    write_stamps,
+)
 from model_wtf.compliance.threats_gen import (
     MAPPING_FILE,
     RULES_FILE,
@@ -39,7 +54,7 @@ from model_wtf.compliance.threats_gen import (
     builtin_threats_dir,
 )
 from model_wtf.compliance.touchpoints import Kind
-from model_wtf.compliance.yaml_io import Missing, load_yaml
+from model_wtf.compliance.yaml_io import Marker, Missing, load_yaml
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -104,6 +119,20 @@ class Treatment(BaseModel):
     topic: str | None = None
     element: list[ElementKind] | None = None
     note: str | None = None
+    effect: str | None = Field(
+        default=None,
+        description="disclosure | tampering | destruction | denial | escalation "
+        "| repudiation, or `ops` (from the touchpoint's ops); required unless never",
+    )
+
+    @model_validator(mode="after")
+    def _effect_when_reviewable(self) -> Treatment:
+        if self.never is None and self.effect is None:
+            msg = "a reviewable threat needs an `effect`"
+            raise ValueError(msg)
+        if self.effect is not None and self.effect != "ops":
+            Effect(self.effect)  # raises on an unknown value
+        return self
 
     @model_validator(mode="after")
     def _one_shape(self) -> Treatment:
@@ -295,8 +324,14 @@ class Cell:
     reason: str
     """The rule id that dismissed it, the `never` text, or the open topic."""
     topic: str | None = None
-    stamp: Stamp | Missing | None = None
+    stamp: Stamp | Finding | Missing | None = None
     """The stamp that closed (or flagged) it, when one applies."""
+
+    @property
+    def severity(self) -> str | None:
+        """The finding's bucket, when weighed."""
+        return self.stamp.severity if isinstance(self.stamp, Finding) else None
+
     stamp_key: str | None = None
     """``SID`` or ``SID@sink``: which entry of the element's block matched."""
 
@@ -309,6 +344,13 @@ class Matrix:
     cells: list[Cell]
     titles: dict[str, str] = field(default_factory=dict)
     """SID → threat title, for renderers without the catalogue at hand."""
+    ids: dict[str, str] = field(default_factory=dict)
+    """Finding key (``holder#SID[@sink]``) → ``F-0001`` from the register."""
+
+    def finding_id(self, cell: Cell) -> str | None:
+        """The stable id of a missing cell, if registered."""
+        holder, _ = _stamp_holder(self.elements[cell.element], self.elements)
+        return self.ids.get(f"{holder.id}#{cell.stamp_key or cell.sid}")
 
     def open(self) -> list[Cell]:
         """Cells an agent has to look at (open, or stamped on moved code)."""
@@ -489,20 +531,84 @@ def _touchpoint_files(tp: Touchpoint) -> list[Path]:
 # ---------------------------------------------------------------------------
 
 
-def build_matrix(ws: Workspace, catalogue: Catalogue | None = None) -> Matrix:
-    """Every element x applicable threat, decided."""
+def build_matrix(
+    ws: Workspace, catalogue: Catalogue | None = None, *, register: bool = True
+) -> Matrix:
+    """Every element x applicable threat, decided; findings given stable ids."""
     catalogue = catalogue or load_catalogue()
     elements = build_elements(ws)
     cells: list[Cell] = []
+    actors = load_actors(ws.shared)
     for element in elements.values():
         for sid in catalogue.for_element(element.kind):
             cell = decide(element, sid, catalogue, ws)
             if cell.verdict is Verdict.OPEN:
                 cell = apply_stamp(cell, element, elements)
+            if cell.verdict is Verdict.MISSING:
+                # Weigh every finding NOW, from the current matrix: the
+                # evidence is the reviewer's, the weight is ours and moves
+                # with the code (auth added, data reclassified). What the
+                # stamp recorded at write time is history, not the verdict;
+                # the reviewer's narrowing (effect/degree/actor) is kept.
+                cell = _weigh(cell, element, sid, catalogue, ws, actors)
             cells.append(cell)
-    return Matrix(
+    matrix = Matrix(
         elements, cells, {sid: t.title for sid, t in catalogue.threats.items()}
     )
+    # Ids are allocated here so every reader (findings, check, why, the
+    # swarm's narration) agrees; a read-only caller passes register=False.
+    matrix.ids = assign_ids(matrix, ws.shared, write=register)
+    return matrix
+
+
+def _weigh(
+    cell: Cell,
+    element: Element,
+    sid: str,
+    catalogue: Catalogue,
+    ws: Workspace,
+    actors: dict[str, Actor],
+) -> Cell:
+    declared = catalogue.mapping[sid].effect or "disclosure"
+    stamp = cell.stamp
+    previous = stamp if isinstance(stamp, Finding) else None
+    weighed = assess(
+        ws,
+        ws.knowledge,
+        actors,
+        element,
+        declared,
+        effect=Effect(previous.narrowed_effect)
+        if previous and previous.narrowed_effect
+        else None,
+        degree=Degree(previous.narrowed_degree)
+        if previous and previous.narrowed_degree
+        else None,
+        actor=previous.narrowed_actor if previous else None,
+    )
+    note = (
+        previous.missing
+        if previous
+        else (stamp.note if isinstance(stamp, Missing) else "")
+    )
+    finding = Finding(
+        missing=note or "",
+        effect=weighed.effect.value,
+        degree=weighed.degree.value if weighed.degree else None,
+        actors=list(weighed.actors),
+        data=list(weighed.items),
+        sensitivity=weighed.sensitivity,
+        impact=weighed.impact,
+        likelihood=weighed.likelihood,
+        severity=weighed.severity.value,
+        commit=previous.commit if previous else None,
+        fingerprint=previous.fingerprint if previous else None,
+        by=previous.by if previous else None,
+        narrowed_effect=previous.narrowed_effect if previous else None,
+        narrowed_degree=previous.narrowed_degree if previous else None,
+        narrowed_actor=previous.narrowed_actor if previous else None,
+    )
+    return replace(cell, stamp=finding)
 
 
 def stamps_of(
@@ -534,7 +640,9 @@ def apply_stamp(cell: Cell, element: Element, elements: dict[str, Element]) -> C
     if found is None:
         return cell
     key, stamp = found
-    if isinstance(stamp, Missing):
+    if isinstance(stamp, Missing | Finding):
+        # A finding on moved code is still a finding (the gap does not close
+        # because the code changed); it is re-weighed by the reviewer later.
         return replace(
             cell,
             verdict=Verdict.MISSING,
@@ -635,10 +743,32 @@ def _fires(when: RuleWhen, element: Element, ws: Workspace) -> bool:  # noqa: C9
         return False
     if when.flow == "not_personal" and any(r.pii for r in element.items):
         return False
+    if when.flow == "declared_transfer" and not _safeguarded_transfer(element, ws):
+        return False
     return not (
         when.flow == "no_credentials"
         and any(r.category == "credentials" for r in element.items)
     )
+
+
+def _safeguarded_transfer(element: Element, ws: Workspace) -> bool:
+    """A flow to a party whose country is adequate or covered by a safeguard."""
+    if element.kind is not ElementKind.FLOW or not (element.sink or "").startswith(
+        "party:"
+    ):
+        return False
+    party = ws.parties.get(element.sink.removeprefix("party:"))  # type: ignore[union-attr]
+    if party is None:
+        return False
+    country = party.country if isinstance(party.country, str) else None
+    if country is None:
+        return False
+    if country.upper() in ws.knowledge.adequacy:
+        return True
+    safeguard = getattr(party, "safeguard", None)
+    if safeguard is None or isinstance(safeguard, Marker):
+        return False
+    return not (safeguard == "dpf" and not getattr(party, "dpf_certified", False))
 
 
 def _no_request(element: Element) -> bool:
@@ -746,7 +876,7 @@ class StampError(ValueError):
     """The stamp cannot be written as asked."""
 
 
-def stamp_cell(
+def stamp_cell(  # noqa: C901 - one validation per refusal, one knob per narrowing
     matrix: Matrix,
     units: dict[str, Unit],
     shared: Path,
@@ -758,13 +888,19 @@ def stamp_cell(
     missing: str | None = None,
     by: str = "human",
     commit: str | None = None,
-) -> Path:
-    """Write one stamp on the element's YAML file; return the file.
+    ws: Workspace | None = None,
+    effect: str | None = None,
+    degree: str | None = None,
+    actor: str | None = None,
+) -> tuple[Path, str, Stamp | Finding | Missing]:
+    """Write one stamp on the element's YAML file; return ``(file, key, stamp)``.
 
     ``status`` (mitigated / accepted / n/a) closes the cell; ``missing``
-    instead records a finding. A flow is stamped on its source with the
-    sink as qualifier (``SID@sink``). Refused on a cell no rule left open
-    (nothing to stamp) or on an element with no file of its own.
+    instead records a finding, weighed (:mod:`severity`) when ``ws`` is
+    given — ``effect``/``degree``/``actor`` let the reviewer narrow that
+    assessment. A flow is stamped on its source with the sink as qualifier
+    (``SID@sink``). Refused on a cell no rule left open (nothing to stamp)
+    or on an element with no file of its own.
     """
     element = matrix.elements.get(element_id)
     if element is None:
@@ -805,12 +941,33 @@ def stamp_cell(
     stamps = read_stamps(path)
     key = f"{sid}@{sink}" if sink else sid
     _, fingerprint, _ = stamps_of(holder, matrix.elements)
-    value: Stamp | Missing
+    value: Stamp | Missing | Finding
     if missing is not None:
         text = missing.strip()
         if by == "agent" and not text.startswith("[agent]"):
             text = f"[agent] {text}"
         value = Missing(text)
+        if ws is not None:
+            weighed = weigh(
+                ws, matrix, element, sid, effect=effect, degree=degree, actor=actor
+            )
+            value = Finding(
+                missing=text,
+                effect=weighed.effect.value,
+                degree=weighed.degree.value if weighed.degree else None,
+                actors=list(weighed.actors),
+                data=list(weighed.items),
+                sensitivity=weighed.sensitivity,
+                impact=weighed.impact,
+                likelihood=weighed.likelihood,
+                severity=weighed.severity.value,
+                commit=commit,
+                fingerprint=fingerprint or None,
+                by=by,  # type: ignore[arg-type]
+                narrowed_effect=effect,
+                narrowed_degree=degree,
+                narrowed_actor=actor,
+            )
     else:
         value = Stamp(
             status=status,  # type: ignore[arg-type]
@@ -821,7 +978,12 @@ def stamp_cell(
         )
     stamps.root[key] = value
     write_stamps(path, stamps)
-    return path
+    if missing is not None and ws is not None:
+        # Register the finding now: the caller's matrix predates the stamp.
+        fresh = replace(cell, verdict=Verdict.MISSING, stamp_key=key, stamp=value)
+        matrix.cells.append(fresh)
+        matrix.ids = assign_ids(matrix, ws.shared)
+    return path, key, value
 
 
 def _flow_holder(
@@ -915,3 +1077,29 @@ def work_by_topic(matrix: Matrix) -> dict[str, dict[str, list[Cell]]]:
             cell
         )
     return {t: dict(sorted(v.items())) for t, v in sorted(out.items())}
+
+
+def weigh(
+    ws: Workspace,
+    matrix: Matrix,
+    element: Element,
+    sid: str,
+    *,
+    effect: str | None = None,
+    degree: str | None = None,
+    actor: str | None = None,
+    catalogue: Catalogue | None = None,
+) -> Assessment:
+    """The severity assessment of a ``!missing`` on ``element``/``sid``."""
+    catalogue = catalogue or load_catalogue()
+    declared = catalogue.mapping[sid].effect or "disclosure"
+    return assess(
+        ws,
+        ws.knowledge,
+        load_actors(ws.shared),
+        element,
+        declared,
+        effect=Effect(effect) if effect else None,
+        degree=Degree(degree) if degree else None,
+        actor=actor,
+    )
