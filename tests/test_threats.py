@@ -653,6 +653,31 @@ def test_findings_lists_missing_stamps_most_severe_first(repo: Path) -> None:
     assert "DO01" not in out.output
 
 
+def test_findings_on_one_flow_print_the_flow_and_keep_working(repo: Path) -> None:
+    """A `!missing` keyed `SID@sink` is reported on the holder with the flow
+    named; every later lookup (ids, why, table) still resolves the holder."""
+    _tp(repo, "checkout", f"scope: subject\ndata:\n  - {EMAIL}: create\n")
+    out = _stamp(
+        repo, "api:checkout", "DS06@api:db-default", "--missing", "row visible to all"
+    )
+    assert out.exit_code == 0, out.output  # type: ignore[attr-defined]
+    base = ["--root", str(repo), "compliance", "threats"]
+    runner = CliRunner()
+    table = runner.invoke(cli, [*base, "findings"])
+    assert table.exit_code == 0, table.output
+    assert "api:checkout → api:db-default" in table.output.replace("\n", "")
+    assert "F-0001" in table.output
+    as_json = runner.invoke(cli, [*base, "findings", "--format", "json"])
+    assert as_json.exit_code == 0, as_json.output
+    rows = json.loads(as_json.output)
+    assert rows[0]["ids"] == ["F-0001"]
+    assert rows[0]["element"] == "api:checkout → api:db-default"
+    assert rows[0]["sid"] == "DS06"
+    why = runner.invoke(cli, [*base, "why", "F-0001"])
+    assert why.exit_code == 0, why.output
+    assert "row visible to all" in why.output
+
+
 def test_findings_get_stable_ids_that_survive_fixes_and_returns(repo: Path) -> None:
     from model_wtf.compliance.findings import REGISTER_FILE, load_register, resolve
 
