@@ -11,7 +11,8 @@ sides and prints three lists: **introduced** (yours to fix), **fixed**
 (findings your change closed), **pre-existing** (not yours). Exit 0 when
 nothing is introduced, even if the repo has open findings of its own.
 
-With `OPENROUTER_API_KEY` in the environment it also runs the challenger:
+With `OPENROUTER_API_KEY` (or `SCALEWAY_SECRET_KEY`) in the environment it
+also runs the challenger:
 an agent that reads your diff and re-opens the declarations and threat
 stamps it undermines. Each re-opening becomes an introduced line. Without
 the key, `--no-challenge` is implied and you get the deterministic part

@@ -141,8 +141,12 @@ jobs:
                   ref: ${{ github.event.pull_request.head.ref }}
             - uses: ModelW/wtf@v1
               with:
-                  # Optional: enables the challenger agent.
+                  # Optional: enables the challenger agent, on OpenRouter...
                   openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
+                  # ...or on Scaleway (a dedicated deployment when the
+                  # endpoint is given, the serverless Generative APIs otherwise).
+                  # scaleway-secret-key: ${{ secrets.SCALEWAY_SECRET_KEY }}
+                  # scaleway-inference-endpoint: ${{ vars.SCALEWAY_INFERENCE_ENDPOINT }}
 """
 
 

@@ -26,6 +26,11 @@ jobs:
                   openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}  # optional
 ```
 
+The challenger can run on Scaleway instead: pass `scaleway-secret-key` (an
+IAM secret key), and `scaleway-inference-endpoint` to use a dedicated
+inference deployment rather than the serverless Generative APIs. `model`
+overrides the `provider/model` the credentials imply.
+
 The action (`action.yml` at the root of this repository, `v1` tag) installs
 uv and model-wtf, runs `uv sync --frozen` / `pnpm install` in every folder
 holding a lockfile so introspection works, then runs the gate. Inputs:

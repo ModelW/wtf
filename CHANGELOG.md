@@ -3,6 +3,15 @@
 One section per released version, newest first. The release workflow puts
 the matching section on the GitHub release.
 
+## 1.1.0
+
+- Scaleway as a model provider next to OpenRouter: `--model scaleway/<model>`
+  for the serverless Generative APIs, `--model scaleway-dedicated/<model>`
+  for a dedicated inference deployment of your own. Credentials come from
+  `SCALEWAY_SECRET_KEY` and, for a deployment, `SCALEWAY_INFERENCE_ENDPOINT`;
+  without `--model` the deployment is asked what it serves. The action takes
+  `scaleway-secret-key`, `scaleway-inference-endpoint` and `model`.
+
 ## 1.0.0
 
 The first release. `compliance init` scaffolds a repository; the four

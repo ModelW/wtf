@@ -40,11 +40,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Mapping
 
 DEFAULT_MODEL = "openrouter/openrouter/auto"
 MIN_VERSION = (1, 18, 0)
-API_KEY_ENV = "OPENROUTER_API_KEY"
 ENV_WHITELIST = (
     "PATH",
     "LANG",
@@ -67,6 +66,243 @@ class BudgetExceeded(Exception):
 
 
 @dataclass(frozen=True)
+class Provider:
+    """A model provider OpenCode may talk to, and how we hand it its key.
+
+    Parameters
+    ----------
+    id
+        The OpenCode provider id: the prefix of ``--model provider/model``
+        and the key under ``provider`` in ``opencode.json``.
+    name
+        How the provider is called in messages to humans.
+    api_key_env
+        The environment variable holding the credential. It is the only
+        variable of the developer's that reaches the OpenCode subprocess.
+    key_url
+        Where to find or manage keys (for error messages).
+    base_url_env
+        For self-hosted / dedicated endpoints: the variable holding the
+        deployment's URL (``https://host``, with or without ``/v1``).
+        Required when set.
+    key_check_path
+        Path, relative to the base URL, that a ``GET`` with the bearer key
+        answers 2xx to when the key is valid. Empty disables the preflight.
+    key_check_url
+        Absolute URL for the same check, when the provider has no base URL
+        of ours (hosted routers).
+    npm
+        The AI SDK package OpenCode loads for a provider it does not know.
+    context
+        Context window declared for models OpenCode has no catalogue entry
+        for (dedicated deployments serve arbitrary models). ``0`` lets
+        OpenCode's default apply.
+    """
+
+    id: str
+    name: str
+    api_key_env: str
+    key_url: str = ""
+    base_url_env: str = ""
+    key_check_path: str = ""
+    key_check_url: str = ""
+    npm: str = ""
+    context: int = 0
+
+    @property
+    def dedicated(self) -> bool:
+        """The endpoint is the user's own (URL from the environment)."""
+        return bool(self.base_url_env)
+
+    def base_url(self, env: Mapping[str, str]) -> str:
+        """The OpenAI-compatible base URL (``.../v1``) from ``env``.
+
+        Empty for hosted providers, or when the variable is unset. Scaleway
+        shows the deployment's endpoint without the ``/v1`` the API lives
+        under; either form is accepted.
+        """
+        if not self.dedicated:
+            return ""
+        url = env.get(self.base_url_env, "").strip().rstrip("/")
+        if not url:
+            return ""
+        return url if url.endswith("/v1") else f"{url}/v1"
+
+    def check_url(self, env: Mapping[str, str]) -> str:
+        """Where the key-validity preflight goes; empty when there is none."""
+        if self.key_check_url:
+            return self.key_check_url
+        base = self.base_url(env)
+        if base and self.key_check_path:
+            return f"{base}/{self.key_check_path.lstrip('/')}"
+        return ""
+
+    def config(self, model_id: str) -> dict[str, Any]:
+        """The ``provider.<id>`` block of ``opencode.json``.
+
+        Neither the key nor the URL is inlined: OpenCode reads them from the
+        sandbox environment through ``{env:...}`` (:func:`get_opencode` puts
+        the normalised URL there). Dedicated providers also get the model
+        declared, since OpenCode's catalogue cannot know what a private
+        deployment serves.
+        """
+        options: dict[str, Any] = {"apiKey": f"{{env:{self.api_key_env}}}"}
+        block: dict[str, Any] = {"options": options}
+        if self.dedicated:
+            options["baseURL"] = f"{{env:{self.base_url_env}}}"
+            block["npm"] = self.npm or "@ai-sdk/openai-compatible"
+            block["name"] = self.name
+            model: dict[str, Any] = {"name": model_id, "tool_call": True}
+            if self.context:
+                model["limit"] = {"context": self.context, "output": 0}
+            block["models"] = {model_id: model}
+        return block
+
+    def missing(self, env: Mapping[str, str]) -> str | None:
+        """Why this provider cannot run with ``env``; ``None`` when it can."""
+        if not env.get(self.api_key_env):
+            return f"{self.api_key_env} is not set; it is the {self.name} API key"
+        if self.dedicated and not self.base_url(env):
+            return (
+                f"{self.base_url_env} is not set; it is the {self.name} endpoint "
+                "(https://<deployment>.ifr.<region>.scaleway.com)"
+            )
+        return None
+
+    def secrets(self, env: Mapping[str, str]) -> dict[str, str]:
+        """The variables to hand to the OpenCode subprocess, normalised."""
+        out = {self.api_key_env: env.get(self.api_key_env, "")}
+        if self.dedicated:
+            out[self.base_url_env] = self.base_url(env)
+        return out
+
+
+OPENROUTER = Provider(
+    id="openrouter",
+    name="OpenRouter",
+    api_key_env="OPENROUTER_API_KEY",
+    key_url="https://openrouter.ai/settings/keys",
+    key_check_url="https://openrouter.ai/api/v1/auth/key",
+)
+SCALEWAY = Provider(
+    id="scaleway",
+    name="Scaleway Generative APIs",
+    api_key_env="SCALEWAY_SECRET_KEY",
+    key_url="https://console.scaleway.com/iam/api-keys",
+    key_check_url="https://api.scaleway.ai/v1/models",
+)
+SCALEWAY_DEDICATED = Provider(
+    id="scaleway-dedicated",
+    name="Scaleway dedicated inference",
+    api_key_env="SCALEWAY_SECRET_KEY",
+    key_url="https://console.scaleway.com/iam/api-keys",
+    base_url_env="SCALEWAY_INFERENCE_ENDPOINT",
+    key_check_path="models",
+    npm="@ai-sdk/openai-compatible",
+    context=128_000,
+)
+PROVIDERS: dict[str, Provider] = {
+    p.id: p for p in (OPENROUTER, SCALEWAY, SCALEWAY_DEDICATED)
+}
+"""By OpenCode id. ``scaleway`` is OpenCode's built-in (serverless, catalogued
+models); ``scaleway-dedicated`` is a deployment of the user's own, reached
+through ``SCALEWAY_INFERENCE_ENDPOINT`` and serving whatever ``--model``
+names (or what ``/v1/models`` reports, when ``--model`` is not given)."""
+
+SCALEWAY_DEFAULT_MODEL = "scaleway/gpt-oss-120b"
+"""A tool-calling model in OpenCode's Scaleway catalogue."""
+
+
+def split_model(model: str) -> tuple[str, str]:
+    """``provider/model`` → ``(provider, model)``; the model may hold slashes."""
+    provider, _, model_id = model.partition("/")
+    return provider, model_id
+
+
+def provider_for(model: str) -> Provider:
+    """The provider a ``provider/model`` string names.
+
+    Raises
+    ------
+    OpenCodeUnavailable
+        Unknown provider prefix, or no model part.
+    """
+    provider_id, model_id = split_model(model)
+    if not provider_id or not model_id:
+        msg = f"--model must be provider/model, got {model!r}"
+        raise OpenCodeUnavailable(msg)
+    try:
+        return PROVIDERS[provider_id]
+    except KeyError:
+        known = ", ".join(sorted(PROVIDERS))
+        msg = f"unknown provider {provider_id!r} in --model {model!r}; one of {known}"
+        raise OpenCodeUnavailable(msg) from None
+
+
+def can_run(model: str, env: Mapping[str, str] | None = None) -> bool:
+    """Whether ``env`` holds what ``model``'s provider needs (no network)."""
+    env = env if env is not None else os.environ
+    try:
+        return provider_for(model).missing(env) is None
+    except OpenCodeUnavailable:
+        return False
+
+
+def default_model(
+    env: Mapping[str, str] | None = None,
+    *,
+    discover: Callable[[Provider, Mapping[str, str]], str | None] | None = None,
+) -> str:
+    """The model when the CLI is not told one: follow the credentials set.
+
+    OpenRouter's router when its key is there (or none is). With Scaleway
+    credentials only: the dedicated deployment's served model when
+    ``SCALEWAY_INFERENCE_ENDPOINT`` is set and answers (one ``GET
+    /v1/models``, ``discover`` in tests), the hosted default otherwise.
+    """
+    env = env if env is not None else os.environ
+    if env.get(OPENROUTER.api_key_env) or not env.get(SCALEWAY.api_key_env):
+        return DEFAULT_MODEL
+    if SCALEWAY_DEDICATED.missing(env) is None:
+        served = (discover or served_model)(SCALEWAY_DEDICATED, env)
+        if served:
+            return f"{SCALEWAY_DEDICATED.id}/{served}"
+    return SCALEWAY_DEFAULT_MODEL
+
+
+def served_model(
+    provider: Provider, env: Mapping[str, str], *, timeout: float = 10.0
+) -> str | None:
+    """The first model id a dedicated endpoint's ``/v1/models`` lists.
+
+    ``None`` on any trouble (network, auth, unexpected body): the caller
+    falls back and the real error surfaces at preflight.
+    """
+    import urllib.error
+    import urllib.request
+
+    url = provider.check_url(env)
+    key = env.get(provider.api_key_env, "")
+    if not url.startswith("https://") or not key:
+        return None
+    request = urllib.request.Request(  # noqa: S310 - https only, checked above
+        url, headers={"Authorization": f"Bearer {key}"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+            body = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return None
+    data = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(data, list):
+        return None
+    for entry in data:
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str):
+            return str(entry["id"])
+    return None
+
+
+@dataclass(frozen=True)
 class ProviderError:
     """An error the model provider returned during a task."""
 
@@ -79,18 +315,19 @@ class ProviderError:
         """Retrying the same call cannot help (auth, permissions, billing)."""
         return self.status in (401, 402, 403)
 
-    def explain(self, api_key_env: str) -> str:
+    def explain(self, provider: Provider) -> str:
         """One sentence a human can act on."""
+        name = provider.name
         if self.status == 401:
             return (
-                f"OpenRouter rejected the API key (401 {self.message}). "
-                f"Check {api_key_env}: it must be a valid OpenRouter key."
+                f"{name} rejected the API key (401 {self.message}). "
+                f"Check {provider.api_key_env}: it must be a valid {name} key."
             )
         if self.status == 402:
-            return f"OpenRouter refused for billing reasons (402 {self.message})."
+            return f"{name} refused for billing reasons (402 {self.message})."
         if self.status == 403:
             return (
-                f"OpenRouter refused access (403 {self.message}); the key may not be "
+                f"{name} refused access (403 {self.message}); the key may not be "
                 "allowed to use this model."
             )
         status = f"{self.status} " if self.status else ""
@@ -133,7 +370,8 @@ class Sandbox:
         MCP servers by name. Their tools are allowed for every agent unless
         an agent's ``permission`` says otherwise.
     model
-        ``provider/model``; the OpenRouter pareto router by default.
+        ``provider/model``; the OpenRouter pareto router by default. The
+        prefix picks the :class:`Provider` (see :data:`PROVIDERS`).
     max_tokens
         Soft budget for the whole instance: ``run_task`` refuses to start
         once the total is past it (a running task is never interrupted).
@@ -146,8 +384,15 @@ class Sandbox:
     max_tokens: int | None = None
     subagent_depth: int = 1
 
+    @property
+    def provider(self) -> Provider:
+        """The provider ``model`` names."""
+        return provider_for(self.model)
+
     def to_config(self) -> dict[str, Any]:
-        """Render the ``opencode.json`` document."""
+        """Render the ``opencode.json`` document (no secret values in it)."""
+        provider = self.provider
+        _, model_id = split_model(self.model)
         external: dict[str, str] = {"*": "deny"}
         external.update(
             {f"{p.resolve()}/**": "allow" for p in sorted(set(self.readable))}
@@ -202,10 +447,8 @@ class Sandbox:
             "share": "disabled",
             "snapshot": False,
             "instructions": [],
-            "enabled_providers": ["openrouter"],
-            "provider": {
-                "openrouter": {"options": {"apiKey": f"{{env:{API_KEY_ENV}}}"}}
-            },
+            "enabled_providers": [provider.id],
+            "provider": {provider.id: provider.config(model_id)},
             "permission": permission,
             "mcp": {
                 name: {
@@ -272,8 +515,13 @@ class OpenCode:
     """One sandboxed instance; create it through :func:`get_opencode`."""
 
     def __init__(
-        self, sandbox: Sandbox, binary: str, scratch: Path, api_key: str
+        self,
+        sandbox: Sandbox,
+        binary: str,
+        scratch: Path,
+        secrets: Mapping[str, str],
     ) -> None:
+        """``secrets`` are the provider's variables (key, URL) to pass through."""
         self.sandbox = sandbox
         self.binary = binary
         self.scratch = scratch
@@ -283,7 +531,7 @@ class OpenCode:
         )
         self.workdir = scratch / "work"
         self.workdir.mkdir()
-        self.env = self._env(api_key)
+        self.env = self._env(secrets)
         self._tokens = 0
         self._cost = 0.0
         self._models: set[str] = set()
@@ -391,7 +639,7 @@ class OpenCode:
             self.tasks.append(result)
         return result
 
-    def _env(self, api_key: str) -> dict[str, str]:
+    def _env(self, secrets: Mapping[str, str]) -> dict[str, str]:
         home = self.scratch / "home"
         for sub in (".config", ".local/share", ".cache", ".local/state"):
             (home / sub).mkdir(parents=True, exist_ok=True)
@@ -404,7 +652,7 @@ class OpenCode:
                 "XDG_CACHE_HOME": str(home / ".cache"),
                 "XDG_STATE_HOME": str(home / ".local/state"),
                 "OPENCODE_CONFIG": str(self.config_path),
-                API_KEY_ENV: api_key,
+                **secrets,
                 "CI": "1",
                 "NO_COLOR": "1",
             }
@@ -419,23 +667,26 @@ def get_opencode(sandbox: Sandbox, *, keep_scratch: bool = False) -> Iterator[Op
     Raises
     ------
     OpenCodeUnavailable
-        ``opencode`` missing/too old, or ``OPENROUTER_API_KEY`` unset.
+        ``opencode`` missing/too old, the provider unknown, or its key (and
+        URL, for a dedicated endpoint) unset.
     """
-    binary = preflight()
+    provider = sandbox.provider
+    binary = preflight(provider=provider)
     scratch = Path(tempfile.mkdtemp(prefix="model-wtf-opencode-"))
     try:
-        yield OpenCode(sandbox, binary, scratch, os.environ[API_KEY_ENV])
+        yield OpenCode(sandbox, binary, scratch, provider.secrets(os.environ))
     finally:
         if not keep_scratch:
             shutil.rmtree(scratch, ignore_errors=True)
 
 
 def preflight(
-    env: dict[str, str] | None = None,
+    env: Mapping[str, str] | None = None,
     *,
-    key_check: Callable[[str], None] | None = None,
+    provider: Provider = OPENROUTER,
+    key_check: Callable[[str, Provider, Mapping[str, str]], None] | None = None,
 ) -> str:
-    """Check the binary and the API key; return the binary's path.
+    """Check the binary and the provider's credentials; return the binary.
 
     ``key_check`` defaults to :func:`check_api_key` (one HTTPS call); tests
     pass a stub.
@@ -451,21 +702,24 @@ def preflight(
         wanted = ".".join(map(str, MIN_VERSION))
         msg = f"opencode {found} is too old; {wanted} or newer is required"
         raise OpenCodeUnavailable(msg)
-    key = env.get(API_KEY_ENV)
-    if not key:
-        msg = f"{API_KEY_ENV} is not set; model-wtf talks to OpenRouter only"
-        raise OpenCodeUnavailable(msg)
-    (key_check or check_api_key)(key)
+    missing = provider.missing(env)
+    if missing:
+        raise OpenCodeUnavailable(missing)
+    (key_check or check_api_key)(env[provider.api_key_env], provider, env)
     return binary
 
 
-KEY_CHECK_URL = "https://openrouter.ai/api/v1/auth/key"
-
-
-def check_api_key(key: str, *, timeout: float = 10.0) -> None:
-    """Ask OpenRouter whether ``key`` is valid before any round is spent.
+def check_api_key(
+    key: str,
+    provider: Provider = OPENROUTER,
+    env: Mapping[str, str] | None = None,
+    *,
+    timeout: float = 10.0,
+) -> None:
+    """Ask the provider whether ``key`` is valid before any round is spent.
 
     Network trouble is not a verdict: only an explicit 401/403 raises.
+    Providers without a check URL are trusted.
 
     Raises
     ------
@@ -475,18 +729,19 @@ def check_api_key(key: str, *, timeout: float = 10.0) -> None:
     import urllib.error
     import urllib.request
 
-    request = urllib.request.Request(
-        KEY_CHECK_URL, headers={"Authorization": f"Bearer {key}"}
+    url = provider.check_url(env if env is not None else os.environ)
+    if not url.startswith("https://"):
+        return
+    request = urllib.request.Request(  # noqa: S310 - https only, checked above
+        url, headers={"Authorization": f"Bearer {key}"}
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout):  # noqa: S310
             return
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
-            msg = (
-                f"OpenRouter rejected {API_KEY_ENV} ({exc.code}); "
-                "check the key at https://openrouter.ai/settings/keys"
-            )
+            where = f"; check the key at {provider.key_url}" if provider.key_url else ""
+            msg = f"{provider.name} rejected {provider.api_key_env} ({exc.code}){where}"
             raise OpenCodeUnavailable(msg) from exc
     except (urllib.error.URLError, TimeoutError, OSError):
         return

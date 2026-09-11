@@ -39,8 +39,10 @@ row to another store.
 uv run model-wtf compliance data auto-review [--unit ID] [--base REF] [--batch 8] [--workers 16] [--max-rounds 20] [--max-tokens N] [--model provider/model] [--dry-run]
 ```
 
-Runs an OpenCode agent on OpenRouter (`openrouter/openrouter/auto` by default;
-`OPENROUTER_API_KEY` required) until nothing is pending. The instance is
+Runs an OpenCode agent (`openrouter/openrouter/auto` with `OPENROUTER_API_KEY`
+by default; Scaleway's serverless APIs or a dedicated deployment with
+`SCALEWAY_SECRET_KEY`, see [the swarm guide](../guides/swarm.md#model-and-cost))
+until nothing is pending. The instance is
 sandboxed (`model_wtf/opencode.py`): throwaway `HOME`/XDG tree, generated
 config via `OPENCODE_CONFIG`, `--pure`, whitelisted environment, deny-all
 permissions except read/glob/grep inside the repository and its interpreters'

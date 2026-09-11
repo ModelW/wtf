@@ -27,15 +27,24 @@ from model_wtf.compliance.mcp_server import (
 from model_wtf.compliance.report import Unit
 from model_wtf.compliance.review import Lock, ReviewStatus
 from model_wtf.opencode import (
+    OPENROUTER,
+    SCALEWAY,
+    SCALEWAY_DEDICATED,
     Agent,
     McpServer,
     OpenCodeUnavailable,
+    Provider,
     Sandbox,
+    can_run,
+    default_model,
     parse_events,
     preflight,
+    provider_for,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from conftest import MakeRepo
 
 FIXTURE = Path(__file__).parent / "fixtures" / "djproj"
@@ -296,7 +305,7 @@ def test_sandbox_config_is_airtight(tmp_path: Path) -> None:
 
 
 def test_preflight_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    accept = lambda _key: None  # noqa: E731
+    accept = lambda _key, _provider, _env: None  # noqa: E731
     with pytest.raises(OpenCodeUnavailable, match="not on PATH"):
         preflight({"PATH": str(tmp_path)}, key_check=accept)
 
@@ -308,7 +317,7 @@ def test_preflight_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     env = {"PATH": str(tmp_path), "OPENROUTER_API_KEY": "k"}
     assert preflight(env, key_check=accept) == str(fake)
 
-    def reject(_key: str) -> None:
+    def reject(_key: str, _provider: Provider, _env: Mapping[str, str]) -> None:
         msg = "OpenRouter rejected OPENROUTER_API_KEY (401)"
         raise OpenCodeUnavailable(msg)
 
@@ -323,6 +332,128 @@ def test_preflight_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
         preflight(
             {"PATH": str(old.parent), "OPENROUTER_API_KEY": "k"}, key_check=accept
         )
+
+
+def test_preflight_scaleway_providers(tmp_path: Path) -> None:
+    seen: list[tuple[str, str, str]] = []
+
+    def record(key: str, provider: Provider, env: Mapping[str, str]) -> None:
+        seen.append((key, provider.id, provider.check_url(env)))
+
+    fake = tmp_path / "opencode"
+    fake.write_text("#!/bin/sh\necho 1.18.29\n")
+    fake.chmod(0o755)
+    path = {"PATH": str(tmp_path)}
+
+    # The serverless APIs want the IAM secret key only.
+    with pytest.raises(OpenCodeUnavailable, match="SCALEWAY_SECRET_KEY"):
+        preflight(path, provider=SCALEWAY, key_check=record)
+    preflight({**path, "SCALEWAY_SECRET_KEY": "s"}, provider=SCALEWAY, key_check=record)
+    assert seen == [("s", "scaleway", "https://api.scaleway.ai/v1/models")]
+
+    # A dedicated deployment needs its URL too; the key check hits it.
+    with pytest.raises(OpenCodeUnavailable, match="SCALEWAY_INFERENCE_ENDPOINT"):
+        preflight(
+            {**path, "SCALEWAY_SECRET_KEY": "s"},
+            provider=SCALEWAY_DEDICATED,
+            key_check=record,
+        )
+    # The console shows the endpoint without /v1; both spellings work.
+    for endpoint in (
+        "https://abc.ifr.fr-par.scaleway.com",
+        "https://abc.ifr.fr-par.scaleway.com/",
+        "https://abc.ifr.fr-par.scaleway.com/v1/",
+    ):
+        env = {
+            **path,
+            "SCALEWAY_SECRET_KEY": "s",
+            "SCALEWAY_INFERENCE_ENDPOINT": endpoint,
+        }
+        preflight(env, provider=SCALEWAY_DEDICATED, key_check=record)
+        assert seen[-1] == (
+            "s",
+            "scaleway-dedicated",
+            "https://abc.ifr.fr-par.scaleway.com/v1/models",
+        )
+        # What the subprocess sees is the normalised base URL, nothing else.
+        assert SCALEWAY_DEDICATED.secrets(env) == {
+            "SCALEWAY_SECRET_KEY": "s",
+            "SCALEWAY_INFERENCE_ENDPOINT": "https://abc.ifr.fr-par.scaleway.com/v1",
+        }
+
+
+def test_sandbox_config_for_scaleway_dedicated(tmp_path: Path) -> None:
+    box = Sandbox(
+        readable=[tmp_path],
+        model="scaleway-dedicated/meta/llama-3.1-8b-instruct:fp8",
+        agents={"dispatcher": Agent("d", "prompt", mode="primary")},
+    )
+    assert box.provider is SCALEWAY_DEDICATED
+
+    cfg = box.to_config()
+
+    assert cfg["model"] == "scaleway-dedicated/meta/llama-3.1-8b-instruct:fp8"
+    assert cfg["enabled_providers"] == ["scaleway-dedicated"]
+    block = cfg["provider"]["scaleway-dedicated"]
+    assert block["npm"] == "@ai-sdk/openai-compatible"
+    assert block["options"] == {
+        "apiKey": "{env:SCALEWAY_SECRET_KEY}",
+        "baseURL": "{env:SCALEWAY_INFERENCE_ENDPOINT}",
+    }
+    # The served model is declared: OpenCode's catalogue cannot know it.
+    model = block["models"]["meta/llama-3.1-8b-instruct:fp8"]
+    assert model["tool_call"] is True
+    assert model["limit"]["context"] == 128_000
+
+    # The serverless provider is OpenCode's own: key only, catalogued models.
+    hosted = Sandbox(model="scaleway/gpt-oss-120b").to_config()
+    assert hosted["enabled_providers"] == ["scaleway"]
+    assert hosted["provider"]["scaleway"] == {
+        "options": {"apiKey": "{env:SCALEWAY_SECRET_KEY}"}
+    }
+
+
+def test_provider_selection_and_defaults() -> None:
+    assert provider_for("openrouter/openrouter/auto") is OPENROUTER
+    assert provider_for("scaleway/gpt-oss-120b") is SCALEWAY
+    assert provider_for("scaleway-dedicated/x:fp8") is SCALEWAY_DEDICATED
+    with pytest.raises(OpenCodeUnavailable, match="unknown provider 'mistral'"):
+        provider_for("mistral/large")
+    with pytest.raises(OpenCodeUnavailable, match="provider/model"):
+        provider_for("gpt-4")
+
+    # The default model follows whichever credentials are present.
+    never = lambda _p, _e: pytest.fail("no discovery expected")  # noqa: E731
+    assert default_model({}, discover=never) == "openrouter/openrouter/auto"
+    assert (
+        default_model({"OPENROUTER_API_KEY": "k"}, discover=never)
+        == "openrouter/openrouter/auto"
+    )
+    assert (
+        default_model({"SCALEWAY_SECRET_KEY": "s"}, discover=never)
+        == "scaleway/gpt-oss-120b"
+    )
+    both = {"OPENROUTER_API_KEY": "k", "SCALEWAY_SECRET_KEY": "s"}
+    assert default_model(both, discover=never) == "openrouter/openrouter/auto"
+    # A dedicated endpoint: ask it what it serves; fall back when it is mute.
+    dedicated = {"SCALEWAY_SECRET_KEY": "s", "SCALEWAY_INFERENCE_ENDPOINT": "https://h"}
+    assert (
+        default_model(dedicated, discover=lambda _p, _e: "deepseek-v4-flash-0731")
+        == "scaleway-dedicated/deepseek-v4-flash-0731"
+    )
+    assert default_model(dedicated, discover=lambda _p, _e: None) == (
+        "scaleway/gpt-oss-120b"
+    )
+
+    # ``can_run`` is the no-network "is the challenger possible" question.
+    assert can_run("scaleway/gpt-oss-120b", {"SCALEWAY_SECRET_KEY": "s"})
+    assert not can_run("scaleway-dedicated/m", {"SCALEWAY_SECRET_KEY": "s"})
+    assert can_run(
+        "scaleway-dedicated/m",
+        {"SCALEWAY_SECRET_KEY": "s", "SCALEWAY_INFERENCE_ENDPOINT": "https://h/v1"},
+    )
+    assert not can_run("openrouter/x", {"SCALEWAY_SECRET_KEY": "s"})
+    assert not can_run("nonsense", {"SCALEWAY_SECRET_KEY": "s"})
 
 
 def test_parse_events_digest() -> None:
@@ -466,7 +597,7 @@ def test_tools_review_json_contents(repo: Path) -> None:
 
 
 def test_provider_errors_are_parsed_and_explained() -> None:
-    from model_wtf.opencode import API_KEY_ENV, _event_error, parse_events
+    from model_wtf.opencode import _event_error, parse_events
 
     line = json.dumps(
         {
@@ -487,8 +618,10 @@ def test_provider_errors_are_parsed_and_explained() -> None:
     err = _event_error(line)
     assert err is not None
     assert (err.status, err.fatal) == (401, True)
-    assert API_KEY_ENV in err.explain(API_KEY_ENV)
-    assert "401" in err.explain(API_KEY_ENV)
+    assert "OPENROUTER_API_KEY" in err.explain(OPENROUTER)
+    assert "401" in err.explain(OPENROUTER)
+    assert "SCALEWAY_SECRET_KEY" in err.explain(SCALEWAY_DEDICATED)
+    assert "Scaleway dedicated inference" in err.explain(SCALEWAY_DEDICATED)
     assert _event_error('{"type": "text", "part": {"text": "no error here"}}') is None
     soft = _event_error(
         json.dumps(

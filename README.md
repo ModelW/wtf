@@ -24,7 +24,10 @@ the code and its declarations.
 ## How
 
 In the root of a Model W repository (a `snow.yml`, or a `.model-wtf.yml`),
-with an [OpenRouter](https://openrouter.ai) key in `OPENROUTER_API_KEY`:
+with an [OpenRouter](https://openrouter.ai) key in `OPENROUTER_API_KEY` — or
+a Scaleway IAM key in `SCALEWAY_SECRET_KEY`, plus `SCALEWAY_INFERENCE_ENDPOINT`
+for a [dedicated inference](https://www.scaleway.com/en/docs/generative-apis/how-to/create-deployment/)
+deployment of your own:
 
 ```bash
 uvx model-wtf compliance init                     # compliance/ folders, snow.yml blocks, CODEOWNERS, CI workflow

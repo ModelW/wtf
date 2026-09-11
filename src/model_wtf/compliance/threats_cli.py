@@ -15,7 +15,7 @@ from rich.text import Text
 
 from model_wtf.compliance.data_cli import load_context
 from model_wtf.compliance.exit_codes import ExitCode
-from model_wtf.compliance.options import ROOT_OPTION
+from model_wtf.compliance.options import ROOT_OPTION, model_option
 from model_wtf.compliance.review import git_head
 from model_wtf.compliance.severity import Degree, Effect
 from model_wtf.compliance.stamps import STAMP_STATUSES, Finding, Stamp
@@ -35,7 +35,6 @@ from model_wtf.compliance.threats import (
 from model_wtf.compliance.threats_gen import GenError, generate
 from model_wtf.compliance.workspace import SHARED_FOLDER, Workspace, load_workspace
 from model_wtf.introspect.runner import IntrospectionFailed
-from model_wtf.opencode import DEFAULT_MODEL
 
 _SEVERITY_STYLE = {
     "critical": "bold red",
@@ -752,9 +751,7 @@ def stamp_cmd(
     type=int,
     help="Items per worker per round.",
 )
-@click.option(
-    "--model", default=DEFAULT_MODEL, show_default=True, help="provider/model."
-)
+@model_option()
 @click.option(
     "--max-tokens",
     default=None,

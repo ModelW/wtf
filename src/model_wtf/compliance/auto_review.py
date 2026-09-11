@@ -46,7 +46,6 @@ from model_wtf.compliance.mcp_server import ACTIVITY_LOG_ENV, MODEL_ENV, model_o
 from model_wtf.compliance.review import Lock
 from model_wtf.compliance.workspace import load_workspace
 from model_wtf.opencode import (
-    API_KEY_ENV,
     DEFAULT_MODEL,
     Agent,
     Event,
@@ -1021,7 +1020,7 @@ def auto_review(
             last_message = result.final_text or result.stderr_tail
             fatal = result.fatal_error
             if fatal is not None:
-                aborted = fatal.explain(API_KEY_ENV)
+                aborted = fatal.explain(box.provider)
                 reporter.log(Text(aborted, style="bold red"))
                 return LoopResult(
                     rounds,

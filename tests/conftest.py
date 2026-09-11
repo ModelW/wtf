@@ -8,6 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from model_wtf.cli import cli
+from model_wtf.opencode import PROVIDERS
 
 
 @pytest.fixture(autouse=True)
@@ -15,6 +16,15 @@ def _no_introspection_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fixture repos are rewritten between calls within the same second;
     the on-disk cache would serve stale payloads."""
     monkeypatch.setenv("MODEL_WTF_NO_CACHE", "1")
+
+
+@pytest.fixture(autouse=True)
+def _no_provider_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The developer's own keys must not turn a unit test into an agent run."""
+    for provider in PROVIDERS.values():
+        monkeypatch.delenv(provider.api_key_env, raising=False)
+        if provider.base_url_env:
+            monkeypatch.delenv(provider.base_url_env, raising=False)
 
 
 if TYPE_CHECKING:

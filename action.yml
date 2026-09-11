@@ -35,9 +35,29 @@ inputs:
         default: "true"
     openrouter-api-key:
         description: >-
-            Enables the challenger: an agent that reads the diff and re-opens the
-            reviews it undermines (they then count as introduced). Never required
-            for the deterministic gate.
+            Enables the challenger on OpenRouter: an agent that reads the diff and
+            re-opens the reviews it undermines (they then count as introduced).
+            Never required for the deterministic gate.
+        required: false
+        default: ""
+    scaleway-secret-key:
+        description: >-
+            Alternative to openrouter-api-key: a Scaleway IAM secret key. Runs the
+            challenger on Scaleway Generative APIs, or on the dedicated deployment
+            named by scaleway-inference-endpoint.
+        required: false
+        default: ""
+    scaleway-inference-endpoint:
+        description: >-
+            With scaleway-secret-key: the URL of a dedicated inference deployment
+            (https://<id>.ifr.<region>.scaleway.com). The challenger uses the
+            model it serves.
+        required: false
+        default: ""
+    model:
+        description: >-
+            provider/model for the challenger. Defaults to the provider whose
+            credentials are given (see `model-wtf compliance ghate --help`).
         required: false
         default: ""
     commit-challenges:
@@ -102,7 +122,7 @@ runs:
               done
 
         - name: Install opencode (challenger)
-          if: inputs.openrouter-api-key != ''
+          if: inputs.openrouter-api-key != '' || inputs.scaleway-secret-key != ''
           shell: bash
           run: |
               set -euo pipefail
@@ -118,6 +138,8 @@ runs:
           shell: bash
           env:
               OPENROUTER_API_KEY: ${{ inputs.openrouter-api-key }}
+              SCALEWAY_SECRET_KEY: ${{ inputs.scaleway-secret-key }}
+              SCALEWAY_INFERENCE_ENDPOINT: ${{ inputs.scaleway-inference-endpoint }}
               # The challenger only ever sees the model-wtf sandbox environment;
               # GitHub's token is not exported to this step at all.
           run: |
@@ -126,7 +148,8 @@ runs:
               args=()
               [ -n "${{ inputs.merge-into }}" ] && args+=(--merge-into "${{ inputs.merge-into }}")
               [ "${{ inputs.fail-on-existing }}" = "true" ] && args+=(--fail-on-existing)
-              if [ -n "$OPENROUTER_API_KEY" ]; then
+              [ -n "${{ inputs.model }}" ] && args+=(--model "${{ inputs.model }}")
+              if [ -n "$OPENROUTER_API_KEY" ] || [ -n "$SCALEWAY_SECRET_KEY" ]; then
                   args+=(--challenge)
                   [ "${{ inputs.commit-challenges }}" = "true" ] && args+=(--commit-challenges)
               else
@@ -139,7 +162,7 @@ runs:
 
         - name: Push challenges
           if: >-
-              always() && inputs.openrouter-api-key != '' &&
+              always() && (inputs.openrouter-api-key != '' || inputs.scaleway-secret-key != '') &&
               inputs.commit-challenges == 'true' && github.event_name == 'pull_request' &&
               github.event.pull_request.head.repo.full_name == github.repository
           shell: bash

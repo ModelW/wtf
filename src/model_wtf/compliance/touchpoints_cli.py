@@ -20,13 +20,13 @@ from model_wtf.compliance.activities import (
     add_touchpoints,
     write_activity,
 )
-from model_wtf.compliance.auto_review import DEFAULT_MODEL, TOUCHPOINTS_TARGET
+from model_wtf.compliance.auto_review import TOUCHPOINTS_TARGET
 from model_wtf.compliance.data import parse_full_id
 from model_wtf.compliance.data_cli import data, load_context, run_auto_review
 from model_wtf.compliance.declarations import load_declarations
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.ops import Op, OpError, OpSpec, describe, parse_ops
-from model_wtf.compliance.options import ROOT_OPTION
+from model_wtf.compliance.options import ROOT_OPTION, model_option
 from model_wtf.compliance.report import Severity
 from model_wtf.compliance.rights import ItemRights, RightStatus, rights_of
 from model_wtf.compliance.touchpoints import Kind, Scope, Transfer, write_manifest
@@ -417,9 +417,7 @@ def tp_set_data(
 @click.option(
     "--batch", default=8, show_default=True, type=int, help="Touchpoints per round."
 )
-@click.option(
-    "--model", default=DEFAULT_MODEL, show_default=True, help="provider/model."
-)
+@model_option()
 @click.option(
     "--max-tokens",
     default=None,

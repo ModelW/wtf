@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from collections.abc import Callable  # noqa: TC003 - used at runtime by click
 from pathlib import Path  # noqa: TC003 - click needs it at runtime
@@ -32,7 +31,7 @@ from model_wtf.compliance.init_cmd import (
     run_init,
 )
 from model_wtf.compliance.knowledge import load_knowledge
-from model_wtf.compliance.options import ROOT_OPTION, resolve_root
+from model_wtf.compliance.options import ROOT_OPTION, model_option, resolve_root
 from model_wtf.compliance.render import (
     render_gate_github,
     render_gate_json,
@@ -46,7 +45,7 @@ from model_wtf.compliance.stores_cli import stores
 from model_wtf.compliance.threats_cli import threats
 from model_wtf.compliance.touchpoints_cli import activities, touchpoints
 from model_wtf.compliance.workspace import SHARED_FOLDER
-from model_wtf.opencode import API_KEY_ENV, DEFAULT_MODEL, OpenCodeUnavailable
+from model_wtf.opencode import OpenCodeUnavailable, can_run
 
 
 @click.group()
@@ -165,16 +164,14 @@ def check(
     "run_challenger",
     default=None,
     help="Run the challenger agent on the diff before comparing (default: when "
-    "OPENROUTER_API_KEY is set).",
+    "the --model provider's key is set).",
 )
 @click.option(
     "--commit-challenges",
     is_flag=True,
     help="Commit what the challenger re-opened (CI: the developer gets the fallout).",
 )
-@click.option(
-    "--model", default=DEFAULT_MODEL, show_default=True, help="Challenger model."
-)
+@model_option("Challenger model.")
 @ROOT_OPTION
 @click.option("--python", default=None, help="Interpreter to use for introspection.")
 @click.pass_context
@@ -203,7 +200,7 @@ def ghate(
     """
     context = github_context()
     if run_challenger is None:
-        run_challenger = bool(os.environ.get(API_KEY_ENV))
+        run_challenger = can_run(model)
     before_head = (
         _challenger_hook(python=python, model=model, commit=commit_challenges)
         if run_challenger
@@ -285,9 +282,7 @@ def _challenger_hook(
     help="Base ref: the challenger reads `BASE..HEAD`.",
 )
 @click.option("--commit", is_flag=True, help="Commit the challenges it records.")
-@click.option(
-    "--model", default=DEFAULT_MODEL, show_default=True, help="provider/model."
-)
+@model_option()
 @ROOT_OPTION
 @click.option("--python", default=None, help="Interpreter to use for introspection.")
 @click.pass_context

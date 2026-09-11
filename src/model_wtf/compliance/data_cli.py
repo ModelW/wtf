@@ -14,7 +14,6 @@ from rich.text import Text
 
 from model_wtf.compliance.auto_review import (
     DATA_TARGET,
-    DEFAULT_MODEL,
     OpenCodeUnavailable,
     Target,
     auto_review,
@@ -37,7 +36,7 @@ from model_wtf.compliance.discovery import load_units, select_manifest
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.knowledge import Knowledge, KnowledgeError, load_knowledge
 from model_wtf.compliance.mcp_server import serve
-from model_wtf.compliance.options import ROOT_OPTION, resolve_root
+from model_wtf.compliance.options import ROOT_OPTION, model_option, resolve_root
 from model_wtf.compliance.report import DeclarationError, Severity, Unit
 from model_wtf.compliance.review import Lock, Reviewed, ReviewStatus
 from model_wtf.compliance.yaml_io import TODO_TAG, todo_text
@@ -454,9 +453,7 @@ def reviewed_cmd(
 @click.option(
     "--batch", default=8, show_default=True, type=int, help="Models per round."
 )
-@click.option(
-    "--model", default=DEFAULT_MODEL, show_default=True, help="provider/model."
-)
+@model_option()
 @click.option("--python", default=None, help="Interpreter to use for introspection.")
 @click.option(
     "--max-tokens",
@@ -495,9 +492,13 @@ def auto_review_cmd(
     """Have an OpenCode agent review every pending data item.
 
     Runs OpenCode in an isolated configuration (throwaway HOME, generated
-    config, read-only tools, our MCP server as the only write path) on
-    OpenRouter, in rounds, until nothing is pending. Exit 0 when complete,
-    1 when items remain, 4 when OpenCode or OPENROUTER_API_KEY is missing.
+    config, read-only tools, our MCP server as the only write path), in
+    rounds, until nothing is pending. The provider is the prefix of
+    --model: OpenRouter (OPENROUTER_API_KEY), Scaleway Generative APIs
+    (SCALEWAY_SECRET_KEY) or a Scaleway dedicated deployment
+    (SCALEWAY_SECRET_KEY + SCALEWAY_INFERENCE_ENDPOINT). Exit 0 when
+    complete, 1 when items remain, 4 when OpenCode or the provider's key is
+    missing.
     """
     resolved, units, knowledge = load_context(root)
     if only is not None:

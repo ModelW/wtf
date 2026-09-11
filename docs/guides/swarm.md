@@ -38,7 +38,23 @@ carry `by: agent`; a `!missing` written by an agent is prefixed `[agent]`.
 
 ## Model and cost
 
-`--model provider/model` (default `openrouter/openrouter/auto`); `--max-tokens` stops starting new rounds past a budget. The
+`--model provider/model` picks the provider by its prefix, and the default
+follows the credentials in the environment:
+
+| Provider | `--model` | Environment |
+| --- | --- | --- |
+| [OpenRouter](https://openrouter.ai) | `openrouter/<model>` (default `openrouter/openrouter/auto`) | `OPENROUTER_API_KEY` |
+| Scaleway Generative APIs (serverless) | `scaleway/<model>` (default `scaleway/gpt-oss-120b`) | `SCALEWAY_SECRET_KEY` |
+| Scaleway dedicated inference | `scaleway-dedicated/<served model>` | `SCALEWAY_SECRET_KEY`, `SCALEWAY_INFERENCE_ENDPOINT` |
+
+With `SCALEWAY_INFERENCE_ENDPOINT` set (the deployment's URL from the Scaleway
+console, `https://<id>.ifr.<region>.scaleway.com`, with or without `/v1`) and
+no `--model`, the swarm asks the endpoint's `/v1/models` what it serves and
+uses that. A dedicated deployment is billed per hour, not per token, so the
+summary's cost column reads 0 there; tokens are still counted. Only the
+selected provider's key (and endpoint) reaches the OpenCode subprocess.
+
+`--max-tokens` stops starting new rounds past a budget. The
 summary prints tokens, cost and the models actually used. Prompts are
 short on purpose: small models answer one narrow question well and fifteen
 badly.

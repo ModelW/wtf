@@ -18,3 +18,7 @@ tests/fixtures/skproj/.svelte-kit/
 tests/fixtures/skproj/pnpm-lock.yaml
 site/
 docs/reference/
+
+# Local credentials (SCALEWAY_*, OPENROUTER_API_KEY)
+.env
+.env.*
