@@ -5,6 +5,11 @@ validate references and to link front routes to API endpoints; ``activities``
 need both. :class:`Workspace` loads them in that order so every command
 (``touchpoints list``, ``activities explain``, ``data why``, ``check``, the
 MCP tools) works from one consistent picture.
+
+The declared side comes from the database (see :mod:`db`), the introspected
+side from the code; queries that only need the declared side go straight to
+SQL (``touchpoints_using``, ``parties_transferring``, ``unused_parties``)
+instead of walking the loaded objects.
 """
 
 from __future__ import annotations
@@ -12,9 +17,21 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from sqlalchemy import Case, case, func, literal, select, union
+
 from model_wtf.compliance.activities import Activities, load_activities
+from model_wtf.compliance.container import get_container
 from model_wtf.compliance.data import UnitData, collect_unit
+from model_wtf.compliance.db import get_db, json_each
 from model_wtf.compliance.declarations import load_declarations
+from model_wtf.compliance.tables import (
+    ActivityRecipientRow,
+    ActivityRow,
+    AppRow,
+    PartyRow,
+    TouchpointDataRow,
+    TransferRow,
+)
 from model_wtf.compliance.touchpoints import (
     Touchpoint,
     UnitTouchpoints,
@@ -26,6 +43,8 @@ from model_wtf.compliance.touchpoints import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from sqlalchemy.orm import InstrumentedAttribute
+
     from model_wtf.compliance.data import Row
     from model_wtf.compliance.flows import Flow
     from model_wtf.compliance.knowledge import Knowledge
@@ -33,14 +52,21 @@ if TYPE_CHECKING:
     from model_wtf.compliance.schemas import App, Party
     from model_wtf.compliance.yaml_io import Marker
 
-SHARED_FOLDER = "compliance"
+
+def _full_ref(
+    column: InstrumentedAttribute[str], unit: InstrumentedAttribute[str]
+) -> Case[str]:
+    """SQL: the stored ref as ``unit:id`` (a bare id belongs to the row's unit)."""
+    return case(
+        (func.instr(column, ":") > 0, column),
+        else_=unit + literal(":") + column,
+    )
 
 
 @dataclass
 class Workspace:
     """Data, touchpoints and activities of one repository."""
 
-    root: Path
     units: list[Unit]
     knowledge: Knowledge
     data: dict[str, UnitData] = field(default_factory=dict)
@@ -49,7 +75,12 @@ class Workspace:
     parties: dict[str, Party] = field(default_factory=dict)
     """Declared organisations by id (``country``, ``safeguard`` feed Ch. V)."""
     app: App | None = None
-    """``compliance/app.yaml`` when it parsed."""
+    """The ``app`` row when it validated."""
+
+    @property
+    def root(self) -> Path:
+        """The repository root (from the container)."""
+        return get_container().root
 
     @property
     def large_scale(self) -> bool | Marker:
@@ -57,11 +88,6 @@ class Workspace:
         if self.app is None or self.app.large_scale is None:
             return False
         return self.app.large_scale
-
-    @property
-    def shared(self) -> Path:
-        """The root ``compliance/`` folder."""
-        return self.root / SHARED_FOLDER
 
     @property
     def rows(self) -> dict[str, Row]:
@@ -78,7 +104,7 @@ class Workspace:
         return f"{row.unit}:{row.store}" if row.store else None
 
     def undeclared_flows(self) -> dict[str, list[Flow]]:
-        """Touchpoint full id → flows the code has and its manifest lacks
+        """Touchpoint full id → flows the code has and its declaration lacks
         (reported by a reviewer, or seen by the introspection)."""
         from model_wtf.compliance.flows import build_flows
         from model_wtf.compliance.threats import build_elements
@@ -89,7 +115,7 @@ class Workspace:
         return out
 
     def pending_touchpoints(self) -> list[Touchpoint]:
-        """Touchpoints needing a reviewer: no manifest, a challenge, a
+        """Touchpoints needing a reviewer: no declaration, a challenge, a
         reported undeclared flow, or a fetched host nothing declares."""
         gaps = self.undeclared_flows()
         return [
@@ -110,12 +136,59 @@ class Workspace:
         return out
 
     def touchpoints_using(self, data_ref: str) -> list[Touchpoint]:
-        """Touchpoints whose manifest lists ``unit:id``."""
-        return [t for t in self.all_touchpoints.values() if data_ref in (t.data or ())]
+        """Touchpoints whose declaration covers ``unit:id`` (a verbatim ref
+        or a glob matching it), in workspace order."""
+        ref = _full_ref(TouchpointDataRow.ref, TouchpointDataRow.unit)
+        stmt = (
+            select(TouchpointDataRow.unit, TouchpointDataRow.touchpoint_id)
+            .where(literal(data_ref).op("GLOB")(ref))
+            .distinct()
+        )
+        with get_db() as db:
+            hits = {f"{u}:{t}" for u, t in db.execute(stmt).all()}
+        return [t for t in self.all_touchpoints.values() if t.full_id in hits]
+
+    def parties_transferring(self, data_ref: str) -> list[str]:
+        """Party ids some touchpoint sends ``unit:id`` to, sorted."""
+        items = json_each(TransferRow.data)
+        stmt = (
+            select(TransferRow.party_id)
+            .select_from(TransferRow)
+            .join(items, literal(True))
+            .where(items.c.value == data_ref)
+            .distinct()
+            .order_by(TransferRow.party_id)
+        )
+        with get_db() as db:
+            return list(db.scalars(stmt).all())
+
+    def unused_parties(self) -> list[str]:
+        """Declared parties nothing refers to: not a role of the app or an
+        activity, not a recipient, not the target of any transfer."""
+        # ``Human`` columns hold JSON: a party id is stored as ``"acme"``,
+        # ``json_extract(col, '$')`` gives it back as text (a marker gives an
+        # object, which matches no id). NULLs are filtered out: one NULL in
+        # a ``NOT IN`` list would empty the result.
+        roles = [
+            func.json_extract(col, "$").label("party_id")
+            for col in (
+                ActivityRow.controller,
+                ActivityRow.processor,
+                AppRow.controller,
+                AppRow.processor,
+            )
+        ]
+        used = union(
+            select(TransferRow.party_id.label("party_id")),
+            select(ActivityRecipientRow.party_id.label("party_id")),
+            *[select(role).where(role.is_not(None)) for role in roles],
+        )
+        stmt = select(PartyRow.id).where(PartyRow.id.not_in(used)).order_by(PartyRow.id)
+        with get_db() as db:
+            return list(db.scalars(stmt).all())
 
 
 def load_workspace(
-    root: Path,
     units: list[Unit],
     knowledge: Knowledge,
     *,
@@ -128,14 +201,14 @@ def load_workspace(
     ``only`` restricts data/touchpoint collection to one unit (activities
     still load, resolving only against what was collected).
     """
-    ws = Workspace(root, units, knowledge)
+    ws = Workspace(units, knowledge)
     selected = [u for u in units if only is None or u.id == only]
     for unit in selected:
         ws.data[unit.id] = collect_unit(unit, knowledge, python=python)
     if not with_touchpoints:
         return ws
     known = data_index({uid: d.rows for uid, d in ws.data.items()})
-    declarations = load_declarations(ws.shared)
+    declarations = load_declarations()
     ws.parties = declarations.parties
     ws.app = declarations.app
     parties = set(ws.parties)
@@ -157,7 +230,6 @@ def load_workspace(
     _settle_undeclared(ws)
     rows = ws.rows
     ws.activities = load_activities(
-        ws.shared,
         ws.all_touchpoints,
         rows,
         {ref: ws.store_of(row) for ref, row in rows.items()},
@@ -190,3 +262,6 @@ def _settle_undeclared(ws: Workspace) -> None:
             )
             if stale:
                 unit_tps.items[index] = replace(tp, stale_undeclared=stale)
+
+
+__all__ = ["Workspace", "load_workspace"]

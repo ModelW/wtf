@@ -1,7 +1,7 @@
-"""Pydantic schemas of the human-written compliance files.
+"""Pydantic schemas of the shared declarations (the app, the parties).
 
-Every field a human must provide is typed ``T | Marker`` so that a file can
-be committed half-filled and ``check`` can tell "not done" from "wrong".
+Every field a human must provide is typed ``T | Marker`` so that a record
+can be saved half-filled and ``check`` can tell "not done" from "wrong".
 Optional fields are plain ``T | None`` and must be omitted, not left open:
 an ``!todo`` there would be noise nobody is required to resolve.
 """
@@ -13,7 +13,6 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-from model_wtf.compliance.stamps import Stamps
 from model_wtf.compliance.yaml_io import (
     Marker,  # noqa: TC001 - used at runtime by pydantic
 )
@@ -41,7 +40,7 @@ class Contact(StrictModel):
 
 
 class Party(StrictModel):
-    """One organisation in ``compliance/parties/<id>.yaml``.
+    """One organisation (a row of the ``parties`` table).
 
     Controller, processor or recipient is a *role* an organisation plays in
     a given processing activity, so parties are role-less here; the roles
@@ -90,14 +89,10 @@ class Party(StrictModel):
         description="Where the data processing agreement with this party lives "
         "(URL or document reference)",
     )
-    threats: Stamps = Field(
-        default_factory=Stamps,
-        description="Stamps closing the threat cells the matrix left open",
-    )
 
 
 class App(StrictModel):
-    """``compliance/app.yaml``: what the product is and who answers for it.
+    """The ``app`` row: what the product is and who answers for it.
 
     The usual typology is a client (controller) commissioning the agency
     (processor), so both are normally filled; ``processor`` is omitted only
@@ -117,12 +112,6 @@ class App(StrictModel):
         description="Whether the product processes personal data at large scale "
         "(Art. 35(3)(b)): true, false, or !todo while unknown. Absent means "
         "false: a DPIA is then only required for special-category data",
-    )
-    owners: dict[str, NonEmpty] = Field(
-        default_factory=dict,
-        description="GitHub handles reviewing the compliance files: `dpo` "
-        "(register: activities, parties, data) and `ciso` (posture: stores, "
-        "threats, the gate). Default: @<org>/dpo and @<org>/ciso",
     )
 
 

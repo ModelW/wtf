@@ -33,7 +33,7 @@ from model_wtf.compliance.threats import (
     stamp_cell,
 )
 from model_wtf.compliance.threats_gen import GenError, generate
-from model_wtf.compliance.workspace import SHARED_FOLDER, Workspace, load_workspace
+from model_wtf.compliance.workspace import Workspace, load_workspace
 from model_wtf.introspect.runner import IntrospectionFailed
 
 _SEVERITY_STYLE = {
@@ -105,7 +105,7 @@ def _matrix_ws(
     resolved, units, knowledge = load_context(root)
     try:
         catalogue = load_catalogue()
-        ws = load_workspace(resolved, units, knowledge, python=python, only=only)
+        ws = load_workspace(units, knowledge, python=python, only=only)
         return build_matrix(ws, catalogue), catalogue, resolved, ws
     except (IntrospectionFailed, CatalogueError) as exc:
         Console(stderr=True).print(Text.assemble(("Tool error: ", "red"), str(exc)))
@@ -519,7 +519,7 @@ def _why_finding(
 ) -> None:
     from model_wtf.compliance.findings import resolve
 
-    key = resolve(root / SHARED_FOLDER, fid)
+    key = resolve(fid)
     if key is None:
         Console(stderr=True).print(
             Text.assemble(("Error: ", "red"), f"no finding {fid}")
@@ -681,18 +681,14 @@ def stamp_cmd(
 ) -> None:
     """Stamp one open threat cell on a touchpoint, store, party or flow.
 
-    Writes the `threats:` block of the element's YAML (a flow's on its
-    source touchpoint, keyed `SID@sink`). Pinned to the element's
-    fingerprint: when the code moves, the stamp goes stale and the cell
-    reopens.
+    Records the stamp on the element (a flow's on its source touchpoint,
+    keyed `SID@sink`). Pinned to the element's fingerprint: when the code
+    moves, the stamp goes stale and the cell reopens.
     """
     matrix, _, resolved, ws = _matrix_ws(ctx, root, python, None)
-    _, units, _ = load_context(root)
     try:
-        path, _, written = stamp_cell(
+        holder, _, written = stamp_cell(
             matrix,
-            {u.id: u for u in units},
-            resolved / SHARED_FOLDER,
             element_id,
             sid,
             status=status,
@@ -707,7 +703,9 @@ def stamp_cmd(
     except (StampError, ValueError) as exc:
         Console(stderr=True).print(Text.assemble(("Error: ", "red"), str(exc)))
         ctx.exit(int(ExitCode.TOOL_ERROR))
-    line = Text.assemble(("stamped", "green"), f"  {element_id} {sid}  → {path}")
+    line = Text.assemble(
+        ("stamped", "green"), f"  {element_id} {sid}  → {holder.element_id}"
+    )
     if isinstance(written, Finding):
         line.append(
             f"\n  {written.severity}: {written.effect}"
@@ -798,7 +796,7 @@ def auto_review_cmd(
     )
     from model_wtf.compliance.data_cli import run_auto_review
 
-    resolved, units, knowledge = load_context(root)
+    _, units, knowledge = load_context(root)
     if only is not None:
         units = [u for u in units if u.id == only]
         if not units:
@@ -812,7 +810,6 @@ def auto_review_cmd(
         )
     run_auto_review(
         ctx,
-        resolved,
         units,
         knowledge,
         base=None,

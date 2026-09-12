@@ -1,45 +1,42 @@
-"""Review state of the data inventory: the ``data.lock.yaml`` file.
+"""Review state of the data inventory: the ``data_locks`` table.
 
 The inventory is virtual (recomputed from the code), so "has a human or an
-agent looked at this field?" has to live somewhere: one lock file per unit,
-committed next to the overrides. Each entry records the field's
-*fingerprint* (type, nullability, relation) so a schema change re-opens
-the review automatically, and who reviewed it, when, with what note.
+agent looked at this field?" has to live somewhere: one row per reviewed
+item. Each records the field's *fingerprint* (type, nullability, relation)
+so a schema change re-opens the review automatically, and who reviewed it,
+when, with what note.
 
-An override file is stronger than any lock entry: a field somebody took
-the trouble to override is reviewed by definition, whatever the lock says.
+An override row is stronger than any lock entry: a field somebody took the
+trouble to override is reviewed by definition, whatever the lock says.
 """
 
 from __future__ import annotations
 
-import fcntl
 import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Literal
 
-import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
+from sqlalchemy import delete, select
 
 from model_wtf.compliance.data import Row, Source, is_container
+from model_wtf.compliance.db import get_db
 from model_wtf.compliance.report import Diagnostic, Severity
-from model_wtf.compliance.yaml_io import dump_yaml, load_yaml
+from model_wtf.compliance.tables import DataLockRow
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from model_wtf.compliance.report import Unit
 
-LOCK_FILE = "data.lock.yaml"
-SCHEMA = 1
-
 
 class ReviewStatus(StrEnum):
     """Where a row stands in the review process."""
 
     OVERRIDE = "override"
-    """An override file exists: reviewed by construction."""
+    """An override row exists: reviewed by construction."""
 
     KNOWN = "known"
     """Curated verdict from model-wtf's knowledge: nothing to review."""
@@ -108,15 +105,6 @@ class LockEntry(BaseModel):
     only raises the item again on changes made after ``answered.commit``."""
 
 
-class LockFile(BaseModel):
-    """``data.lock.yaml``."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(alias="schema", default=SCHEMA)
-    items: dict[str, LockEntry] = Field(default_factory=dict)
-
-
 @dataclass(frozen=True)
 class Reviewed:
     """A row with its review status attached."""
@@ -135,41 +123,61 @@ class Reviewed:
         return out
 
 
+def _entry_of(row: DataLockRow) -> LockEntry:
+    return LockEntry.model_validate(
+        {
+            "fingerprint": row.fingerprint,
+            "reviewed_at": row.reviewed_at,
+            "commit": row.commit,
+            "by": row.by,
+            "model": row.model,
+            "note": row.note,
+            "challenge": row.challenge,
+            "answered": row.answered,
+        }
+    )
+
+
+def _iso(value: datetime | None) -> str | None:
+    return None if value is None else value.isoformat().replace("+00:00", "Z")
+
+
 class Lock:
-    """Read/modify/write access to one unit's lock file."""
+    """Read/modify/write access to one unit's review entries."""
 
     def __init__(self, unit: Unit) -> None:
         self.unit = unit
-        self.path = unit.folder / LOCK_FILE
         self.diagnostics: list[Diagnostic] = []
-        self.data = self._load()
+        self.items: dict[str, LockEntry] = self._load()
         self._dropped: set[str] = set()
-        """Ids pruned by this instance, so a merge does not resurrect them."""
+        """Ids pruned by this instance, so a save does not resurrect them."""
         self._touched: set[str] = set()
-        """Ids this instance wrote; only those win over the file on save."""
+        """Ids this instance wrote; only those are written on save."""
 
-    def _load(self) -> LockFile:
-        if not self.path.is_file():
-            return LockFile()
-        try:
-            raw = load_yaml(self.path) or {}
-            return LockFile.model_validate(raw)
-        except (OSError, yaml.YAMLError, ValidationError) as exc:
-            self.diagnostics.append(
-                Diagnostic(
-                    Severity.ERROR,
-                    "lock-invalid",
-                    f"{LOCK_FILE}: {exc}",
-                    self.unit.id,
-                    self.path,
+    def _load(self) -> dict[str, LockEntry]:
+        with get_db() as db:
+            rows = db.scalars(
+                select(DataLockRow).where(DataLockRow.unit == self.unit.id)
+            ).all()
+        out: dict[str, LockEntry] = {}
+        for row in rows:
+            try:
+                out[row.item_id] = _entry_of(row)
+            except ValidationError as exc:
+                self.diagnostics.append(
+                    Diagnostic(
+                        Severity.ERROR,
+                        "lock-invalid",
+                        f"review of {self.unit.id}:{row.item_id}: {exc}",
+                        self.unit.id,
+                    )
                 )
-            )
-            return LockFile()
+        return out
 
     def status_of(self, row: Row) -> Reviewed:
         """Compute the review status of ``row`` against the lock."""
-        entry = self.data.items.get(row.id)
-        # An override file is a human (or agent) verdict; a manual item is
+        entry = self.items.get(row.id)
+        # An override row is a human (or agent) verdict; a manual item is
         # declared in full by whoever added it. Both are reviewed by
         # construction: there is no ORM model to send a reviewer to.
         if row.source in (Source.OVERRIDE, Source.DERIVED, Source.MANUAL):
@@ -202,9 +210,9 @@ class Lock:
     ) -> None:
         """Record ``rows`` as reviewed now (in memory; call :meth:`save`)."""
         now = datetime.now(tz=UTC).replace(microsecond=0)
-        commit = git_head(self.unit.folder)
+        commit = git_head(self.unit.code_root)
         for row in rows:
-            previous = self.data.items.get(row.id)
+            previous = self.items.get(row.id)
             # A re-review answers the open challenge; keep it so the
             # challenger does not raise the same grounds again.
             answered = (
@@ -212,7 +220,7 @@ class Lock:
                 if previous and previous.challenge
                 else (previous.answered if previous else None)
             )
-            self.data.items[row.id] = LockEntry(
+            self.items[row.id] = LockEntry(
                 fingerprint=row.fingerprint,
                 reviewed_at=now,
                 commit=commit,
@@ -231,7 +239,7 @@ class Lock:
         made at or after the challenged commit — false positives are paid
         once.
         """
-        entry = self.data.items.get(item_id)
+        entry = self.items.get(item_id)
         if entry is None:
             return "not reviewed: a pending item needs no challenge"
         if entry.challenge is not None:
@@ -254,69 +262,52 @@ class Lock:
         its history.
         """
         live = {row.id for row in live_rows}
-        gone = [item_id for item_id in self.data.items if item_id not in live]
+        gone = [item_id for item_id in self.items if item_id not in live]
         for item_id in gone:
-            del self.data.items[item_id]
+            del self.items[item_id]
         self._dropped.update(gone)
         return gone
 
     def save(self) -> None:
-        """Write the lock back, keys sorted for stable diffs.
+        """Write the touched entries back.
 
         Several agent sessions may review different models at the same time
         (``--workers``), or one session may call several tools in parallel,
-        each through its own :class:`Lock`. The write therefore happens
-        under an exclusive file lock and **merges** with what is on disk:
-        only the entries this instance touched win, everything else is kept
-        as the other writers left it.
+        each through its own :class:`Lock`. Only the entries this instance
+        touched are written, so writers never erase each other's work.
         """
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        guard = self.path.with_suffix(".lock")
-        with guard.open("a+") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
-            try:
-                on_disk = self._load().items if self.path.is_file() else {}
-                merged = {
-                    **on_disk,
-                    **{k: v for k, v in self.data.items.items() if k in self._touched},
-                }
-                for item_id in self._dropped:
-                    merged.pop(item_id, None)
-                payload = {
-                    "schema": self.data.schema_version,
-                    "items": {
-                        item_id: _entry_dict(entry)
-                        for item_id, entry in sorted(merged.items())
-                    },
-                }
-                self.path.write_text(dump_yaml(payload), encoding="utf-8")
-                self.data.items = merged
-            finally:
-                fcntl.flock(handle, fcntl.LOCK_UN)
-        guard.unlink(missing_ok=True)
-
-
-def _entry_dict(entry: LockEntry) -> dict[str, object]:
-    out: dict[str, object] = {
-        "fingerprint": entry.fingerprint,
-        "reviewed_at": entry.reviewed_at.isoformat().replace("+00:00", "Z"),
-    }
-    if entry.commit:
-        out["commit"] = entry.commit
-    out["by"] = entry.by
-    if entry.model:
-        out["model"] = entry.model
-    if entry.note:
-        out["note"] = entry.note
-    for key in ("challenge", "answered"):
-        challenge = getattr(entry, key)
-        if challenge is not None:
-            block: dict[str, object] = {"commit": challenge.commit}
-            if challenge.at:
-                block["at"] = challenge.at.isoformat().replace("+00:00", "Z")
-            block["grounds"] = challenge.grounds
-            out[key] = block
-    return out
+        with get_db() as db:
+            for item_id in self._dropped:
+                db.execute(
+                    delete(DataLockRow).where(
+                        DataLockRow.unit == self.unit.id,
+                        DataLockRow.item_id == item_id,
+                    )
+                )
+            for item_id in sorted(self._touched):
+                entry = self.items[item_id]
+                row = db.get(DataLockRow, (self.unit.id, item_id))
+                if row is None:
+                    row = DataLockRow(unit=self.unit.id, item_id=item_id)
+                    db.add(row)
+                row.fingerprint = entry.fingerprint
+                row.reviewed_at = _iso(entry.reviewed_at) or ""
+                row.commit = entry.commit
+                row.by = entry.by
+                row.model = entry.model
+                row.note = entry.note
+                row.challenge = (
+                    entry.challenge.model_dump(mode="json", exclude_none=True)
+                    if entry.challenge
+                    else None
+                )
+                row.answered = (
+                    entry.answered.model_dump(mode="json", exclude_none=True)
+                    if entry.answered
+                    else None
+                )
+        self._dropped.clear()
+        self._touched.clear()
 
 
 def git_head(inside: Path) -> str | None:
@@ -333,3 +324,6 @@ def git_head(inside: Path) -> str | None:
     except (OSError, subprocess.TimeoutExpired):
         return None
     return proc.stdout.strip() or None if proc.returncode == 0 else None
+
+
+__all__ = ["Challenge", "Lock", "LockEntry", "ReviewStatus", "Reviewed", "git_head"]

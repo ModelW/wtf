@@ -25,7 +25,7 @@ names, and the generated-API-client operations the route calls — which link
 to the Django touchpoints by operation id (`calls`). Plumbing (health checks,
 OpenAPI documents, the admin's own URL patterns) is ignored by default.
 
-The optional manifest `<unit>/compliance/touchpoints/<slug>.yaml` declares
+The optional declaration (a `touchpoints` row and its children) declares
 what the touchpoint **does** to data, with a closed vocabulary of **facts**
 (`src/model_wtf/compliance/ops.py`): each `data:` entry is a ref (`@json`/
 `@files` rows allowed, `unit:app.Model.*` for a whole model) and its ops —
@@ -43,13 +43,13 @@ declared in the manifest). `write`, `rectify`, `access`, `erase`, `object`,
 `restrict` still load, folded onto the fact they imply with an
 `op-ambiguous` warning. `transfers:`
 lists what leaves to another organisation's API — `- {party: mapbox, data:
-[...], purpose: ...}`, the party being a `compliance/parties/` id, which is
+[...], purpose: ...}`, the party being a declared party id, which is
 where the register's recipients come from (`exporting:` still loads, with a
 deprecation warning). `stores:` is the sibling for the project's *own*
 second-tier stores — `- {store: tmw, data: [...], purpose: ...}` says this
 touchpoint **copies** the items into another store the project operates (a
 realtime document server, a search index, the SMTP relay behind
-`EMAIL_HOST`), the slug being a `<unit>/compliance/stores/` file (or
+`EMAIL_HOST`), the slug being a `stores` row of the unit (or
 `unit:slug` for another unit's). A store write is a store flow: no
 recipient, no Chapter V, but the store's threat cells apply. Plus `ignore`,
 `note`. The project's own database, file storage, cache and queue are

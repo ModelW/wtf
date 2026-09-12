@@ -1,9 +1,9 @@
 """Locate the repository root, its manifest, and the compliance units.
 
 A *unit* is one deployable image (``api``, ``front``, ...) with its own
-``compliance/`` folder. Units are declared in the deployment manifest
-(``snow.yml``) so that compliance follows the same shape as deployment;
-repos without ``snow.yml`` can use a dedicated ``.model-wtf.yml`` instead.
+codebase. Units are declared in the deployment manifest (``snow.yml``) so
+that compliance follows the same shape as deployment; repos without
+``snow.yml`` can use a dedicated ``.model-wtf.yml`` instead.
 
 Manifest shapes are described as Pydantic models: validation errors are
 reported verbatim (with their YAML location) as declaration errors.
@@ -30,21 +30,15 @@ Discovery = Literal["django", "sveltekit", "none"]
 (everything declared by hand).
 """
 
-DEFAULT_FOLDER_NAME = "compliance"
-
 
 class ComplianceBlock(BaseModel):
-    """The ``compliance:`` mapping on an image.
-
-    ``discover`` names the discovery engine; ``dir`` relocates the folder
-    (relative to the image's build context). When ``dir`` is omitted the
-    folder sits next to the Dockerfile, which is where the unit's code is.
-    """
+    """The ``compliance:`` mapping on an image: which discovery engine
+    understands its code. Nothing else: everything declared lives in the
+    database at the repository root."""
 
     model_config = ConfigDict(extra="forbid")
 
     discover: Discovery
-    dir: str | None = Field(default=None, min_length=1)
 
 
 class UnitDeclaration(BaseModel):
@@ -61,19 +55,9 @@ class UnitDeclaration(BaseModel):
     dockerfile: str | None = Field(default=None, min_length=1)
     compliance: ComplianceBlock | None = None
 
-    def folder(self, root: Path) -> Path:
-        """Absolute compliance folder; requires ``compliance`` to be set."""
-        assert self.compliance is not None  # noqa: S101 - caller checks
-        return normalise_folder(
-            root, self.context, self.dockerfile, self.compliance.dir
-        )
-
     def code_root(self, root: Path) -> Path:
         """Where the unit's code lives: the Dockerfile's folder."""
-        base = root / self.context
-        if self.dockerfile:
-            base = base / Path(self.dockerfile).parent
-        return base.resolve()
+        return code_root_of(root, self.context, self.dockerfile)
 
 
 class _Manifest(BaseModel):
@@ -204,35 +188,23 @@ def load_units(
             )
             continue
         units.append(
-            Unit(
-                entry.id,
-                entry.folder(root),
-                discover=entry.compliance.discover,
-                code_root=entry.code_root(root),
-            )
+            Unit(entry.id, entry.code_root(root), discover=entry.compliance.discover)
         )
 
     return units, diagnostics
 
 
-def normalise_folder(
-    root: Path, context: str, dockerfile: str | None, folder: str | None
-) -> Path:
-    """Resolve the compliance folder of an image.
+def code_root_of(root: Path, context: str, dockerfile: str | None) -> Path:
+    """Where an image's code lives: ``<context>/<dirname(dockerfile)>``.
 
-    ``folder`` (the ``compliance.dir`` key) is relative to ``context``.
-    Without it the folder is ``compliance/`` next to the Dockerfile, i.e.
-    ``<context>/<dirname(dockerfile)>/compliance``; with no ``dockerfile``
-    key Snow assumes ``<context>/Dockerfile`` so it is ``<context>/compliance``.
-    ``Path`` arithmetic collapses ``.`` and ``..`` segments, which matters
-    for display and equality.
+    With no ``dockerfile`` key Snow assumes ``<context>/Dockerfile`` so it
+    is the context itself. ``Path`` arithmetic collapses ``.`` and ``..``
+    segments, which matters for display and equality.
     """
     base = root / context
-    if folder is not None:
-        return (base / folder).resolve()
     if dockerfile:
         base = base / Path(dockerfile).parent
-    return (base / DEFAULT_FOLDER_NAME).resolve()
+    return base.resolve()
 
 
 def _parse_manifest(manifest: Path) -> SnowManifest | ModelWtfManifest:

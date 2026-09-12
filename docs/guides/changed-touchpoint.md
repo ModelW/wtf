@@ -46,7 +46,7 @@ fix the code, or record the finding (`--missing "…"`).
 
 If your change makes the touchpoint send data somewhere new — a third-party
 API, an email provider, a webhook — declare the transfer on the touchpoint
-and the party under `compliance/parties/` (see [Add a third-party
+and the party (see [Add a third-party
 service](third-party.md)). The introspection sees hosts in the view's URL
 literals; one that no party owns is an `undeclared` flow and a finding on
 its own.

@@ -14,7 +14,7 @@ routes) into inventories — data items, the touchpoints that handle them,
 where the data flows, the stores it lives in — and lets humans or agents
 record the judgements the code cannot carry (is this field personal? does
 this endpoint serve the subject or the staff? is that threat mitigated?)
-as small YAML files next to the code. Everything downstream — the Art. 30
+in a SQLite database committed next to the code. Everything downstream — the Art. 30
 register, rights coverage, the weighed findings — is computed from that.
 A **gate** runs on every pull request and fails the change that introduces
 a gap; a **challenger** agent reads the diff and re-opens the reviews it
@@ -30,7 +30,7 @@ for a [dedicated inference](https://www.scaleway.com/en/docs/generative-apis/how
 deployment of your own:
 
 ```bash
-uvx model-wtf compliance init                     # compliance/ folders, snow.yml blocks, CODEOWNERS, CI workflow
+uvx model-wtf compliance init                     # compliance.db, snow.yml blocks, CI workflow
 uvx model-wtf compliance data auto-review         # agents classify every field, model by model
 uvx model-wtf compliance touchpoints auto-review  # and declare what each route / task / screen does
 uvx model-wtf compliance activities list          # the register of processing activities, from the code
@@ -38,7 +38,7 @@ uvx model-wtf compliance check                    # what is still open — and t
 ```
 
 Nothing is overwritten, what the agents cannot know is left as `!todo`
-for a human, and every file they wrote is reviewable in the diff. Without
+for a human, and every row they wrote is queryable and diffable. Without
 an API key the same commands work by hand (`data review`, `touchpoints
 set-data`, `threats stamp`).
 

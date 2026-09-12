@@ -12,14 +12,18 @@ from typing import TYPE_CHECKING
 import pytest
 from click.testing import CliRunner
 
-from conftest import FILES_ALL_OK
+from conftest import seed_data, seed_store
 from model_wtf.cli import cli
 from model_wtf.compliance.check import run_check
+from model_wtf.compliance.container import configure
 from model_wtf.compliance.data import Source, collect_unit, parse_full_id
+from model_wtf.compliance.db import get_db
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.knowledge import Dpia, KnowledgeError, load_knowledge
 from model_wtf.compliance.report import Unit
 from model_wtf.compliance.review import Lock, ReviewStatus
+from model_wtf.compliance.tables import DataItemRow, SensitivityRow
+from model_wtf.compliance.yaml_io import TODO
 from model_wtf.introspect.runner import (
     FieldInfo,
     IntrospectionUnavailable,
@@ -50,20 +54,19 @@ def django_repo(make_repo: MakeRepo, monkeypatch: pytest.MonkeyPatch) -> Path:
     The test interpreter (which has Django) is used through
     ``MODEL_WTF_PYTHON`` so no uv/poetry is spawned.
     """
-    root = make_repo(snow=SNOW_DJANGO, files=FILES_ALL_OK)
+    root = make_repo(snow=SNOW_DJANGO, seed=True)
     shutil.copytree(FIXTURE, root / "api", dirs_exist_ok=True)
     monkeypatch.setenv("MODEL_WTF_PYTHON", sys.executable)
     monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
     return root
 
 
-def folder_of(root: Path) -> Path:
-    """The ``api`` unit's data folder."""
-    return root / "api" / "compliance" / "data"
-
-
 def _unit(root: Path) -> Unit:
-    return Unit("api", root / "api" / "compliance", "django", root / "api")
+    return Unit("api", root / "api", "django")
+
+
+def _knowledge():
+    return load_knowledge(custom=False)
 
 
 def _field(**kw: object) -> FieldInfo:
@@ -276,7 +279,7 @@ def test_introspect_fixture_project(django_repo: Path) -> None:
 def test_builtin_rules(
     field: FieldInfo, rule: str, pii: bool, level: str, category: str
 ) -> None:
-    knowledge = load_knowledge(None)
+    knowledge = _knowledge()
 
     rule_id, matched = knowledge.classify(field)
 
@@ -289,7 +292,7 @@ def test_builtin_rules(
 
 
 def test_dpia_derivation() -> None:
-    knowledge = load_knowledge(None)
+    knowledge = _knowledge()
     assert knowledge.dpia_for("special", "health") is Dpia.ALWAYS
     assert knowledge.dpia_for("confidential", "content") is Dpia.LARGE_SCALE
     assert knowledge.dpia_for("personal", "location") is Dpia.LARGE_SCALE
@@ -309,7 +312,7 @@ def test_dpia_derivation() -> None:
 
 
 def test_collect_unit_classifies_every_field(django_repo: Path) -> None:
-    data = collect_unit(_unit(django_repo), load_knowledge(None))
+    data = collect_unit(_unit(django_repo), _knowledge())
 
     assert data.introspected
     assert data.diagnostics == []
@@ -343,20 +346,24 @@ def test_collect_unit_classifies_every_field(django_repo: Path) -> None:
 
 
 def test_override_and_manual_item(django_repo: Path) -> None:
-    folder = django_repo / "api" / "compliance" / "data"
-    folder.mkdir(parents=True)
-    (folder / "shop.Customer.preferences.yaml").write_text(
-        "pii: false\ncategory: technical\nreason: UI theme only\n"
+    seed_data(
+        "api",
+        "shop.Customer.preferences",
+        pii=False,
+        category="technical",
+        reason="UI theme only",
     )
-    (folder / "shop.Order.utm_campaign.yaml").write_text(
-        "sensitivity: internal\nreason: !todo\n"
-    )
-    (folder / "spaces-avatars.yaml").write_text(
-        "description: Avatar bucket\npii: true\n"
-        "sensitivity: personal\ncategory: identity\n"
+    seed_data("api", "shop.Order.utm_campaign", sensitivity="internal", reason=TODO)
+    seed_data(
+        "api",
+        "spaces-avatars",
+        description="Avatar bucket",
+        pii=True,
+        sensitivity="personal",
+        category="identity",
     )
 
-    data = collect_unit(_unit(django_repo), load_knowledge(None))
+    data = collect_unit(_unit(django_repo), _knowledge())
 
     rows = {r.id: r for r in data.rows}
     pref = rows["shop.Customer.preferences"]
@@ -386,47 +393,37 @@ def test_override_and_manual_item(django_repo: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("filename", "body", "code"),
+    ("item_id", "spec", "code"),
     [
-        ("shop.Customer.email.yaml", "pii: false\n", "schema-error"),
+        ("shop.Customer.email", {"pii": False}, "schema-error"),
+        ("shop.Customer.email", {"sensitivity": "top", "reason": "x"}, "unknown-level"),
         (
-            "shop.Customer.email.yaml",
-            "pii: false\nreason: x\ncolour: 1\n",
-            "schema-error",
+            "shop.Customer.email",
+            {"category": "nope", "reason": "x"},
+            "unknown-category",
         ),
-        ("shop.Customer.email.yaml", "sensitivity: top\nreason: x\n", "unknown-level"),
-        ("shop.Customer.email.yaml", "category: nope\nreason: x\n", "unknown-category"),
-        ("nope.Model.f.yaml", "pii: false\nreason: x\n", "data-orphan"),
+        ("nope.Model.f", {"pii": False, "reason": "x"}, "data-orphan"),
         (
-            "bucket.yaml",
-            "description: b\npii: true\nsensitivity: personal\n",
+            "bucket",
+            {"description": "b", "pii": True, "sensitivity": "personal"},
             "schema-error",
         ),
     ],
-    ids=[
-        "reason-missing",
-        "unknown-key",
-        "bad-level",
-        "bad-category",
-        "orphan",
-        "manual-incomplete",
-    ],
+    ids=["reason-missing", "bad-level", "bad-category", "orphan", "manual-incomplete"],
 )
-def test_data_file_errors(
-    django_repo: Path, filename: str, body: str, code: str
+def test_data_row_errors(
+    django_repo: Path, item_id: str, spec: dict[str, object], code: str
 ) -> None:
-    folder = django_repo / "api" / "compliance" / "data"
-    folder.mkdir(parents=True)
-    (folder / filename).write_text(body)
+    seed_data("api", item_id, **spec)
 
-    data = collect_unit(_unit(django_repo), load_knowledge(None))
+    data = collect_unit(_unit(django_repo), _knowledge())
 
     assert code in [d.code for d in data.diagnostics]
-    assert run_check(django_repo, strict=False).exit_code is ExitCode.DECLARATION_ERROR
+    assert run_check(strict=False).exit_code is ExitCode.DECLARATION_ERROR
 
 
 def test_check_reports_pending_reviews(django_repo: Path) -> None:
-    report = run_check(django_repo, strict=False)
+    report = run_check(strict=False)
 
     codes = {d.code for d in report.diagnostics}
     # Library assumptions are agent context, not a to-do line: the pending
@@ -443,9 +440,9 @@ def test_non_django_unit_is_skipped(
     make_repo: MakeRepo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("MODEL_WTF_PYTHON", raising=False)
-    root = make_repo(snow=SNOW_DJANGO, files=FILES_ALL_OK)
+    root = make_repo(snow=SNOW_DJANGO, dirs=("api",), seed=True)
 
-    data = collect_unit(_unit(root), load_knowledge(None))
+    data = collect_unit(_unit(root), _knowledge())
 
     assert data.rows == []
     assert [d.code for d in data.diagnostics] == ["not-introspectable"]
@@ -477,51 +474,71 @@ def test_custom_scale_with_replaces(django_repo: Path) -> None:
         ],
     )
     assert result.exit_code == 0, result.output
-    scale = django_repo / "compliance" / "sensitivity"
-    assert sorted(p.stem for p in scale.glob("*.yaml")) == [
-        "confidential",
-        "internal",
-        "personal",
-        "public",
-        "special",
-    ]
-    (scale / "confidential.yaml").rename(scale / "restricted.yaml")
-    with (scale / "restricted.yaml").open("a") as fh:
-        fh.write("replaces: [confidential]\n")
+    configure(django_repo)
+    with get_db() as db:
+        levels = sorted(row.id for row in db.query(SensitivityRow))
+        assert levels == ["confidential", "internal", "personal", "public", "special"]
+        row = db.get(SensitivityRow, "confidential")
+        assert row is not None
+        db.add(
+            SensitivityRow(
+                id="restricted",
+                rank=row.rank,
+                description=row.description,
+                criteria=row.criteria,
+                handling=row.handling,
+                dpia=row.dpia,
+                replaces=["confidential"],
+            )
+        )
+        db.delete(row)
 
-    knowledge = load_knowledge(django_repo / "compliance")
+    knowledge = load_knowledge()
     assert knowledge.resolve("confidential") == "restricted"
     rows = {r.id: r for r in collect_unit(_unit(django_repo), knowledge).rows}
     assert rows["shop.Customer.iban"].sensitivity == "restricted"
 
 
+def _copy_level(db, source: str, new_id: str, **changes: object) -> None:
+    row = db.get(SensitivityRow, source)
+    assert row is not None
+    values = {
+        "rank": row.rank,
+        "description": row.description,
+        "criteria": row.criteria,
+        "handling": row.handling,
+        "dpia": row.dpia,
+        "replaces": list(row.replaces),
+    }
+    values.update(changes)
+    db.add(SensitivityRow(id=new_id, **values))
+
+
 @pytest.mark.parametrize(
     ("mutation", "code"),
     [
-        (lambda d: (d / "confidential.yaml").unlink(), "level-coverage"),
         (
-            lambda d: (d / "extra.yaml").write_text(
-                (d / "public.yaml").read_text() + "replaces: [public]\n"
-            ),
+            lambda db: db.delete(db.get(SensitivityRow, "confidential")),
             "level-coverage",
         ),
         (
-            lambda d: (d / "extra.yaml").write_text(
-                (d / "public.yaml").read_text().replace("rank: 0", "rank: 9")
-                + "replaces: [ghost]\n"
-            ),
-            "level-replaces-unknown",
+            lambda db: _copy_level(db, "public", "extra", replaces=["public"]),
+            "level-coverage",
         ),
         (
-            lambda d: (d / "extra.yaml").write_text((d / "public.yaml").read_text()),
-            "level-rank-duplicate",
+            lambda db: _copy_level(db, "public", "extra", rank=9, replaces=["ghost"]),
+            "level-replaces-unknown",
         ),
-        (lambda d: (d / "public.yaml").write_text("rank: 0\n"), "schema-error"),
+        (lambda db: _copy_level(db, "public", "extra"), "level-rank-duplicate"),
+        (
+            lambda db: setattr(db.get(SensitivityRow, "public"), "dpia", "sometimes"),
+            "schema-error",
+        ),
     ],
     ids=["missing", "double-cover", "unknown-replaces", "dup-rank", "invalid"],
 )
 def test_custom_scale_errors(make_repo: MakeRepo, mutation, code: str) -> None:
-    root = make_repo(snow="images: []\n", files=FILES_ALL_OK)
+    root = make_repo(snow="images: []\n", seed=True)
     CliRunner().invoke(
         cli,
         [
@@ -539,12 +556,14 @@ def test_custom_scale_errors(make_repo: MakeRepo, mutation, code: str) -> None:
             "--custom-sensitivity",
         ],
     )
-    mutation(root / "compliance" / "sensitivity")
+    configure(root)
+    with get_db() as db:
+        mutation(db)
 
     with pytest.raises(KnowledgeError) as info:
-        load_knowledge(root / "compliance")
+        load_knowledge()
     assert code in {d.code for d in info.value.diagnostics}
-    assert run_check(root, strict=False).exit_code is ExitCode.DECLARATION_ERROR
+    assert run_check(strict=False).exit_code is ExitCode.DECLARATION_ERROR
 
 
 # ---------------------------------------------------------------------------
@@ -608,8 +627,16 @@ def test_cli_list_rules_override(django_repo: Path) -> None:
         ],
     )
     assert ok.exit_code == 0, ok.output
-    path = django_repo / "api" / "compliance" / "data" / "shop.Customer.email.yaml"
-    assert path.read_text() == 'pii: false\nreason: "test"\n'
+    configure(django_repo)
+    with get_db() as db:
+        row = db.get(DataItemRow, ("api", "shop.Customer.email"))
+        assert row is not None
+        assert (row.kind, row.pii, row.reason, row.sensitivity) == (
+            "override",
+            False,
+            "test",
+            None,
+        )
 
     again = runner.invoke(
         cli, [*base, "override", "api:shop.Customer.email", *root, "--no-pii"]
@@ -642,7 +669,7 @@ def test_stores_introspected_from_settings(django_repo: Path) -> None:
     assert inventory.sessions is not None
     assert inventory.sessions.store == "db-default"
 
-    data = collect_unit(_unit(django_repo), load_knowledge(None))
+    data = collect_unit(_unit(django_repo), _knowledge())
     rows = {r.id: r for r in data.rows}
     # Rows follow the router, not the default alias.
     assert rows["shop.AuditEntry.message"].store == "db-audit"
@@ -656,26 +683,30 @@ def test_stores_introspected_from_settings(django_repo: Path) -> None:
     assert audit.source.value == "config"
 
 
-def test_store_files_override_declare_ignore(django_repo: Path) -> None:
-    folder = django_repo / "api" / "compliance" / "stores"
-    folder.mkdir(parents=True)
-    (folder / "files-default.yaml").write_text(
-        "provider: Scaleway\nlocation: fr-par\nretention: !todo\n"
+def test_store_rows_override_declare_ignore(django_repo: Path) -> None:
+    seed_store(
+        "api", "files-default", provider="Scaleway", location="fr-par", retention=TODO
     )
-    (folder / "crm.yaml").write_text("type: external\nname: HubSpot\n")
-    (folder / "db-audit.yaml").write_text("ignore: true\n")
-    data_folder = django_repo / "api" / "compliance" / "data"
-    data_folder.mkdir()
-    (data_folder / "hubspot-contacts.yaml").write_text(
-        "description: Contacts synced to the CRM\npii: true\n"
-        "sensitivity: personal\ncategory: contact\nstore: crm\n"
+    seed_store("api", "crm", type="external", name="HubSpot")
+    seed_store("api", "db-audit", ignore=True)
+    seed_data(
+        "api",
+        "hubspot-contacts",
+        description="Contacts synced to the CRM",
+        pii=True,
+        sensitivity="personal",
+        category="contact",
+        store="crm",
     )
-    (data_folder / "shop.Customer.notes.yaml").write_text(
-        "store: db-audit\nreason: mirrored to the audit db\n"
+    seed_data(
+        "api",
+        "shop.Customer.notes",
+        store="db-audit",
+        reason="mirrored to the audit db",
     )
-    (data_folder / "shop.Customer.phone.yaml").write_text("store: nope\nreason: typo\n")
+    seed_data("api", "shop.Customer.phone", store="nope", reason="typo")
 
-    data = collect_unit(_unit(django_repo), load_knowledge(None))
+    data = collect_unit(_unit(django_repo), _knowledge())
 
     files = data.stores.get("files-default")
     assert files is not None
@@ -700,24 +731,23 @@ def test_store_files_override_declare_ignore(django_repo: Path) -> None:
     assert rows["hubspot-contacts"].store == "crm"
     codes = sorted(d.code for d in data.diagnostics)
     assert codes == ["store-ignored-referenced", "store-unknown", "todo"]
-    assert run_check(django_repo, strict=False).exit_code is ExitCode.DECLARATION_ERROR
+    assert run_check(strict=False).exit_code is ExitCode.DECLARATION_ERROR
 
 
 @pytest.mark.parametrize(
-    ("body", "code"),
+    ("spec", "code"),
     [
-        ("name: Lonely\n", "store-orphan"),
-        ("type: warehouse\n", "schema-error"),
-        ("type: external\ncolour: red\n", "schema-error"),
+        ({"name": "Lonely"}, "store-orphan"),
+        ({"type": "warehouse"}, "schema-error"),
     ],
-    ids=["manual-without-type", "bad-type", "unknown-key"],
+    ids=["manual-without-type", "bad-type"],
 )
-def test_store_file_errors(django_repo: Path, body: str, code: str) -> None:
-    folder = django_repo / "api" / "compliance" / "stores"
-    folder.mkdir(parents=True)
-    (folder / "thing.yaml").write_text(body)
+def test_store_row_errors(
+    django_repo: Path, spec: dict[str, object], code: str
+) -> None:
+    seed_store("api", "thing", **spec)
 
-    data = collect_unit(_unit(django_repo), load_knowledge(None))
+    data = collect_unit(_unit(django_repo), _knowledge())
 
     assert code in [d.code for d in data.diagnostics]
 
@@ -781,26 +811,36 @@ def test_cli_stores(django_repo: Path) -> None:
         ],
     )
     assert ok.exit_code == 0, ok.output
-    path = django_repo / "api" / "compliance" / "data" / "shop.Customer.email.yaml"
-    assert path.read_text() == 'store: db-audit\nreason: "mirrored"\n'
+    configure(django_repo)
+    with get_db() as db:
+        row = db.get(DataItemRow, ("api", "shop.Customer.email"))
+        assert row is not None
+        assert (row.store, row.reason, row.pii) == ("db-audit", "mirrored", None)
 
 
-CONTENTS_FILE = """\
-contents:
-  customer_name: {pii: true, sensitivity: personal, category: identity}
-  iban: {pii: true, sensitivity: confidential, category: financial}
-  utm_campaign: {pii: false, sensitivity: internal, category: technical}
-unknown_contents: none
-reason: written in shop/services.py:12-30
-"""
+CONTENTS_SPEC: dict[str, object] = {
+    "contents": {
+        "customer_name": {
+            "pii": True,
+            "sensitivity": "personal",
+            "category": "identity",
+        },
+        "iban": {"pii": True, "sensitivity": "confidential", "category": "financial"},
+        "utm_campaign": {
+            "pii": False,
+            "sensitivity": "internal",
+            "category": "technical",
+        },
+    },
+    "unknown_contents": "none",
+    "reason": "written in shop/services.py:12-30",
+}
 
 
 def test_json_contents_declaration(django_repo: Path) -> None:
-    folder = django_repo / "api" / "compliance" / "data"
-    folder.mkdir(parents=True)
-    (folder / "shop.Customer.preferences.yaml").write_text(CONTENTS_FILE)
+    seed_data("api", "shop.Customer.preferences", **CONTENTS_SPEC)
 
-    data = collect_unit(_unit(django_repo), load_knowledge(None))
+    data = collect_unit(_unit(django_repo), _knowledge())
     rows = {r.id: r for r in data.rows}
 
     column = rows["shop.Customer.preferences"]
@@ -826,12 +866,12 @@ def test_json_contents_declaration(django_repo: Path) -> None:
     assert iban.source is Source.OVERRIDE
     assert data.diagnostics == []
     # Fingerprint moves with the declaration.
-    (folder / "shop.Customer.preferences.yaml").write_text(
-        CONTENTS_FILE.replace("unknown_contents: none", "unknown_contents: possible")
+    seed_data(
+        "api",
+        "shop.Customer.preferences",
+        **{**CONTENTS_SPEC, "unknown_contents": "possible"},
     )
-    again = {
-        r.id: r for r in collect_unit(_unit(django_repo), load_knowledge(None)).rows
-    }
+    again = {r.id: r for r in collect_unit(_unit(django_repo), _knowledge()).rows}
     assert again["shop.Customer.preferences"].fingerprint != column.fingerprint
 
 
@@ -851,14 +891,17 @@ def test_json_contents_unknown_semantics(
     category: str,
     codes: list[str],
 ) -> None:
-    folder = django_repo / "api" / "compliance" / "data"
-    folder.mkdir(parents=True)
-    (folder / "shop.Customer.preferences.yaml").write_text(
-        "contents:\n  theme: {pii: false, sensitivity: internal, category: technical}\n"
-        f"unknown_contents: {unknown}\nreason: settings UI\n"
+    seed_data(
+        "api",
+        "shop.Customer.preferences",
+        contents={
+            "theme": {"pii": False, "sensitivity": "internal", "category": "technical"}
+        },
+        unknown_contents=unknown,
+        reason="settings UI",
     )
 
-    data = collect_unit(_unit(django_repo), load_knowledge(None))
+    data = collect_unit(_unit(django_repo), _knowledge())
     column = next(r for r in data.rows if r.id == "shop.Customer.preferences")
 
     assert (column.pii, column.sensitivity, column.category) == (pii, level, category)
@@ -866,22 +909,28 @@ def test_json_contents_unknown_semantics(
 
 
 def test_json_contents_empty_and_likely_keeps_presumption(django_repo: Path) -> None:
-    folder = django_repo / "api" / "compliance" / "data"
-    folder.mkdir(parents=True)
-    (folder / "shop.Customer.preferences.yaml").write_text(
-        "contents: {}\nunknown_contents: likely\nreason: opaque blob\n"
+    seed_data(
+        "api",
+        "shop.Customer.preferences",
+        contents={},
+        unknown_contents="likely",
+        reason="opaque blob",
     )
-    data = collect_unit(_unit(django_repo), load_knowledge(None))
+    data = collect_unit(_unit(django_repo), _knowledge())
     column = next(r for r in data.rows if r.id == "shop.Customer.preferences")
     assert (column.pii, column.sensitivity, column.category) == (
         True,
         "confidential",
         "content",
     )
-    (folder / "shop.Customer.preferences.yaml").write_text(
-        "contents: {}\nunknown_contents: none\nreason: never written\n"
+    seed_data(
+        "api",
+        "shop.Customer.preferences",
+        contents={},
+        unknown_contents="none",
+        reason="never written",
     )
-    data = collect_unit(_unit(django_repo), load_knowledge(None))
+    data = collect_unit(_unit(django_repo), _knowledge())
     column = next(r for r in data.rows if r.id == "shop.Customer.preferences")
     assert (column.pii, column.sensitivity, column.category) == (
         False,
@@ -890,45 +939,41 @@ def test_json_contents_empty_and_likely_keeps_presumption(django_repo: Path) -> 
     )
 
 
+_ID = {"pii": True, "sensitivity": "personal", "category": "identity"}
+
+
 @pytest.mark.parametrize(
-    ("filename", "body", "code"),
+    ("item_id", "spec", "code"),
     [
-        ("shop.Customer.email.yaml", CONTENTS_FILE, "schema-error"),
+        ("shop.Customer.email", CONTENTS_SPEC, "schema-error"),
         (
-            "shop.Customer.preferences.yaml",
-            "contents:\n"
-            "  Bad-Name: {pii: true, sensitivity: personal, category: identity}\n"
-            "unknown_contents: none\nreason: x\n",
+            "shop.Customer.preferences",
+            {"contents": {"Bad-Name": _ID}, "unknown_contents": "none", "reason": "x"},
             "schema-error",
         ),
         (
-            "shop.Customer.preferences.yaml",
-            "contents:\n  a: {pii: true, sensitivity: top, category: identity}\n"
-            "unknown_contents: none\nreason: x\n",
+            "shop.Customer.preferences",
+            {
+                "contents": {"a": {**_ID, "sensitivity": "top"}},
+                "unknown_contents": "none",
+                "reason": "x",
+            },
             "unknown-level",
         ),
         (
-            "shop.Customer.preferences.yaml",
-            "contents:\n  a: {pii: true, sensitivity: personal, category: identity}\n"
-            "unknown_contents: maybe\nreason: x\n",
-            "schema-error",
-        ),
-        (
-            "shop.Customer.preferences.yaml",
-            "contents: {}\nunknown_contents: none\npii: false\nreason: x\n",
+            "shop.Customer.preferences",
+            {"contents": {"a": _ID}, "unknown_contents": "maybe", "reason": "x"},
             "schema-error",
         ),
     ],
-    ids=["not-a-container", "bad-name", "bad-level", "bad-unknown", "mixed-keys"],
+    ids=["not-a-container", "bad-name", "bad-level", "bad-unknown"],
 )
 def test_json_contents_errors(
-    django_repo: Path, filename: str, body: str, code: str
+    django_repo: Path, item_id: str, spec: dict[str, object], code: str
 ) -> None:
-    folder = django_repo / "api" / "compliance" / "data"
-    folder.mkdir(parents=True)
-    (folder / filename).write_text(body)
+    seed_data("api", item_id, **spec)
 
-    data = collect_unit(_unit(django_repo), load_knowledge(None))
+    data = collect_unit(_unit(django_repo), _knowledge())
 
     assert code in [d.code for d in data.diagnostics]
 
@@ -961,16 +1006,19 @@ def test_cli_contents(django_repo: Path) -> None:
         ],
     )
     assert ok.exit_code == 0, ok.output
-    path = (
-        django_repo / "api" / "compliance" / "data" / "shop.Customer.preferences.yaml"
-    )
-    assert path.read_text() == (
-        "contents:\n"
-        "  theme: {pii: false, sensitivity: internal, category: technical}\n"
-        "  phone: {pii: true, sensitivity: personal, category: contact}\n"
-        "unknown_contents: none\n"
-        'reason: "settings.py:3"\n'
-    )
+    configure(django_repo)
+    with get_db() as db:
+        row = db.get(DataItemRow, ("api", "shop.Customer.preferences"))
+        assert row is not None
+        assert (row.kind, row.unknown_contents, row.reason) == (
+            "contents",
+            "none",
+            "settings.py:3",
+        )
+        assert [(c.name, c.pii, c.sensitivity, c.category) for c in row.contents] == [
+            ("theme", False, "internal", "technical"),
+            ("phone", True, "personal", "contact"),
+        ]
     listed = runner.invoke(
         cli, ["compliance", "data", "list", *root, "--format", "json"]
     )
@@ -986,12 +1034,12 @@ def test_cli_contents(django_repo: Path) -> None:
 
 def test_library_knowledge(django_repo: Path) -> None:
     """Fixed library verdicts are known; assumed ones are applied but pending."""
-    knowledge = load_knowledge(None)
+    knowledge = _knowledge()
     assert knowledge.library["auth.User"].package == "django"
     assert knowledge.known_field("auth.Group", "anything") is not None  # default
     assert knowledge.known_field("sites.Site", "domain") is None
 
-    data = collect_unit(_unit(django_repo), load_knowledge(None))
+    data = collect_unit(_unit(django_repo), _knowledge())
     rows = {r.id: r for r in data.rows}
     password = rows["auth.User.password"]
     assert (password.source, password.category, password.assumption) == (
@@ -1018,7 +1066,7 @@ def test_library_knowledge(django_repo: Path) -> None:
 
 def test_every_library_file_is_consistent() -> None:
     """Shipped library files validate and use the built-in vocabulary."""
-    knowledge = load_knowledge(None)
+    knowledge = _knowledge()
     assert len(knowledge.library) > 40
     for label, model in knowledge.library.items():
         assert "." in label, label

@@ -1,7 +1,7 @@
 # Read the register (DPO / CISO)
 
-You own the decision files — `CODEOWNERS` routes every change to
-`compliance/` through you — and you need the picture, not the tool. Every
+You own the decisions — every change to `compliance.db` is a change to
+the register — and you need the picture, not the tool. Every
 command below is read-only.
 
 ## The state in one screen
@@ -30,7 +30,7 @@ One activity per purpose. `explain` shows its touchpoints (the routes,
 tasks and screens that serve it), the data items derived from them with
 their categories and the highest sensitivity, the legal basis (with the
 consent block when it is consent), retention, recipients, and the DPIA
-question: `always` for special categories, `large_scale` when `app.yaml`
+question: `always` for special categories, `large_scale` when the app
 says the product is, `never` otherwise. Anything the tool could not derive
 is `!todo` in the activity file — that is where your answers go.
 
@@ -47,7 +47,7 @@ uv run model-wtf compliance flows list --kind transfer
 belong to; `flows list --kind transfer` is the list of transfers to other
 organisations, each with the party, its country and whether Chapter V is
 satisfied (adequate country, DPF-certified, SCCs…). The party files under
-`compliance/parties/` are the contact details you will put in a notice.
+the parties are the contact details you will put in a notice.
 
 ## Rights coverage
 

@@ -21,7 +21,6 @@ from model_wtf.compliance.auto_review import (
     sandbox,
 )
 from model_wtf.compliance.data import (
-    DATA_DIR,
     Row,
     Source,
     UnitData,
@@ -31,18 +30,17 @@ from model_wtf.compliance.data import (
     parse_content_entry,
     parse_full_id,
     write_contents,
+    write_override,
 )
 from model_wtf.compliance.discovery import load_units, select_manifest
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.knowledge import Knowledge, KnowledgeError, load_knowledge
 from model_wtf.compliance.mcp_server import serve
-from model_wtf.compliance.options import ROOT_OPTION, model_option, resolve_root
+from model_wtf.compliance.options import ROOT_OPTION, configure_root, model_option
 from model_wtf.compliance.report import DeclarationError, Severity, Unit
 from model_wtf.compliance.review import Lock, Reviewed, ReviewStatus
-from model_wtf.compliance.yaml_io import TODO_TAG, todo_text
+from model_wtf.compliance.yaml_io import TODO_TAG
 from model_wtf.introspect.runner import IntrospectionFailed
-
-SHARED_FOLDER = "compliance"
 
 
 @click.group()
@@ -51,12 +49,13 @@ def data() -> None:
 
 
 def load_context(root: Path | None) -> tuple[Path, list[Unit], Knowledge]:
-    """Resolve root, units and knowledge, raising ``click.ClickException`` on error."""
-    resolved = resolve_root(root)
+    """Configure the container; resolve units and knowledge, raising
+    ``click.ClickException`` on error."""
+    resolved = configure_root(root)
     try:
         manifest = select_manifest(resolved)
         units, _ = load_units(manifest, resolved, strict=False)
-        knowledge = load_knowledge(resolved / SHARED_FOLDER)
+        knowledge = load_knowledge()
     except DeclarationError as exc:
         raise click.ClickException(exc.diagnostic.message) from exc
     except KnowledgeError as exc:
@@ -269,10 +268,10 @@ def override_cmd(
     reason: str | None,
     root: Path | None,
 ) -> None:
-    """Create ``<unit>/compliance/data/<id>.yaml`` overriding a classification.
+    """Record an override of a field's classification.
 
     ITEM_ID is ``<unit>:<app.Model.field>`` (the unit prefix may be omitted
-    when the repo has one unit). Existing files are never rewritten.
+    when the repo has one unit). An existing row is never rewritten.
     """
     _, units, knowledge = load_context(root)
     try:
@@ -306,10 +305,10 @@ def override_cmd(
         hint = f"; did you mean {', '.join(close)}?" if close else ""
         msg = (
             f"{local_id!r} is not a field of unit {unit_id!r}{hint}. "
-            "To declare data outside the ORM, write a manual item file by hand."
+            "To declare data outside the ORM, use the data_add_manual tool."
         )
         raise click.UsageError(msg)
-    path = write_override(
+    if not write_override(
         unit,
         local_id,
         pii=pii,
@@ -317,9 +316,8 @@ def override_cmd(
         category=category,
         store=store,
         reason=reason,
-    )
-    if path is None:
-        msg = f"{unit.folder / DATA_DIR / (local_id + '.yaml')} already exists"
+    ):
+        msg = f"{unit_id}:{local_id} already exists as a data row"
         raise click.ClickException(msg)
     lock = Lock(unit)
     lock.mark(
@@ -328,7 +326,7 @@ def override_cmd(
         note=reason or "overridden",
     )
     lock.save()
-    Console().print(Text.assemble(("created", "green"), "  ", str(path)))
+    Console().print(Text.assemble(("created", "green"), f"  {unit_id}:{local_id}"))
     ctx.exit(0)
 
 
@@ -381,11 +379,10 @@ def contents_cmd(
             parsed.update([parse_content_entry(entry, knowledge)])
         except ValueError as exc:
             raise click.UsageError(str(exc)) from exc
-    path = write_contents(
+    if not write_contents(
         unit, local_id, parsed, unknown=Unknown(unknown), reason=reason
-    )
-    if path is None:
-        msg = f"{unit.folder / DATA_DIR / (local_id + '.yaml')} already exists"
+    ):
+        msg = f"{unit_id}:{local_id} already exists as a data row"
         raise click.ClickException(msg)
     lock = Lock(unit)
     fresh = collect_unit(unit, knowledge).rows
@@ -395,7 +392,7 @@ def contents_cmd(
         note=reason or "contents declared",
     )
     lock.save()
-    Console().print(Text.assemble(("created", "green"), "  ", str(path)))
+    Console().print(Text.assemble(("created", "green"), f"  {unit_id}:{local_id}"))
     ctx.exit(0)
 
 
@@ -407,7 +404,7 @@ def contents_cmd(
 def reviewed_cmd(
     ctx: click.Context, *, item_ids: tuple[str, ...], note: str, root: Path | None
 ) -> None:
-    """Mark data items as reviewed by a human (writes data.lock.yaml).
+    """Mark data items as reviewed by a human.
 
     ITEM_IDS are ``<unit>:<app.Model.field>`` (unit prefix optional with
     one unit). The current classification is what is being confirmed.
@@ -520,7 +517,6 @@ def auto_review_cmd(
         ctx.exit(0)
     run_auto_review(
         ctx,
-        resolved,
         units,
         knowledge,
         base=base,
@@ -536,7 +532,6 @@ def auto_review_cmd(
 
 def run_auto_review(
     ctx: click.Context,
-    resolved: Path,
     units: list[Unit],
     knowledge: Knowledge,
     *,
@@ -555,7 +550,6 @@ def run_auto_review(
     console = Console()
     try:
         result = auto_review(
-            resolved,
             units,
             knowledge,
             base=base,
@@ -611,37 +605,5 @@ def mcp_cmd(*, batch: int, python: str | None, root: Path | None) -> None:
     """Serve the data-review MCP tools over stdio (used by auto-review)."""
     if python:
         os.environ["MODEL_WTF_PYTHON"] = python
-    serve(resolve_root(root), batch=batch)
-
-
-def write_override(
-    unit: Unit,
-    local_id: str,
-    *,
-    pii: bool | None,
-    sensitivity: str | None,
-    category: str | None,
-    reason: str | None,
-    store: str | None = None,
-) -> Path | None:
-    """Write the override file; ``None`` when it already exists."""
-    path = unit.folder / DATA_DIR / f"{local_id}.yaml"
-    if path.exists():
-        return None
-    lines: list[str] = []
-    if pii is not None:
-        lines.append(f"pii: {'true' if pii else 'false'}")
-    if sensitivity is not None:
-        lines.append(f"sensitivity: {sensitivity}")
-    if category is not None:
-        lines.append(f"category: {category}")
-    if store is not None:
-        lines.append(f"store: {store}")
-    lines.append(f"reason: {_quote(reason) if reason else todo_text()}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return path
-
-
-def _quote(value: str) -> str:
-    return json.dumps(value, ensure_ascii=False)
+    configure_root(root)
+    serve(batch=batch)

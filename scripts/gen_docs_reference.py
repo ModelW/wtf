@@ -102,28 +102,25 @@ def schema_page() -> str:
     )
 
     lines = [
-        "# File schemas",
+        "# Declaration schemas",
         "",
-        "Generated from the pydantic models. Unknown keys are declaration errors.",
+        "Generated from the pydantic models the rows of `compliance.db` are "
+        "validated against. Unknown keys are declaration errors.",
         "",
     ]
     for title, path, model in (
-        ("Application", "`compliance/app.yaml`", schemas.App),
-        ("Party", "`compliance/parties/<id>.yaml`", schemas.Party),
-        ("Activity", "`compliance/activities/<slug>.yaml`", ActivityFile),
-        ("Data override", "`<unit>/compliance/data/<id>.yaml`", Override),
-        (
-            "Touchpoint manifest",
-            "`<unit>/compliance/touchpoints/<slug>.yaml`",
-            Manifest,
-        ),
-        ("Transfer", "`transfers:` items of a manifest", Transfer),
-        ("Store write", "`stores:` items of a manifest", StoreWrite),
-        ("Undeclared flow entry", "`undeclared:` items of a manifest", Undeclared),
-        ("Store", "`<unit>/compliance/stores/<slug>.yaml`", StoreFile),
-        ("Threat stamp", "`threats:` entries (mitigated / accepted / n/a)", Stamp),
-        ("Stamp challenge", "`challenge:` / `answered:` on a stamp", StampChallenge),
-        ("Finding", "`threats:` entries written from a `!missing`", Finding),
+        ("Application", "the `app` row", schemas.App),
+        ("Party", "a `parties` row", schemas.Party),
+        ("Activity", "an `activities` row", ActivityFile),
+        ("Data override", "a `data_items` row of kind `override`", Override),
+        ("Touchpoint declaration", "a `touchpoints` row", Manifest),
+        ("Transfer", "`transfers` of a declaration", Transfer),
+        ("Store write", "`stores` of a declaration", StoreWrite),
+        ("Undeclared flow entry", "`undeclared` of a declaration", Undeclared),
+        ("Store", "a `stores` row", StoreFile),
+        ("Threat stamp", "`threat_stamps` rows (mitigated / accepted / n/a)", Stamp),
+        ("Stamp challenge", "`challenge` / `answered` on a stamp", StampChallenge),
+        ("Finding", "`threat_stamps` rows written from a `!missing`", Finding),
     ):
         lines.append(f"## {title}")
         lines.append("")
@@ -233,13 +230,18 @@ def mcp_page() -> str:
     import asyncio
     import tempfile
 
+    from model_wtf.compliance.container import configure, set_container
     from model_wtf.compliance.mcp_server import build_server
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         (root / ".git").mkdir()
         (root / "snow.yml").write_text("units: []\n", encoding="utf-8")
-        tools = asyncio.run(build_server(root).list_tools())
+        configure(root)
+        try:
+            tools = asyncio.run(build_server().list_tools())
+        finally:
+            set_container(None)
     lines = [
         "# MCP tools",
         "",

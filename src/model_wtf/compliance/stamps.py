@@ -1,16 +1,15 @@
 """Stamps: what a reviewer established about one threat on one element.
 
 The matrix (:mod:`threats`) leaves cells *open* when no simple rule closes
-them. A **stamp** is the human or agent answer, written in the element's own
-YAML (touchpoint manifest, ``stores/<slug>.yaml``, ``parties/<id>.yaml``)
-under ``threats:``::
+them. A **stamp** is the human or agent answer, recorded in the
+``threat_stamps`` table against the element that carries it (a touchpoint,
+a store, a party) under a key::
 
-    threats:
-      AC01: {status: mitigated, note: "get_object_or_404(user=request.user) api.py:245"}
-      DO02: {status: accepted, note: "list capped at 50 by CursorPagination"}
-      HA01: {status: n/a, note: "photo id is a UUID looked up in the DB; no path built"}
-      DS06: !missing "returns payment_method to anonymous callers (auth=None)"
-      DS06@party:mapbox: {status: mitigated, note: "only the position is sent"}
+    AC01               {status: mitigated, note: "get_object_or_404(...) api.py:245"}
+    DO02               {status: accepted, note: "list capped at 50 by pagination"}
+    HA01               {status: n/a, note: "photo id is a UUID looked up in the DB"}
+    DS06               !missing "returns payment_method to anonymous callers"
+    DS06@party:mapbox  {status: mitigated, note: "only the position is sent"}
 
 * ``mitigated`` — the code handles it; the note says where.
 * ``accepted`` — known and accepted by the risk owner; the note says why.
@@ -25,18 +24,15 @@ stamping time when written by the tool: a moved fingerprint makes the stamp
 
 from __future__ import annotations
 
-import fcntl
-import io
-from typing import TYPE_CHECKING, Any, Literal
+from dataclasses import dataclass
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel, model_validator
-from ruamel.yaml import YAML
-from ruamel.yaml.comments import CommentedMap, TaggedScalar
+from sqlalchemy import delete, select
 
-from model_wtf.compliance.yaml_io import MISSING_TAG, Missing, load_yaml
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from model_wtf.compliance.db import get_db
+from model_wtf.compliance.tables import StampRow
+from model_wtf.compliance.yaml_io import Missing
 
 STAMP_STATUSES = ("mitigated", "accepted", "n/a")
 NOTE_REQUIRED = frozenset({"accepted", "n/a"})
@@ -53,7 +49,7 @@ class StampChallenge(BaseModel):
 
 
 class Stamp(BaseModel):
-    """One ``threats:`` entry that closes a cell."""
+    """One ``threats`` entry that closes a cell."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -120,8 +116,8 @@ class Finding(BaseModel):
 
 
 class Stamps(RootModel[dict[str, Stamp | Finding | Missing]]):
-    """The ``threats:`` block: ``SID`` or ``SID@sink`` → stamp, weighed
-    finding, or bare ``!missing``."""
+    """The ``threats`` block of one holder: ``SID`` or ``SID@sink`` → stamp,
+    weighed finding, or bare ``!missing``."""
 
     root: dict[str, Stamp | Finding | Missing] = Field(default_factory=dict)
 
@@ -156,129 +152,133 @@ class Stamps(RootModel[dict[str, Stamp | Finding | Missing]]):
         return {k.partition("@")[0] for k in self.root}
 
 
-def stamps_to_yaml(stamps: Stamps) -> CommentedMap:
-    """The ``threats:`` block as a ruamel node: block style, ``!missing`` tagged."""
-    block = CommentedMap()
-    for key, value in sorted(stamps.root.items()):
-        if isinstance(value, Missing):
-            block[key] = TaggedScalar(value=value.note or "", tag=MISSING_TAG)
-            continue
-        if isinstance(value, Finding):
-            found = CommentedMap()
-            for name, item in value.model_dump(exclude_none=True).items():
-                if item in ([], None):
-                    continue
-                found[name] = item
-            block[key] = found
-            continue
-        block[key] = _stamp_node(value)
-    return block
+@dataclass(frozen=True, slots=True)
+class Holder:
+    """The element a stamp is recorded against."""
+
+    kind: Literal["touchpoint", "store", "party"]
+    unit: str
+    id: str
+
+    @classmethod
+    def touchpoint(cls, unit: str, touchpoint_id: str) -> Holder:
+        """A touchpoint of ``unit``."""
+        return cls("touchpoint", unit, touchpoint_id)
+
+    @classmethod
+    def store(cls, unit: str, slug: str) -> Holder:
+        """A store of ``unit``."""
+        return cls("store", unit, slug)
+
+    @classmethod
+    def party(cls, party_id: str) -> Holder:
+        """A party (shared)."""
+        return cls("party", "", party_id)
+
+    @property
+    def element_id(self) -> str:
+        """The matrix element id this holder is."""
+        if self.kind == "party":
+            return f"party:{self.id}"
+        return f"{self.unit}:{self.id}"
 
 
-def _stamp_node(value: Stamp) -> CommentedMap:
-    """One stamp as a YAML mapping, keys in a stable order so re-stamps diff
-    cleanly; `challenge`/`answered` blocks only when present."""
-    entry = CommentedMap()
-    entry["status"] = value.status
-    for name in ("note", "commit", "fingerprint", "by"):
-        if getattr(value, name):
-            entry[name] = getattr(value, name)
-    for name in ("challenge", "answered"):
-        block_value = getattr(value, name)
-        if block_value is not None:
-            entry[name] = CommentedMap(block_value.model_dump(exclude_none=True))
-    return entry
+def _encode(value: Stamp | Finding | Missing) -> tuple[str, dict[str, Any]]:
+    if isinstance(value, Missing):
+        return "missing", {"note": value.note}
+    if isinstance(value, Finding):
+        return "finding", value.model_dump(exclude_none=True)
+    return "stamp", value.model_dump(exclude_none=True)
 
 
-def stamp_lines(stamps: Stamps) -> list[str]:
-    """YAML lines for a ``threats:`` block (for writers that build files
-    line by line, like ``write_manifest``)."""
-    if not stamps.root:
-        return []
-    doc = CommentedMap()
-    doc["threats"] = stamps_to_yaml(stamps)
-    return _dump(doc).rstrip("\n").splitlines()
+def _decode(kind: str, payload: dict[str, Any]) -> Stamp | Finding | Missing:
+    if kind == "missing":
+        note = payload.get("note")
+        return Missing(None if note is None else str(note))
+    if kind == "finding":
+        return Finding.model_validate(payload)
+    return Stamp.model_validate(payload)
 
 
-def _yaml() -> YAML:
-    y = YAML()
-    y.preserve_quotes = True
-    y.width = 4096  # never fold a note across lines
-    y.indent(mapping=2, sequence=4, offset=2)  # `  - item` like write_manifest
-    return y
+def stamps_from_rows(rows: list[StampRow]) -> Stamps:
+    """The stamps of one holder from its rows."""
+    return Stamps({row.key: _decode(row.kind, row.payload) for row in rows})
 
 
-def _dump(node: Any) -> str:
-    buf = io.StringIO()
-    _yaml().dump(node, buf)
-    return buf.getvalue()
+def read_stamps(holder: Holder) -> Stamps:
+    """The stamps of one element, empty when none."""
+    with get_db() as db:
+        rows = db.scalars(
+            select(StampRow).where(
+                StampRow.holder_kind == holder.kind,
+                StampRow.holder_unit == holder.unit,
+                StampRow.holder_id == holder.id,
+            )
+        ).all()
+    return stamps_from_rows(list(rows))
 
 
-def write_stamps(path: Path, stamps: Stamps, *, merge: bool = True) -> None:
-    """Set (or drop) the ``threats:`` key of ``path`` with a round-trip YAML
-    editor: comments, quoting and ordering of the other keys are kept.
+def read_all_stamps(kind: str) -> dict[tuple[str, str], Stamps]:
+    """Every stamp of one holder kind, grouped by ``(unit, id)``."""
+    with get_db() as db:
+        rows = db.scalars(
+            select(StampRow)
+            .where(StampRow.holder_kind == kind)
+            .order_by(StampRow.holder_unit, StampRow.holder_id, StampRow.key)
+        ).all()
+    out: dict[tuple[str, str], dict[str, Stamp | Finding | Missing]] = {}
+    for row in rows:
+        out.setdefault((row.holder_unit, row.holder_id), {})[row.key] = _decode(
+            row.kind, row.payload
+        )
+    return {k: Stamps(v) for k, v in out.items()}
 
-    Under an exclusive lock, and by default **merged** with what is on disk
-    (several reviewer sessions may stamp the same touchpoint at once): the
-    given stamps win, the others stay.
+
+def write_stamps(holder: Holder, stamps: Stamps, *, merge: bool = True) -> None:
+    """Set the stamps of ``holder``.
+
+    By default **merged** with what is stored (several reviewer sessions
+    may stamp the same touchpoint at once): the given keys win, the others
+    stay. ``merge=False`` replaces the whole block.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    guard = path.with_suffix(".lock")
-    with guard.open("a+") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        try:
-            doc: Any = None
-            if path.is_file():
-                doc = _yaml().load(path.read_text(encoding="utf-8"))
-            if doc is None:
-                doc = CommentedMap()
-            if not isinstance(doc, CommentedMap):
-                msg = f"{path}: expected a mapping at the top level"
-                raise ValueError(msg)
-            final = stamps
-            if merge:
-                on_disk = Stamps.model_validate(_plain(doc.get("threats") or {}))
-                final = Stamps({**on_disk.root, **stamps.root})
-            if final.root:
-                doc["threats"] = stamps_to_yaml(final)
+    with get_db() as db:
+        if not merge:
+            db.execute(
+                delete(StampRow).where(
+                    StampRow.holder_kind == holder.kind,
+                    StampRow.holder_unit == holder.unit,
+                    StampRow.holder_id == holder.id,
+                )
+            )
+        for key, value in stamps.root.items():
+            kind, payload = _encode(value)
+            row = db.get(StampRow, (holder.kind, holder.unit, holder.id, key))
+            if row is None:
+                db.add(
+                    StampRow(
+                        holder_kind=holder.kind,
+                        holder_unit=holder.unit,
+                        holder_id=holder.id,
+                        key=key,
+                        kind=kind,
+                        payload=payload,
+                    )
+                )
             else:
-                doc.pop("threats", None)
-            path.write_text(_dump(doc), encoding="utf-8")
-        finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
-    guard.unlink(missing_ok=True)
-
-
-def _plain(node: Any) -> Any:
-    """A ruamel tree as plain Python, ``!missing`` scalars as :class:`Missing`."""
-    if isinstance(node, TaggedScalar):
-        if str(node.tag) == MISSING_TAG:
-            return Missing(str(node.value))
-        return str(node.value)
-    if isinstance(node, dict):
-        return {str(k): _plain(v) for k, v in node.items()}
-    if isinstance(node, list):
-        return [_plain(v) for v in node]
-    return node
-
-
-def read_stamps(path: Path) -> Stamps:
-    """The ``threats:`` block of a YAML file, empty when absent."""
-    if not path.is_file():
-        return Stamps()
-    raw = load_yaml(path) or {}
-    block = raw.get("threats") if isinstance(raw, dict) else None
-    return Stamps.model_validate(block or {})
+                row.kind = kind
+                row.payload = payload
 
 
 __all__ = [
     "NOTE_REQUIRED",
     "STAMP_STATUSES",
     "Finding",
+    "Holder",
     "Stamp",
+    "StampChallenge",
     "Stamps",
+    "read_all_stamps",
     "read_stamps",
-    "stamp_lines",
-    "stamps_to_yaml",
+    "stamps_from_rows",
     "write_stamps",
 ]

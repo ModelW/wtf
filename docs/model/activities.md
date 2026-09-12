@@ -10,12 +10,12 @@ uv run model-wtf compliance activities add <slug> <unit:id>...
 uv run model-wtf compliance data why <unit:id>... [--model unit:app.Model] [--manifests] [--format json]
 ```
 
-`compliance/activities/<slug>.yaml` (repository root, activities span units)
+the `activities` table (one row per slug; activities span units)
 is the Art. 30 row: `name`, `purpose`, `legal_basis` (`consent | contract |
 legal_obligation | vital_interests | public_task | legitimate_interests`, or
 `no_pii` — a claim that the activity handles no personal item, verified at
 every check: `no-pii-violated` otherwise), `data_subjects`, `touchpoints`,
-`recipients` (party ids), `controller`/`processor` (default: `app.yaml`'s);
+`recipients` (party ids), `controller`/`processor` (default: the app's);
 `consent: {record: <ref>, granularity: separate|bundled}` for consent-based
 ones (the stored proof, created with `create: {consent_for: <slug>}`),
 `interest` for legitimate interests (the balancing test), `basis_note` when

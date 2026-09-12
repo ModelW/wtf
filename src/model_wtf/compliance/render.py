@@ -138,7 +138,7 @@ def render_github(report: Report, console: Console) -> None:
 def _lines(report: Report, diags: list[Diagnostic]) -> list[tuple[Text, str | None]]:
     """One printable line per thing to do.
 
-    Marker diagnostics about the same file collapse into one line listing
+    Marker diagnostics about the same record collapse into one line listing
     the fields; rights findings collapse per item, and per model when the
     same note covers every field; everything else is printed as-is.
     """
@@ -147,8 +147,8 @@ def _lines(report: Report, diags: list[Diagnostic]) -> list[tuple[Text, str | No
     rights: list[Diagnostic] = []
     manual: list[Diagnostic] = []
     for diag in diags:
-        if diag.code in {"todo", "missing"} and diag.path is not None:
-            grouped[report.display_path(diag.path)].append(diag)
+        if diag.code in {"todo", "missing"} and diag.subject and "#" in diag.subject:
+            grouped[_record_of(report, diag)].append(diag)
         elif diag.code in RIGHTS_CODES and diag.subject and "#" in diag.subject:
             rights.append(diag)
         elif diag.code == "manual-exemption" and diag.subject:
@@ -257,10 +257,17 @@ def _field_with_note(diag: Diagnostic) -> str:
     return f'{field} "{diag.note}"' if diag.note else field
 
 
+def _record_of(report: Report, diag: Diagnostic) -> str:
+    """What a marker sits on: the file when there is one, else the record
+    named by the subject (``parties/acme``)."""
+    if diag.path is not None:
+        return report.display_path(diag.path)
+    return (diag.subject or "").split("#", 1)[0] or "?"
+
+
 def _marker_location(report: Report, diag: Diagnostic) -> str:
-    file = report.display_path(diag.path) if diag.path else "?"
     field = (diag.subject or "").split("#", 1)[-1]
-    return f"{file} {field}"
+    return f"{_record_of(report, diag)} {field}"
 
 
 def _summary_line(report: Report) -> Text:

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import pytest
 from click.testing import CliRunner
 
-from conftest import FILES_ALL_OK
+from conftest import seed_party, seed_touchpoint
 from model_wtf.cli import cli
 from model_wtf.compliance.check import run_check
 from model_wtf.compliance.flows import FlowKind, FlowStatus, build_flows, describe
@@ -24,6 +24,7 @@ from model_wtf.compliance.mcp_server import (
 )
 from model_wtf.compliance.report import Unit
 from model_wtf.compliance.threats import Verdict, build_elements, build_matrix
+from model_wtf.compliance.touchpoints import declared_touchpoints
 from model_wtf.compliance.workspace import load_workspace
 from test_threats import SNOW
 
@@ -37,27 +38,51 @@ EMAIL = "api:shop.Customer.email"
 
 @pytest.fixture
 def repo(make_repo: MakeRepo, monkeypatch: pytest.MonkeyPatch) -> Path:
-    root = make_repo(snow=SNOW, files=FILES_ALL_OK)
+    root = make_repo(snow=SNOW, seed=True)
     shutil.copytree(FIXTURES / "djproj", root / "api", dirs_exist_ok=True)
     monkeypatch.setenv("MODEL_WTF_PYTHON", sys.executable)
     monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
-    (root / "compliance" / "activities").mkdir()
-    (root / "compliance" / "parties" / "mapbox.yaml").write_text(
-        "name: Mapbox\ncountry: US\naddress: a\nemail: e@x\n"
-        "website: https://www.mapbox.com\nsafeguard: dpf\ndpf_certified: true\n"
+    seed_party(
+        "mapbox",
+        name="Mapbox",
+        country="US",
+        address="a",
+        email="e@x",
+        website="https://www.mapbox.com",
+        safeguard="dpf",
+        dpf_certified=True,
     )
-    folder = root / "api" / "compliance" / "touchpoints"
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / "checkout.yaml").write_text(
-        f"scope: subject\ndata:\n  - {EMAIL}: create\n"
-        f"transfers: [{{party: mapbox, data: [{EMAIL}], purpose: geocoding}}]\n"
+    seed_touchpoint(
+        "api",
+        "checkout",
+        scope="subject",
+        data=[{EMAIL: "create"}],
+        transfers=[{"party": "mapbox", "data": [EMAIL], "purpose": "geocoding"}],
     )
     return root
 
 
 def _ws(root: Path):
-    units = [Unit("api", root / "api" / "compliance", "django", root / "api")]
-    return load_workspace(root, units, load_knowledge(None))
+    units = [Unit("api", root / "api", "django")]
+    return load_workspace(units, load_knowledge(custom=False))
+
+
+def _zapier() -> None:
+    seed_party(
+        "zapier",
+        name="Zapier Inc",
+        country="US",
+        address="a",
+        email="e@x",
+        safeguard="dpf",
+        dpf_certified=True,
+    )
+
+
+def _undeclared(touchpoint_id: str) -> list[str]:
+    """Sinks of the stored ``undeclared`` entries of a declaration."""
+    raw = declared_touchpoints("api")[touchpoint_id]
+    return [u["sink"] for u in raw.get("undeclared", [])]
 
 
 def test_flows_are_classified_from_their_ends(repo: Path) -> None:
@@ -102,7 +127,7 @@ def test_cli_flows_list_and_show(repo: Path) -> None:
 
 
 def test_reviewer_sees_the_flows_and_reports_an_undeclared_one(repo: Path) -> None:
-    tools = Tools(repo)
+    tools = Tools()
     listing = tools.flows("api:checkout")
     assert "@party:mapbox" in listing
     assert "intended use" in listing
@@ -118,12 +143,9 @@ def test_reviewer_sees_the_flows_and_reports_an_undeclared_one(repo: Path) -> No
         "api.py:27 requests.post(...) with the customer email",
     )
     assert out.startswith("Recorded")
-    manifest = repo / "api" / "compliance" / "touchpoints" / "checkout.yaml"
-    text = manifest.read_text()
-    assert "undeclared:" in text
-    assert "sink: hooks.zapier.com" in text
+    assert _undeclared("checkout") == ["hooks.zapier.com"]
     # It is a finding, the touchpoint is pending again, the flow is listed.
-    diags = run_check(repo, strict=False).diagnostics
+    diags = run_check(strict=False).diagnostics
     gap = next(d for d in diags if d.code == "flow-undeclared")
     assert gap.subject == "api:checkout->hooks.zapier.com"
     assert "hooks.zapier.com" in gap.message
@@ -145,10 +167,7 @@ def test_reviewer_sees_the_flows_and_reports_an_undeclared_one(repo: Path) -> No
         "Error"
     )
     # Declaring the transfer closes it (party first).
-    (repo / "compliance" / "parties" / "zapier.yaml").write_text(
-        "name: Zapier Inc\ncountry: US\naddress: a\nemail: e@x\n"
-        "safeguard: dpf\ndpf_certified: true\n"
-    )
+    _zapier()
     # The undeclared sink was a bare host; re-report resolves to the party id
     # once it exists, and the declaration names it.
     tools.touchpoint_set_data(
@@ -161,10 +180,9 @@ def test_reviewer_sees_the_flows_and_reports_an_undeclared_one(repo: Path) -> No
         ],
         scope="subject",
     )
-    text = manifest.read_text()
     # The bare-host entry is not matched by `party:zapier`: it stays until
     # the reviewer reports the party id or the code stops sending.
-    assert "hooks.zapier.com" in text
+    assert _undeclared("checkout") == ["hooks.zapier.com"]
     tools.workspace(refresh=True)
     ws = _ws(repo)
     tp = ws.all_touchpoints["api:checkout"]
@@ -172,11 +190,8 @@ def test_reviewer_sees_the_flows_and_reports_an_undeclared_one(repo: Path) -> No
 
 
 def test_undeclared_flow_to_a_known_party_closes_when_declared(repo: Path) -> None:
-    tools = Tools(repo)
-    (repo / "compliance" / "parties" / "zapier.yaml").write_text(
-        "name: Zapier Inc\ncountry: US\naddress: a\nemail: e@x\n"
-        "safeguard: dpf\ndpf_certified: true\n"
-    )
+    tools = Tools()
+    _zapier()
     tools.workspace(refresh=True)
     out = tools.flow_report("api:checkout", "zapier", [EMAIL], "api.py:27 posts it")
     assert "party:zapier" in out
@@ -190,12 +205,11 @@ def test_undeclared_flow_to_a_known_party_closes_when_declared(repo: Path) -> No
         ],
         scope="subject",
     )
-    text = (repo / "api" / "compliance" / "touchpoints" / "checkout.yaml").read_text()
-    assert "undeclared:" not in text
+    assert _undeclared("checkout") == []
     ws = _ws(repo)
     assert not ws.all_touchpoints["api:checkout"].pending
     assert not any(
-        d.code == "flow-undeclared" for d in run_check(repo, strict=False).diagnostics
+        d.code == "flow-undeclared" for d in run_check(strict=False).diagnostics
     )
     matrix = build_matrix(ws, register=False)
     cell = next(
@@ -231,21 +245,27 @@ def test_a_host_the_code_calls_without_a_declared_transfer_is_a_finding(
     assert set(gaps) == {"api.hubapi.com"}  # mapbox declared, localhost is ours
     assert gaps["api.hubapi.com"].touchpoint == "api:checkout"
     assert "seen by introspection" in (gaps["api.hubapi.com"].note or "")
-    diags = run_check(repo, strict=False).diagnostics
+    diags = run_check(strict=False).diagnostics
     gap = next(d for d in diags if d.code == "flow-undeclared")
     assert gap.subject == "api:checkout->api.hubapi.com"
     pending = next(d for d in diags if d.code == "touchpoint-pending")
     assert "api:checkout" in pending.items
     # Declaring HubSpot as a party with its website and the transfer closes it.
-    (repo / "compliance" / "parties" / "hubspot.yaml").write_text(
-        "name: HubSpot\ncountry: US\naddress: a\nemail: e@x\n"
-        "website: https://www.hubspot.com\nhosts: [api.hubapi.com]\n"
-        "safeguard: dpf\ndpf_certified: true\n"
+    seed_party(
+        "hubspot",
+        name="HubSpot",
+        country="US",
+        address="a",
+        email="e@x",
+        website="https://www.hubspot.com",
+        hosts=["api.hubapi.com"],
+        safeguard="dpf",
+        dpf_certified=True,
     )
     ws = _ws(repo)
     gaps = {f.sink: f for f in build_flows(ws, build_elements(ws)).undeclared()}
     assert set(gaps) == {"party:hubspot"}  # known party now, still undeclared here
-    tools = Tools(repo)
+    tools = Tools()
     tools.touchpoint_set_data(
         "api:checkout",
         [DataRef(ref="shop.Customer.email", ops=[{"op": "create"}])],
@@ -285,7 +305,7 @@ def test_a_service_the_project_runs_is_a_store_write_not_a_transfer(
     assert set(gaps) == {"setting:BOARD_URL"}
     assert gaps["setting:BOARD_URL"].kind is FlowKind.TRANSFER  # unknown so far
     # The reviewer is told why the declared touchpoint is still pending.
-    tools = Tools(repo)
+    tools = Tools()
     listing = tools.touchpoint_pending("api")
     assert "api:checkout" in listing
     # ... and declares the store, then the copy.
@@ -326,8 +346,9 @@ def test_a_service_the_project_runs_is_a_store_write_not_a_transfer(
     )
     assert "writes to 1 store(s)" in out
     assert "STILL PENDING" not in out
-    text = (repo / "api" / "compliance" / "touchpoints" / "checkout.yaml").read_text()
-    assert "stores:\n  - store: api:board\n" in text
+    assert declared_touchpoints("api")["checkout"]["stores"] == [
+        {"store": "api:board", "data": [EMAIL], "purpose": "live board"}
+    ]
     ws = _ws(repo)
     tp = ws.all_touchpoints["api:checkout"]
     assert not tp.pending
@@ -346,7 +367,7 @@ def test_a_service_the_project_runs_is_a_store_write_not_a_transfer(
     assert matrix.by_element("api:checkout->api:board")
     assert not any(
         d.code in ("flow-undeclared", "store-unknown")
-        for d in run_check(repo, strict=False).diagnostics
+        for d in run_check(strict=False).diagnostics
     )
     # Reporting the same flow again by hand is refused: it is declared.
     assert "already a declared store write" in tools.flow_report(
@@ -355,12 +376,14 @@ def test_a_service_the_project_runs_is_a_store_write_not_a_transfer(
 
 
 def test_a_store_write_to_an_unknown_store_is_an_error(repo: Path) -> None:
-    folder = repo / "api" / "compliance" / "touchpoints"
-    (folder / "checkout.yaml").write_text(
-        f"scope: subject\ndata:\n  - {EMAIL}: create\n"
-        f"stores: [{{store: ghost, data: [{EMAIL}]}}]\n"
+    seed_touchpoint(
+        "api",
+        "checkout",
+        scope="subject",
+        data=[{EMAIL: "create"}],
+        stores=[{"store": "ghost", "data": [EMAIL]}],
     )
-    diags = run_check(repo, strict=False).diagnostics
+    diags = run_check(strict=False).diagnostics
     bad = next(d for d in diags if d.code == "store-unknown")
     assert "ghost" in bad.message
 
@@ -371,7 +394,7 @@ def test_a_free_text_report_closes_once_its_store_or_party_exists(repo: Path) ->
     setting in `hosts` claims the report; the manifest's `stores` entry then
     closes it and the stale `undeclared:` block is dropped on rewrite. A
     report naming the project's own API host is not a gap at all."""
-    tools = Tools(repo)
+    tools = Tools()
     out = tools.flow_report(
         "api:checkout",
         "TMW (Hocuspocus, settings.TMW_URL)",
@@ -401,19 +424,25 @@ def test_a_free_text_report_closes_once_its_store_or_party_exists(repo: Path) ->
         stores=[StoreDecision(store="tmw", data=[EMAIL])],
         scope="subject",
     )
-    text = (repo / "api" / "compliance" / "touchpoints" / "checkout.yaml").read_text()
-    assert "undeclared:" not in text
+    assert _undeclared("checkout") == []
     ws = _ws(repo)
     assert build_flows(ws, build_elements(ws)).undeclared() == []
     assert not ws.all_touchpoints["api:checkout"].pending
     assert "api:checkout" not in {t.full_id for t in ws.pending_touchpoints()}
     # A report written before the party/store existed does not keep the
     # touchpoint pending once it resolves to something declared.
-    folder = repo / "api" / "compliance" / "touchpoints"
-    (folder / "getCustomer.yaml").write_text(
-        f"data: [{EMAIL}]\ntransfers: [{{party: mapbox, data: [{EMAIL}]}}]\n"
-        "undeclared:\n  - sink: geocoder at api.mapbox.com\n"
-        f"    data: [{EMAIL}]\n    note: x.py:1 posts it\n"
+    seed_touchpoint(
+        "api",
+        "getCustomer",
+        data=[EMAIL],
+        transfers=[{"party": "mapbox", "data": [EMAIL]}],
+        undeclared=[
+            {
+                "sink": "geocoder at api.mapbox.com",
+                "data": [EMAIL],
+                "note": "x.py:1 posts it",
+            }
+        ],
     )
     ws = _ws(repo)
     tp = ws.all_touchpoints["api:getCustomer"]

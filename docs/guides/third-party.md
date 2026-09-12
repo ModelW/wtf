@@ -7,7 +7,7 @@ sends.
 
 ## 1. The party
 
-`compliance/parties/<id>.yaml` (kebab-case id):
+a party (kebab-case id), through `party_add` or the `parties` table:
 
 ```yaml
 name: HubSpot, Inc.
@@ -32,7 +32,8 @@ SDK or host, with `!todo` contact details; you complete them.
 
 ## 2. The transfer
 
-On each touchpoint that sends, in `<unit>/compliance/touchpoints/<slug>.yaml`:
+On each touchpoint that sends, in its declaration (`touchpoint_set_data` or
+`touchpoints set-data`):
 
 ```yaml
 transfers:
@@ -59,7 +60,7 @@ does this), `touchpoints set-data` on the CLI.
 
 Do not invent a party for the project's own realtime server, search index
 or the SMTP relay behind `EMAIL_HOST` — a party is a named organisation. Those
-are **stores**: declare one in `<unit>/compliance/stores/<slug>.yaml`
+are **stores**: declare one with `store_add` (a `stores` row)
 
 ```yaml
 type: realtime          # or external, search, ...

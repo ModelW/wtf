@@ -22,10 +22,10 @@ flowchart LR
 
 | Inventory | Comes from | Decided by | Decision file |
 |---|---|---|---|
-| **Data items** — every field, column, JSON key, file content | model introspection | data rules, then a review per model | `data.lock.yaml`, `data/<id>.yaml` overrides |
-| **Touchpoints** — routes, tasks, admin screens, front routes | URL conf, task registry, SvelteKit tree | a declaration per touchpoint: what it does to which items, for whom, sent where | `touchpoints/<slug>.yaml` |
+| **Data items** — every field, column, JSON key, file content | model introspection | data rules, then a review per model | `data_locks`, `data_items` overrides |
+| **Touchpoints** — routes, tasks, admin screens, front routes | URL conf, task registry, SvelteKit tree | a declaration per touchpoint: what it does to which items, for whom, sent where | `touchpoints` and its refs, transfers, store writes |
 | **Flows** — `source -> sink` movements | the two above | kind and status from the ends; undeclared ones reported | `undeclared:` in the manifest |
-| **Stores** — databases, caches, buckets, queues | settings | one file per store | `stores/<slug>.yaml` |
+| **Stores** — databases, caches, buckets, queues | settings | one row per store | `stores` |
 
 From these the tool derives, without further input, the **activities**
 (groups of touchpoints with a purpose and a legal basis), the **rights
@@ -41,7 +41,7 @@ the **threat matrix** (every element × every applicable threat).
 | Reviewer agents | answer one narrow question at a time, cite code | `auto-review` swarms; one write tool each |
 | Developer | reads `check`, answers `!todo`, declares what changed | the CLI, the YAML files |
 | Challenger agent | reads a PR's diff, re-opens undermined reviews | `ghate` in CI |
-| DPO / CISO | own the decision files (CODEOWNERS), read the register and the findings | `activities explain`, `threats findings`, `check` |
+| DPO / CISO | own the decisions, read the register and the findings | `activities explain`, `threats findings`, `check` |
 
 ## Life of a change
 

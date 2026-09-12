@@ -18,7 +18,7 @@ item in every activity that handles it**, whether each right is served
 | objection (Art. 21) | legitimate-interests activities: a `subject` update/delete on one of its items (an opt-out) | `objection-missing` |
 | consent (Art. 7) | consent activities: `consent.record` created with `consent_for`, and a `consent_withdraw: {for: slug}` op | `consent-proof-missing`, `consent-withdrawal-missing` |
 | transfers (Ch. V) | party outside the EEA / adequacy list (`knowledge/adequacy.yaml`) carries `safeguard: sccs|bcr|dpf|derogation` (`dpf` with `dpf_certified: true`); an unknown country is a Todo | `transfer-safeguard-missing` |
-| DPIA (Art. 35) | special-category data (`always`) → `dpia_reference` on the activity; confidential data (`large_scale`) only when `app.yaml` says `large_scale: true` | `dpia-missing` |
+| DPIA (Art. 35) | special-category data (`always`) → `dpia_reference` on the activity; confidential data (`large_scale`) only when the app says `large_scale: true` | `dpia-missing` |
 
 When a staff screen performs the op but no self-service does, the finding
 says so (*no self-service; staff can via admin:people.User — exempt
@@ -30,8 +30,8 @@ models ship their own rights story (`knowledge/library/*.yaml` `rights:`
 block: an audit trail is kept for accountability, a session is purged by the
 framework) which applies to inherited columns too (a page type's `owner`).
 
-Exemptions live on the **data item** (`<unit>/compliance/data/<id>.yaml`, or
-`<app.Model>.*.yaml` for every personal field of a model; the item's own
+Exemptions live on the **data item** (its `data_items` row, or a
+`<app.Model>.*` row for every personal field of a model; the item's own
 file wins right by right):
 
 ```yaml

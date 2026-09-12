@@ -11,16 +11,16 @@ script (``DATABASES`` → ``db-<alias>``, ``CACHES`` → ``cache-<alias>``,
 ``search-<alias>``); nothing has to be written for the common case. A store
 is described by its slug, its ``type`` and a conceptual ``backend``
 (``postgresql``, ``redis``, ``s3``): hosts, bucket names and credentials are
-deployment facts and never appear here. The optional
-``<unit>/compliance/stores/<slug>.yaml`` layer can still:
+deployment facts and never appear here. The optional ``stores`` row of a
+unit can still:
 
 * **override** facts of an introspected store (a human ``name``, the
   ``provider``, ``location`` as a region/country, ``retention``...);
 * **declare** a store the settings do not show (an external SaaS, a
   spreadsheet, the browser's localStorage in a front unit) so manual data
-  items can reference it — such a file must give ``type``;
-* **hide** a store with ``ignore: true`` (a test database); hidden stores
-  must not be referenced by any row.
+  items can reference it — such a row must give ``type``;
+* **hide** a store with ``ignore`` (a test database); hidden stores must
+  not be referenced by any row.
 """
 
 from __future__ import annotations
@@ -30,22 +30,20 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-import yaml
 from pydantic import Field, ValidationError
+from sqlalchemy import select
 
+from model_wtf.compliance.db import get_db
 from model_wtf.compliance.declarations import format_errors
 from model_wtf.compliance.report import Diagnostic, Severity, marker_diagnostics
 from model_wtf.compliance.schemas import NonEmpty, StrictModel
-from model_wtf.compliance.stamps import Stamps
-from model_wtf.compliance.yaml_io import Marker, load_yaml
+from model_wtf.compliance.stamps import Stamps, read_all_stamps
+from model_wtf.compliance.tables import StoreHostRow, StoreRow
+from model_wtf.compliance.yaml_io import Marker
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from model_wtf.compliance.report import Unit
     from model_wtf.introspect.runner import Inventory
-
-STORES_DIR = "stores"
 
 
 class StoreType(StrEnum):
@@ -71,8 +69,8 @@ class StoreSource(StrEnum):
     MANUAL = "manual"
 
 
-class StoreFile(StrictModel):
-    """``stores/<slug>.yaml``: overrides for a known slug, or a manual store.
+class StoreSpec(StrictModel):
+    """A ``stores`` row: overrides for a known slug, or a manual store.
 
     Every field is optional so an override can touch one fact; a manual
     store (slug unknown to the config) must at least carry ``type``.
@@ -108,11 +106,11 @@ class StoreFile(StrictModel):
             "a write to this store, not a transfer"
         ),
     )
-    threats: Stamps = Field(
-        default_factory=Stamps,
-        description="Stamps closing the threat cells the matrix left open",
-    )
     ignore: bool = Field(default=False, description="Hide the store (a test database)")
+
+
+StoreFile = StoreSpec
+"""Former name, kept for callers."""
 
 
 @dataclass(frozen=True)
@@ -136,7 +134,7 @@ class Store:
     hosts: tuple[str, ...] = ()
     """Hostnames / URL setting names that reach this store (declared)."""
     stamps: Stamps = field(default_factory=Stamps)
-    """Threat stamps from ``stores/<slug>.yaml``."""
+    """Threat stamps recorded on the store."""
 
     @property
     def fingerprint(self) -> str:
@@ -185,9 +183,41 @@ class UnitStores:
         return [s for s in self.stores.values() if not s.ignore]
 
 
+def store_label(unit_id: str, slug: str) -> str:
+    """How a store row is named in diagnostics."""
+    return f"stores/{unit_id}:{slug}"
+
+
+def _row_raw(row: StoreRow) -> dict[str, Any]:
+    raw: dict[str, Any] = {"hosts": [h.host for h in row.hosts], "ignore": row.ignore}
+    for key in (
+        "type",
+        "backend",
+        "name",
+        "provider",
+        "location",
+        "retention",
+        "description",
+    ):
+        value = getattr(row, key)
+        if value is not None:
+            raw[key] = value
+    return raw
+
+
+def declared_stores(unit_id: str) -> dict[str, dict[str, Any]]:
+    """Raw ``stores`` rows of a unit, by slug."""
+    with get_db() as db:
+        rows = db.scalars(
+            select(StoreRow).where(StoreRow.unit == unit_id).order_by(StoreRow.slug)
+        ).all()
+        return {row.slug: _row_raw(row) for row in rows}
+
+
 def collect_stores(unit: Unit, inventory: Inventory | None) -> UnitStores:
-    """Merge the introspected stores with the unit's ``stores/*.yaml`` files."""
+    """Merge the introspected stores with the unit's declared ``stores`` rows."""
     result = UnitStores()
+    stamps = read_all_stamps("store")
     if inventory is not None:
         result.sessions_store = inventory.sessions.store if inventory.sessions else None
         for info in inventory.stores:
@@ -202,33 +232,33 @@ def collect_stores(unit: Unit, inventory: Inventory | None) -> UnitStores:
                 source=StoreSource.CONFIG,
                 backend=info.backend,
                 config=info.config,
+                stamps=stamps.get((unit.id, info.slug), Stamps()),
             )
-    folder = unit.folder / STORES_DIR
-    if not folder.is_dir():
-        return result
-    for path in sorted(folder.glob("*.yaml")):
-        declared = _load(path, unit, result.diagnostics)
+    for slug, raw in declared_stores(unit.id).items():
+        declared = _validate(raw, unit, slug, result.diagnostics)
         if declared is None:
             continue
-        slug = path.stem
         base = result.stores.get(slug)
         if base is None and declared.type is None:
             result.diagnostics.append(
                 Diagnostic(
                     Severity.ERROR,
                     "store-orphan",
-                    f"{path.name}: no store {slug!r} in the settings; a manual store "
-                    "needs at least `type`",
+                    f"{store_label(unit.id, slug)}: no store {slug!r} in the "
+                    "settings; a manual store needs at least `type`",
                     unit.id,
-                    path,
                 )
             )
             continue
-        result.stores[slug] = _merge(unit, slug, base, declared)
+        result.stores[slug] = _merge(
+            unit, slug, base, declared, stamps.get((unit.id, slug), Stamps())
+        )
     return result
 
 
-def _merge(unit: Unit, slug: str, base: Store | None, declared: StoreFile) -> Store:
+def _merge(
+    unit: Unit, slug: str, base: Store | None, declared: StoreSpec, stamps: Stamps
+) -> Store:
     def text(value: str | Marker | None) -> str | None:
         return None if value is None or isinstance(value, Marker) else value
 
@@ -247,7 +277,7 @@ def _merge(unit: Unit, slug: str, base: Store | None, declared: StoreFile) -> St
             description=text(declared.description),
             ignore=declared.ignore,
             hosts=tuple(declared.hosts),
-            stamps=declared.threats,
+            stamps=stamps,
         )
     return Store(
         unit=unit.id,
@@ -263,44 +293,63 @@ def _merge(unit: Unit, slug: str, base: Store | None, declared: StoreFile) -> St
         description=text(declared.description) or base.description,
         ignore=declared.ignore,
         hosts=tuple(declared.hosts),
-        stamps=declared.threats,
+        stamps=stamps,
     )
 
 
-def _load(path: Path, unit: Unit, diagnostics: list[Diagnostic]) -> StoreFile | None:
+def _validate(
+    raw: dict[str, Any], unit: Unit, slug: str, diagnostics: list[Diagnostic]
+) -> StoreSpec | None:
+    label = store_label(unit.id, slug)
     try:
-        raw = load_yaml(path)
-    except (OSError, yaml.YAMLError) as exc:
-        diagnostics.append(
-            Diagnostic(
-                Severity.ERROR, "yaml-error", f"{path.name}: {exc}", unit.id, path
-            )
-        )
-        return None
-    if not isinstance(raw, dict):
-        diagnostics.append(
-            Diagnostic(
-                Severity.ERROR,
-                "schema-error",
-                f"{path.name}: expected a mapping",
-                unit.id,
-                path,
-            )
-        )
-        return None
-    try:
-        declared = StoreFile.model_validate(raw)
+        declared = StoreSpec.model_validate(raw)
     except ValidationError as exc:
         diagnostics.extend(
             Diagnostic(
-                Severity.ERROR,
-                "schema-error",
-                f"{path.name}: {loc}: {msg}",
-                unit.id,
-                path,
+                Severity.ERROR, "schema-error", f"{label}: {loc}: {msg}", unit.id
             )
             for loc, msg in format_errors(exc)
         )
         return None
-    diagnostics.extend(marker_diagnostics(declared, path, unit.id))
+    diagnostics.extend(marker_diagnostics(declared, label, unit.id))
     return declared
+
+
+def save_store(unit_id: str, slug: str, spec: dict[str, Any]) -> bool:
+    """Create a ``stores`` row from a raw :class:`StoreSpec` mapping;
+    ``False`` when the slug already has one. Unknown keys and bad types are
+    stored as given and reported by ``check`` (a bad declaration is a
+    declaration error, not a refused write)."""
+    with get_db() as db:
+        if db.get(StoreRow, (unit_id, slug)) is not None:
+            return False
+        hosts = [str(h) for h in spec.get("hosts") or []]
+        row = StoreRow(
+            unit=unit_id,
+            slug=slug,
+            type=spec.get("type"),
+            backend=spec.get("backend"),
+            name=spec.get("name"),
+            provider=spec.get("provider"),
+            location=spec.get("location"),
+            retention=spec.get("retention"),
+            description=spec.get("description"),
+            ignore=bool(spec.get("ignore", False)),
+        )
+        row.hosts = [StoreHostRow(unit=unit_id, slug=slug, host=h) for h in hosts]
+        db.add(row)
+    return True
+
+
+__all__ = [
+    "Store",
+    "StoreFile",
+    "StoreSource",
+    "StoreSpec",
+    "StoreType",
+    "UnitStores",
+    "collect_stores",
+    "declared_stores",
+    "save_store",
+    "store_label",
+]

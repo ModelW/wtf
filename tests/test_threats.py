@@ -9,13 +9,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+import yaml
 from click.testing import CliRunner
 
-from conftest import FILES_ALL_OK
+from conftest import seed_party, seed_touchpoint
 from model_wtf.cli import cli
 from model_wtf.compliance.check import run_check
 from model_wtf.compliance.knowledge import load_knowledge
 from model_wtf.compliance.report import Unit
+from model_wtf.compliance.stamps import Holder, read_stamps
 from model_wtf.compliance.threats import (
     CatalogueError,
     ElementKind,
@@ -25,6 +27,7 @@ from model_wtf.compliance.threats import (
 )
 from model_wtf.compliance.threats_gen import GenError, generate
 from model_wtf.compliance.workspace import load_workspace
+from model_wtf.compliance.yaml_io import Missing
 
 if TYPE_CHECKING:
     from conftest import MakeRepo
@@ -42,23 +45,25 @@ EMAIL = "api:shop.Customer.email"
 
 @pytest.fixture
 def repo(make_repo: MakeRepo, monkeypatch: pytest.MonkeyPatch) -> Path:
-    root = make_repo(snow=SNOW, files=FILES_ALL_OK)
+    root = make_repo(snow=SNOW, seed=True)
     shutil.copytree(FIXTURES / "djproj", root / "api", dirs_exist_ok=True)
     monkeypatch.setenv("MODEL_WTF_PYTHON", sys.executable)
     monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
-    (root / "compliance" / "activities").mkdir()
     return root
 
 
 def _ws(root: Path):
-    units = [Unit("api", root / "api" / "compliance", "django", root / "api")]
-    return load_workspace(root, units, load_knowledge(None))
+    units = [Unit("api", root / "api", "django")]
+    return load_workspace(units, load_knowledge(custom=False))
 
 
-def _tp(root: Path, slug: str, body: str) -> None:
-    folder = root / "api" / "compliance" / "touchpoints"
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / f"{slug}.yaml").write_text(body)
+def _tp(root: Path, touchpoint_id: str, body: str) -> None:
+    """A declaration written in its YAML mapping form."""
+    seed_touchpoint("api", touchpoint_id, **yaml.safe_load(body))
+
+
+def _stamps(touchpoint_id: str) -> dict[str, object]:
+    return read_stamps(Holder.touchpoint("api", touchpoint_id)).root
 
 
 def _cells(root: Path, element: str) -> dict[str, tuple[Verdict, str]]:
@@ -200,7 +205,7 @@ def test_flows_carrying_no_personal_item_drop_disclosure_threats(repo: Path) -> 
 
 def test_check_folds_open_cells_into_one_review_line_with_items(repo: Path) -> None:
     _tp(repo, "getCustomer", f"scope: subject\ndata:\n  - {EMAIL}\n")
-    report = run_check(repo, strict=False)
+    report = run_check(strict=False)
     line = next(d for d in report.diagnostics if d.code == "threat-open")
     assert line.scope_id == "api"
     assert line.subject == "api:threats"
@@ -287,14 +292,14 @@ def test_a_stamp_closes_a_cell_and_missing_becomes_a_finding(repo: Path) -> None
         "get_object_or_404(user=request.user) api.py:31",
     )
     assert out.exit_code == 0, out.output  # type: ignore[attr-defined]
-    manifest = repo / "api" / "compliance" / "touchpoints" / "getCustomer.yaml"
-    text = manifest.read_text()
-    # The rest of the file is untouched; the block is appended.
-    assert text.startswith("scope: subject\nnote: reviewed\n")
-    assert (
-        "threats:\n  AC01:\n    status: mitigated\n    note: get_object_or_404" in text
-    )
-    assert "fingerprint:" in text
+    # The declaration is untouched; the stamp sits in its own table.
+    ws = _ws(repo)
+    tp = ws.all_touchpoints["api:getCustomer"]
+    assert (tp.scope.value, tp.note) == ("subject", "reviewed")
+    stamp = _stamps("getCustomer")["AC01"]
+    assert stamp.status == "mitigated"  # type: ignore[union-attr]
+    assert stamp.note.startswith("get_object_or_404")  # type: ignore[union-attr]
+    assert stamp.fingerprint  # type: ignore[union-attr]
     cells = _cells(repo, "api:getCustomer")
     assert cells["AC01"][0] is Verdict.STAMPED
     assert cells["AC01"][1] == "mitigated"
@@ -303,7 +308,7 @@ def test_a_stamp_closes_a_cell_and_missing_becomes_a_finding(repo: Path) -> None
     assert out.exit_code == 0, out.output  # type: ignore[attr-defined]
     cells = _cells(repo, "api:getCustomer")
     assert cells["DS01"] == (Verdict.MISSING, "returns the DB error")
-    report = run_check(repo, strict=False)
+    report = run_check(strict=False)
     finding = next(d for d in report.diagnostics if d.code == "threat-missing")
     assert finding.subject == "api:getCustomer#DS01"
     assert finding.origin == "declared"
@@ -347,7 +352,7 @@ def test_a_stamp_goes_stale_when_the_touchpoint_changes(repo: Path) -> None:
     assert cell[0] is Verdict.STALE
     assert "fingerprint moved" in cell[1]
     line = next(
-        d for d in run_check(repo, strict=False).diagnostics if d.code == "threat-open"
+        d for d in run_check(strict=False).diagnostics if d.code == "threat-open"
     )
     assert "api:getCustomer#AA03" in line.items
     assert "stamped on code that moved" in line.message
@@ -365,8 +370,7 @@ def test_flow_stamps_live_on_the_source_keyed_by_sink(repo: Path) -> None:
         "the store is the app's own database",
     )
     assert out.exit_code == 0, out.output  # type: ignore[attr-defined]
-    text = (repo / "api" / "compliance" / "touchpoints" / "checkout.yaml").read_text()
-    assert "DS06@api:db-default:\n    status: n/a" in text
+    assert _stamps("checkout")["DS06@api:db-default"].status == "n/a"  # type: ignore[union-attr]
     matrix = build_matrix(_ws(repo))
     by = {(c.element, c.sid): c for c in matrix.cells}
     assert by["api:checkout->api:db-default", "DS06"].verdict is Verdict.STAMPED
@@ -392,13 +396,13 @@ def test_store_and_party_stamps(repo: Path) -> None:
         repo, "api:db-default", "AC01", "--status", "n/a", "--note", "one unit"
     )
     assert out.exit_code == 0, out.output  # type: ignore[attr-defined]
-    store_file = repo / "api" / "compliance" / "stores" / "db-default.yaml"
-    assert "threats:\n  AC01:\n    status: n/a" in store_file.read_text()
+    store_stamps = read_stamps(Holder.store("api", "db-default")).root
+    assert store_stamps["AC01"].status == "n/a"  # type: ignore[union-attr]
     assert _cells(repo, "api:db-default")["AC01"][0] is Verdict.STAMPED
     # A re-declaration of a touchpoint keeps its stamps.
     from model_wtf.compliance.mcp_server import DataRef, Tools
 
-    tools = Tools(repo)
+    tools = Tools()
     tools.touchpoint_set_data(
         "api:getCustomer",
         [DataRef(ref="shop.Customer.email")],
@@ -412,10 +416,7 @@ def test_store_and_party_stamps(repo: Path) -> None:
         reason="again",
         scope="subject",
     )
-    text = (
-        repo / "api" / "compliance" / "touchpoints" / "getCustomer.yaml"
-    ).read_text()
-    assert "AA03:\n    status: mitigated" in text
+    assert _stamps("getCustomer")["AA03"].status == "mitigated"  # type: ignore[union-attr]
     # The agent tools: cells to look at, then a stamp by the agent.
     listing = tools.threat_cells("api:getCustomer")
     assert "AC01 [access]" in listing
@@ -423,7 +424,7 @@ def test_store_and_party_stamps(repo: Path) -> None:
     assert tools.threat_stamp(
         "api:getCustomer", "AC01", missing="no owner check"
     ).startswith("Stamped")
-    report = run_check(repo, strict=False)
+    report = run_check(strict=False)
     finding = next(d for d in report.diagnostics if d.code == "threat-missing")
     assert finding.origin == "claimed"
     assert finding.note == "no owner check"
@@ -433,22 +434,20 @@ def test_store_and_party_stamps(repo: Path) -> None:
     )
 
 
-def test_stamps_survive_hostile_notes_and_keep_the_rest_of_the_file(repo: Path) -> None:
+def test_stamps_survive_hostile_notes_and_keep_the_declaration(repo: Path) -> None:
     """Notes with colons, braces, quotes and unicode; the reviewer's own
-    lines untouched, byte for byte."""
-    from model_wtf.compliance.stamps import Stamp, Stamps, read_stamps, write_stamps
-    from model_wtf.compliance.yaml_io import Missing
+    declaration untouched."""
+    from model_wtf.compliance.stamps import Stamp, Stamps, write_stamps
 
-    manifest = repo / "api" / "compliance" / "touchpoints" / "getCustomer.yaml"
-    manifest.parent.mkdir(parents=True, exist_ok=True)
-    original = (
-        "# reviewed by hand\n"
+    _tp(
+        repo,
+        "getCustomer",
         "scope: subject\n"
         "note: 'api.py:31: {braces}, colons: everywhere'\n"
         "data:\n"
-        "  - api:shop.Customer.email: [create, read]\n"
+        "  - api:shop.Customer.email: [create, read]\n",
     )
-    manifest.write_text(original)
+    holder = Holder.touchpoint("api", "getCustomer")
     hostile = 'guard at api.py:144-152; {not: yaml}, it\'s "quoted" — ok: yes'
     stamps = Stamps(
         {
@@ -456,22 +455,22 @@ def test_stamps_survive_hostile_notes_and_keep_the_rest_of_the_file(repo: Path) 
             "CR03": Missing("[agent] no throttle: 'x', {y}"),
         }
     )
-    write_stamps(manifest, stamps)
-    text = manifest.read_text()
-    assert text.startswith(original)
-    back = read_stamps(manifest)
+    write_stamps(holder, stamps)
+    tp = _ws(repo).all_touchpoints["api:getCustomer"]
+    assert tp.note == "api.py:31: {braces}, colons: everywhere"
+    assert tp.data == (EMAIL,)
+    back = read_stamps(holder)
     assert back.root["AA01"].note == hostile  # type: ignore[union-attr]
     assert isinstance(back.root["CR03"], Missing)
     assert back.root["CR03"].note == "[agent] no throttle: 'x', {y}"
-    # Rewriting merges into the block rather than appending a second one;
-    # `merge=False` replaces it.
-    write_stamps(manifest, Stamps({"AA01": Stamp(status="n/a", note="n")}))
-    assert manifest.read_text().count("threats:") == 1
-    assert "CR03" in manifest.read_text()
-    write_stamps(manifest, Stamps({"AA01": Stamp(status="n/a", note="n")}), merge=False)
-    assert "CR03" not in manifest.read_text()
-    # The manifest still loads through the touchpoint schema.
-    run_check(repo, strict=False)
+    # Rewriting merges into the block; `merge=False` replaces it.
+    write_stamps(holder, Stamps({"AA01": Stamp(status="n/a", note="n")}))
+    assert set(read_stamps(holder).root) == {"AA01", "CR03"}
+    assert read_stamps(holder).root["AA01"].status == "n/a"  # type: ignore[union-attr]
+    write_stamps(holder, Stamps({"AA01": Stamp(status="n/a", note="n")}), merge=False)
+    assert set(read_stamps(holder).root) == {"AA01"}
+    # The declaration still loads.
+    run_check(strict=False)
 
 
 def test_topics_cover_every_open_topic_and_swarm_work_is_grouped(repo: Path) -> None:
@@ -575,24 +574,24 @@ def test_entitled_actors_and_project_actor_overrides(repo: Path) -> None:
     from model_wtf.compliance.severity import assess, load_actors
     from model_wtf.compliance.threats import load_catalogue
 
-    _tp(repo, "admin__shop.Customer", f"scope: staff\ndata:\n  - {EMAIL}\n  - {IBAN}\n")
+    _tp(repo, "admin:shop.Customer", f"scope: staff\ndata:\n  - {EMAIL}\n  - {IBAN}\n")
     _tp(repo, "getCustomer", f"scope: staff\ndata:\n  - {EMAIL}\n  - {IBAN}\n")
     ws = _ws(repo)
     matrix = build_matrix(ws, load_catalogue())
     element = matrix.elements["api:getCustomer"]
-    weighed = assess(ws, ws.knowledge, load_actors(ws.shared), element, "disclosure")
+    weighed = assess(ws, ws.knowledge, load_actors(), element, "disclosure")
     # The only reachable actor (staff) already reads both items in the admin.
     assert weighed.actors == ()
     assert weighed.severity.value == "info"
 
     # Override: this project fears its staff.
-    (repo / "compliance" / "actors.yaml").write_text(
-        "staff: {malice: 1.0, reach: 1.0}\n"
-    )
-    actors = load_actors(repo / "compliance")
+    from model_wtf.compliance.severity import set_actor
+
+    set_actor("staff", malice=1.0, reach=1.0)
+    actors = load_actors()
     assert actors["staff"].malice == 1.0
     assert actors["staff"].title  # the built-in title is kept
-    _tp(repo, "admin__shop.Customer", "scope: staff\ndata: []\n")
+    _tp(repo, "admin:shop.Customer", "scope: staff\ndata: []\n")
     ws = _ws(repo)
     matrix = build_matrix(ws, load_catalogue())
     weighed = assess(
@@ -606,7 +605,7 @@ def test_check_tags_and_sorts_findings_by_risk(repo: Path) -> None:
     _tp(repo, "getCustomer", f"data:\n  - {IBAN}\n")
     _stamp(repo, "api:getCustomer", "AA03", "--missing", "any id")
     _stamp(repo, "api:getCustomer", "DO01", "--missing", "no throttle")
-    report = run_check(repo, strict=False)
+    report = run_check(strict=False)
     findings = [d for d in report.diagnostics if d.code == "threat-missing"]
     assert [d.risk for d in findings] == ["critical", "medium"]
     assert (
@@ -623,8 +622,11 @@ def test_findings_lists_missing_stamps_most_severe_first(repo: Path) -> None:
     _stamp(repo, "api:checkout", "DO01", "--missing", "no throttle")
     _stamp(repo, "api:getCustomer", "AA03", "--missing", "any id")
     # A bare !missing written by hand is weighed too.
-    manifest = repo / "api" / "compliance" / "touchpoints" / "checkout.yaml"
-    manifest.write_text(manifest.read_text() + '  DS01: !missing "verbose 404"\n')
+    from model_wtf.compliance.stamps import Stamps, write_stamps
+
+    write_stamps(
+        Holder.touchpoint("api", "checkout"), Stamps({"DS01": Missing("verbose 404")})
+    )
     runner = CliRunner()
     out = runner.invoke(
         cli,
@@ -679,38 +681,51 @@ def test_findings_on_one_flow_print_the_flow_and_keep_working(repo: Path) -> Non
 
 
 def test_findings_get_stable_ids_that_survive_fixes_and_returns(repo: Path) -> None:
-    from model_wtf.compliance.findings import REGISTER_FILE, load_register, resolve
+    from model_wtf.compliance.db import get_db
+    from model_wtf.compliance.findings import register, resolve
+    from model_wtf.compliance.tables import StampRow
 
     _tp(repo, "getCustomer", f"data:\n  - {IBAN}\n")
     _tp(repo, "checkout", f"scope: subject\ndata:\n  - {EMAIL}: create\n")
     _stamp(repo, "api:getCustomer", "AA03", "--missing", "any id")
     _stamp(repo, "api:checkout", "DO01", "--missing", "no throttle")
-    register = load_register(repo / "compliance")
-    assert set(register.findings) == {"F-0001", "F-0002"}
-    assert resolve(repo / "compliance", "f-0001") == "api:getCustomer#AA03"
+    assert set(register()) == {"F-0001", "F-0002"}
+    assert resolve("f-0001") == "api:getCustomer#AA03"
     matrix = build_matrix(_ws(repo))
     ids = {matrix.finding_id(c) for c in matrix.missing()}
     assert ids == {"F-0001", "F-0002"}
     # check cites the id and hints `threats why F-000x`.
-    report = run_check(repo, strict=False)
+    report = run_check(strict=False)
     line = next(d for d in report.diagnostics if d.code == "threat-missing")
     assert line.message.startswith("F-0001 ")
     assert line.hint == "threats why F-0001"
+
     # Fixing one closes its id (dated) but never reuses it.
-    manifest = repo / "api" / "compliance" / "touchpoints" / "checkout.yaml"
-    manifest.write_text(manifest.read_text().replace("DO01:", "DOXX:"))
+    def rename_stamp(old: str, new: str) -> None:
+        with get_db() as db:
+            row = db.get(StampRow, ("touchpoint", "api", "checkout", old))
+            assert row is not None
+            db.add(
+                StampRow(
+                    holder_kind="touchpoint",
+                    holder_unit="api",
+                    holder_id="checkout",
+                    key=new,
+                    kind=row.kind,
+                    payload=row.payload,
+                )
+            )
+            db.delete(row)
+
+    rename_stamp("DO01", "DOXX")
     build_matrix(_ws(repo))
-    register = load_register(repo / "compliance")
-    assert register.findings["F-0002"].closed
+    assert register()["F-0002"].closed
     _stamp(repo, "api:checkout", "DO02", "--missing", "unbounded")
-    register = load_register(repo / "compliance")
-    assert "F-0003" in register.findings
+    assert "F-0003" in register()
     # It comes back under the same id when the finding reappears.
-    manifest.write_text(manifest.read_text().replace("DOXX:", "DO01:"))
+    rename_stamp("DOXX", "DO01")
     build_matrix(_ws(repo))
-    register = load_register(repo / "compliance")
-    assert register.findings["F-0002"].closed is None
-    assert (repo / "compliance" / REGISTER_FILE).is_file()
+    assert register()["F-0002"].closed is None
     # why F-0001 explains the one finding.
     out = CliRunner().invoke(
         cli, ["--root", str(repo), "compliance", "threats", "why", "F-0001"]
@@ -726,9 +741,14 @@ def test_flow_keyed_stamps_are_listed_and_stamped_per_flow(repo: Path) -> None:
     declared, safeguarded transfer is not a leak at all."""
     from model_wtf.compliance.mcp_server import Tools
 
-    (repo / "compliance" / "parties" / "mapbox.yaml").write_text(
-        "name: Mapbox\ncountry: US\naddress: a\nemail: e@x\n"
-        "safeguard: dpf\ndpf_certified: true\n"
+    seed_party(
+        "mapbox",
+        name="Mapbox",
+        country="US",
+        address="a",
+        email="e@x",
+        safeguard="dpf",
+        dpf_certified=True,
     )
     _tp(
         repo,
@@ -736,7 +756,7 @@ def test_flow_keyed_stamps_are_listed_and_stamped_per_flow(repo: Path) -> None:
         f"scope: subject\ndata:\n  - {EMAIL}: create\n"
         f"transfers: [{{party: mapbox, data: [{EMAIL}]}}]\n",
     )
-    tools = Tools(repo)
+    tools = Tools()
     listing = tools.threat_cells("api:checkout")
     # The transfer flow is dismissed (intended use); the store flow is open
     # and shown with its key.
@@ -746,8 +766,7 @@ def test_flow_keyed_stamps_are_listed_and_stamped_per_flow(repo: Path) -> None:
         "api:checkout", "DS06@api:db-default", missing="row visible to all staff"
     )
     assert out.startswith("Stamped")
-    text = (repo / "api" / "compliance" / "touchpoints" / "checkout.yaml").read_text()
-    assert "DS06@api:db-default:" in text
+    assert "DS06@api:db-default" in _stamps("checkout")
     matrix = build_matrix(_ws(repo))
     by = {(c.element, c.sid): c for c in matrix.cells}
     assert by["api:checkout->api:db-default", "DS06"].verdict is Verdict.MISSING

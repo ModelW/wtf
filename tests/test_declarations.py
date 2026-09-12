@@ -1,4 +1,4 @@
-"""``app.yaml`` + ``parties/``: schema errors, todos, references."""
+"""The app and the parties: schema errors, todos, references."""
 
 from __future__ import annotations
 
@@ -8,12 +8,21 @@ import pytest
 import yaml
 from pydantic import BaseModel
 
-from conftest import APP_OK, FILES_ALL_OK, PARTY_ACME, PARTY_WITH, SNOW_TWO_UNITS
+from conftest import (
+    APP_OK,
+    PARTY_ACME,
+    PARTY_WITH,
+    SNOW_TWO_UNITS,
+    seed_all_ok,
+    seed_app,
+    seed_party,
+)
 from model_wtf.compliance.check import run_check
-from model_wtf.compliance.declarations import load_declarations
+from model_wtf.compliance.declarations import load_declarations, save_party
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.report import Severity
 from model_wtf.compliance.schemas import App
+from model_wtf.compliance.tables import decode_human, encode_human
 from model_wtf.compliance.yaml_io import (
     TODO,
     Marker,
@@ -30,9 +39,11 @@ if TYPE_CHECKING:
 
     from conftest import MakeRepo
 
+CODE_DIRS = ("api", "front")
+
 
 # ---------------------------------------------------------------------------
-# !todo loader
+# !todo loader (the knowledge files are still YAML)
 # ---------------------------------------------------------------------------
 
 
@@ -68,6 +79,20 @@ def test_open_round_trips_through_dump() -> None:
     assert dump_yaml({"a": Missing("why")}) == "a: !missing 'why'\n"
 
 
+def test_markers_round_trip_through_the_database_codec() -> None:
+    """The ``Human`` column stores markers as one-key objects, recursively."""
+    value = {"a": TODO, "b": [Missing("why"), "x"], "c": {"d": Todo("n")}}
+    encoded = encode_human(value)
+    assert encoded == {
+        "a": {"todo": None},
+        "b": [{"missing": "why"}, "x"],
+        "c": {"d": {"todo": "n"}},
+    }
+    assert decode_human(encoded) == value
+    # A one-key mapping that is not a marker stays a mapping.
+    assert decode_human({"exempt": "derived"}) == {"exempt": "derived"}
+
+
 def test_iter_todo_paths_walks_nested_models() -> None:
     class Inner(BaseModel):
         x: str | Marker
@@ -101,12 +126,10 @@ def test_open_is_rejected_where_not_allowed() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _shared(make_repo: MakeRepo, files: dict[str, str]) -> Path:
-    return make_repo(snow=SNOW_TWO_UNITS, files=files) / "compliance"
-
-
 def test_valid_and_filled_declarations_have_no_diagnostics(make_repo: MakeRepo) -> None:
-    decl = load_declarations(_shared(make_repo, FILES_ALL_OK))
+    make_repo(snow=SNOW_TWO_UNITS, dirs=CODE_DIRS, seed=True)
+
+    decl = load_declarations()
 
     assert decl.diagnostics == []
     assert decl.app is not None
@@ -115,44 +138,40 @@ def test_valid_and_filled_declarations_have_no_diagnostics(make_repo: MakeRepo) 
     assert decl.parties["with-madrid"].dpo is not None
 
 
-def test_todos_are_warnings_with_paths(make_repo: MakeRepo) -> None:
-    files = dict(FILES_ALL_OK)
-    files["compliance/app.yaml"] = APP_OK.replace(
-        "description: Back-office for the Kerfufoo client portal.", "description: !todo"
-    )
-    files["compliance/parties/acme.yaml"] = PARTY_ACME.replace(
-        "address: 1 rue de la Paix, Paris", "address: !todo"
-    )
+def test_todos_are_warnings_with_subjects(make_repo: MakeRepo) -> None:
+    make_repo(snow=SNOW_TWO_UNITS, dirs=CODE_DIRS, seed=True)
+    seed_app(**{**APP_OK, "description": TODO})
+    seed_party("acme", **{**PARTY_ACME, "address": TODO})
 
-    decl = load_declarations(_shared(make_repo, files))
+    decl = load_declarations()
 
     assert [(d.code, d.severity) for d in decl.diagnostics] == [
         ("todo", Severity.WARNING),
         ("todo", Severity.WARNING),
     ]
-    assert "app.yaml: description" in decl.diagnostics[0].message
-    assert "acme.yaml: address" in decl.diagnostics[1].message
+    assert "app: description" in decl.diagnostics[0].message
+    assert "parties/acme: address" in decl.diagnostics[1].message
+    assert decl.diagnostics[1].subject == "parties/acme#address"
     assert decl.has_todos
     assert not decl.has_errors
 
 
 @pytest.mark.parametrize(
-    ("party_body", "expected"),
+    ("party", "expected"),
     [
-        (PARTY_ACME + "colour: blue\n", "<root>: unexpected key 'colour'"),
-        (PARTY_ACME.replace("country: FR", "country: France"), "country:"),
-        (PARTY_ACME.replace("email: privacy@acme.example", "email: ''"), "email:"),
-        (PARTY_ACME + "dpo:\n  name: X\n", "dpo.email: Field required"),
+        ({**PARTY_ACME, "country": "France"}, "country:"),
+        ({**PARTY_ACME, "email": ""}, "email:"),
+        ({**PARTY_ACME, "dpo": {"name": "X"}}, "dpo.email: Field required"),
     ],
-    ids=["unknown-key", "bad-country", "empty-string", "partial-block"],
+    ids=["bad-country", "empty-string", "partial-block"],
 )
 def test_schema_errors_point_at_the_field(
-    make_repo: MakeRepo, party_body: str, expected: str
+    make_repo: MakeRepo, party: dict[str, object], expected: str
 ) -> None:
-    files = dict(FILES_ALL_OK)
-    files["compliance/parties/acme.yaml"] = party_body
+    make_repo(snow=SNOW_TWO_UNITS, dirs=CODE_DIRS, seed=True)
+    seed_party("acme", **party)
 
-    decl = load_declarations(_shared(make_repo, files))
+    decl = load_declarations()
 
     codes = [d.code for d in decl.diagnostics]
     assert "schema-error" in codes
@@ -160,51 +179,52 @@ def test_schema_errors_point_at_the_field(
     assert decl.has_errors
 
 
-def test_dangling_party_reference(make_repo: MakeRepo) -> None:
-    files = dict(FILES_ALL_OK)
-    files["compliance/app.yaml"] = APP_OK.replace(
-        "controller: acme", "controller: nobody"
-    )
+def test_save_party_validates_before_writing(make_repo: MakeRepo) -> None:
+    make_repo(snow=SNOW_TWO_UNITS, dirs=CODE_DIRS, seed=True)
+    with pytest.raises(ValueError, match="colour"):
+        save_party("x", {**PARTY_ACME, "colour": "blue"})
+    assert save_party("acme", PARTY_ACME) is False  # exists, untouched
+    assert save_party("mapbox", {**PARTY_ACME, "hosts": ["api.mapbox.com"]})
+    assert load_declarations().parties["mapbox"].hosts == ["api.mapbox.com"]
 
-    decl = load_declarations(_shared(make_repo, files))
+
+def test_dangling_party_reference(make_repo: MakeRepo) -> None:
+    make_repo(snow=SNOW_TWO_UNITS, dirs=CODE_DIRS, seed=True)
+    seed_app(**{**APP_OK, "controller": "nobody"})
+
+    decl = load_declarations()
 
     assert [d.code for d in decl.diagnostics] == ["unknown-party"]
     assert "controller 'nobody'" in decl.diagnostics[0].message
 
 
 def test_open_processor_is_not_a_dangling_reference(make_repo: MakeRepo) -> None:
-    files = dict(FILES_ALL_OK)
-    files["compliance/app.yaml"] = APP_OK.replace(
-        "processor: with-madrid", "processor: !todo"
-    )
+    make_repo(snow=SNOW_TWO_UNITS, dirs=CODE_DIRS, seed=True)
+    seed_app(**{**APP_OK, "processor": TODO})
 
-    decl = load_declarations(_shared(make_repo, files))
+    decl = load_declarations()
 
     assert [d.code for d in decl.diagnostics] == ["todo"]
 
 
-def test_invalid_party_file_name(make_repo: MakeRepo) -> None:
-    files = dict(FILES_ALL_OK)
-    files["compliance/parties/With Madrid.yaml"] = PARTY_WITH
+def test_invalid_party_id(make_repo: MakeRepo) -> None:
+    make_repo(snow=SNOW_TWO_UNITS, dirs=CODE_DIRS, seed=True)
+    seed_party("With Madrid", **PARTY_WITH)
 
-    decl = load_declarations(_shared(make_repo, files))
+    decl = load_declarations()
 
     assert [d.code for d in decl.diagnostics] == ["invalid-id"]
 
 
 def test_missing_app_and_parties(make_repo: MakeRepo) -> None:
-    root = make_repo(snow=SNOW_TWO_UNITS, files={"compliance/x.md": ""})
+    make_repo(snow=SNOW_TWO_UNITS, dirs=CODE_DIRS)
 
-    decl = load_declarations(root / "compliance")
+    decl = load_declarations()
     assert [d.code for d in decl.diagnostics] == ["app-missing"]
 
-    (root / "compliance" / "app.yaml").write_text(APP_OK, encoding="utf-8")
-    decl = load_declarations(root / "compliance")
-    assert [d.code for d in decl.diagnostics] == [
-        "parties-missing",
-        "unknown-party",
-        "unknown-party",
-    ]
+    seed_app(**APP_OK)
+    decl = load_declarations()
+    assert [d.code for d in decl.diagnostics] == ["unknown-party", "unknown-party"]
 
 
 # ---------------------------------------------------------------------------
@@ -213,14 +233,10 @@ def test_missing_app_and_parties(make_repo: MakeRepo) -> None:
 
 
 def test_todo_exits_one_and_error_exits_three(make_repo: MakeRepo) -> None:
-    files = dict(FILES_ALL_OK)
-    files["compliance/parties/acme.yaml"] = PARTY_ACME.replace(
-        "address: 1 rue de la Paix, Paris", "address: !todo"
-    )
-    root = make_repo(snow=SNOW_TWO_UNITS, files=files)
-    assert run_check(root, strict=True).exit_code is ExitCode.FINDINGS
+    make_repo(snow=SNOW_TWO_UNITS, dirs=CODE_DIRS)
+    seed_all_ok()
+    seed_party("acme", **{**PARTY_ACME, "address": TODO})
+    assert run_check(strict=True).exit_code is ExitCode.FINDINGS
 
-    (root / "compliance/parties/acme.yaml").write_text(
-        PARTY_ACME + "bogus: 1\n", encoding="utf-8"
-    )
-    assert run_check(root, strict=True).exit_code is ExitCode.DECLARATION_ERROR
+    seed_party("acme", **{**PARTY_ACME, "country": "France"})
+    assert run_check(strict=True).exit_code is ExitCode.DECLARATION_ERROR

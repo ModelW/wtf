@@ -6,7 +6,7 @@ from collections import Counter
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from model_wtf.compliance.data import DATA_DIR
+from model_wtf.compliance.container import get_container
 from model_wtf.compliance.declarations import load_declarations
 from model_wtf.compliance.discovery import load_units, select_manifest
 from model_wtf.compliance.exit_codes import ExitCode
@@ -21,7 +21,7 @@ from model_wtf.compliance.report import (
     Severity,
     Unit,
 )
-from model_wtf.compliance.review import LOCK_FILE, Lock, ReviewStatus
+from model_wtf.compliance.review import Lock, ReviewStatus
 from model_wtf.compliance.rights import AGENT_PREFIX, check_rights, is_agent_note
 from model_wtf.compliance.stamps import Finding
 from model_wtf.compliance.threats import (
@@ -32,7 +32,6 @@ from model_wtf.compliance.threats import (
     Verdict,
     build_matrix,
 )
-from model_wtf.compliance.touchpoints import TOUCHPOINTS_DIR
 from model_wtf.compliance.workspace import Workspace, load_workspace
 
 if TYPE_CHECKING:
@@ -40,26 +39,24 @@ if TYPE_CHECKING:
 
     from model_wtf.compliance.data import Row
     from model_wtf.compliance.touchpoints import Touchpoint
-    from model_wtf.compliance.workspace import Workspace
 
-SHARED_FOLDER = "compliance"
 SHARED_SCOPE_ID = "shared"
 
 
 def run_check(
-    root: Path, *, strict: bool, python: str | None = None, allow_todo: bool = False
+    *, strict: bool, python: str | None = None, allow_todo: bool = False
 ) -> Report:
-    """Discover units and inspect their folders, returning a :class:`Report`.
+    """Discover units and inspect the repository, returning a :class:`Report`.
 
     Declaration problems never raise: they are folded into the report with
     :attr:`ExitCode.DECLARATION_ERROR` so that every output format can show
     them the same way. Only genuine bugs propagate (the CLI maps those to
     :attr:`ExitCode.TOOL_ERROR`).
 
+    The repository comes from the container (see :mod:`container`).
+
     Parameters
     ----------
-    root
-        Repository root (already resolved by the caller).
     strict
         Promote "image without a compliance block" from a warning to an
         error.
@@ -69,7 +66,8 @@ def run_check(
         Open ``!todo`` questions no longer fail the check (they are still
         listed). ``!missing`` findings always do.
     """
-    root = root.resolve()
+    container = get_container()
+    root = container.root
     try:
         manifest = select_manifest(root)
         units, diagnostics = load_units(manifest, root, strict=strict)
@@ -81,23 +79,41 @@ def run_check(
             exit_code=ExitCode.DECLARATION_ERROR,
         )
 
-    shared = root / SHARED_FOLDER
-    diagnostics.extend(load_declarations(shared).diagnostics)
-    items = _check_data(shared, units, diagnostics, python=python)
-    _check_codeowners(root, units, diagnostics)
+    declarations = load_declarations()
+    diagnostics.extend(declarations.diagnostics)
+    initialised = declarations.app is not None or not any(
+        d.code == "app-missing" for d in declarations.diagnostics
+    )
+    items = _check_data(units, diagnostics, python=python)
 
-    scopes = [_scope(SHARED_SCOPE_ID, ScopeKind.SHARED, shared, None, diagnostics)]
+    scopes = [
+        _scope(
+            SHARED_SCOPE_ID,
+            ScopeKind.SHARED,
+            container.db_path,
+            initialised,
+            None,
+            diagnostics,
+        )
+    ]
     scopes.extend(
-        _scope(unit.id, ScopeKind.UNIT, unit.folder, items.get(unit.id), diagnostics)
+        _scope(
+            unit.id,
+            ScopeKind.UNIT,
+            unit.code_root,
+            unit.code_root.is_dir(),
+            items.get(unit.id),
+            diagnostics,
+        )
         for unit in units
     )
     for scope in scopes:
-        if not scope.exists:
+        if not scope.exists and scope.kind is ScopeKind.UNIT:
             diagnostics.append(
                 Diagnostic(
                     Severity.ERROR,
-                    "folder-missing",
-                    "compliance folder missing; run `model-wtf compliance init`",
+                    "code-missing",
+                    "the unit's code folder does not exist",
                     scope.id,
                     scope.path,
                 )
@@ -112,37 +128,11 @@ def run_check(
     )
 
 
-def _check_codeowners(
-    root: Path, units: list[Unit], diagnostics: list[Diagnostic]
-) -> None:
-    """A GitHub-only concern, hence info: compliance folders no CODEOWNERS
-    line covers, when the repo has a CODEOWNERS at all (a unit added after
-    ``init`` is the usual case)."""
-    from model_wtf.compliance.codeowners import (
-        CODEOWNERS_PATH,
-        uncovered_paths,
-    )
-
-    missing = uncovered_paths(root, units)
-    if not missing:
-        return
-    diagnostics.append(
-        Diagnostic(
-            Severity.INFO,
-            "codeowners",
-            f"{len(missing)} compliance folder(s) without a CODEOWNERS owner: "
-            + ", ".join(missing),
-            SHARED_SCOPE_ID,
-            root / CODEOWNERS_PATH,
-            hint="model-wtf compliance init  (rewrites the managed block)",
-        )
-    )
-
-
 def _scope(
     scope_id: str,
     kind: ScopeKind,
-    folder: Path,
+    path: Path,
+    exists: bool,
     items: int | None,
     diagnostics: list[Diagnostic],
 ) -> Scope:
@@ -151,8 +141,8 @@ def _scope(
     return Scope(
         id=scope_id,
         kind=kind,
-        path=folder,
-        exists=folder.is_dir(),
+        path=path,
+        exists=exists,
         items=items,
         errors=sum(d.section is Section.ERRORS for d in mine),
         missing=sum(d.section is Section.MISSING for d in mine),
@@ -162,24 +152,23 @@ def _scope(
 
 
 def _check_data(
-    shared: Path,
     units: list[Unit],
     diagnostics: list[Diagnostic],
     *,
     python: str | None,
 ) -> dict[str, int]:
-    """Validate knowledge, data files, touchpoints and activities; items per unit.
+    """Validate knowledge, data rows, touchpoints and activities; items per unit.
 
     Introspection *failures* are tool errors and propagate; a unit that
     simply cannot be introspected yields a warning and no rows.
     """
     try:
-        knowledge = load_knowledge(shared)
+        knowledge = load_knowledge()
     except KnowledgeError as exc:
         diagnostics.extend(exc.diagnostics)
         return {}
     diagnostics.extend(knowledge.todos)
-    ws = load_workspace(shared.parent, units, knowledge, python=python)
+    ws = load_workspace(units, knowledge, python=python)
     counts: dict[str, int] = {}
     for unit in units:
         unit_data = ws.data[unit.id]
@@ -242,7 +231,7 @@ def _check_threats(
                 f"{fid + ' ' if fid else ''}{cell.element}: {cell.sid} "
                 f"{catalogue_title(matrix, cell.sid)}{weight} [{origin}]",
                 scopes_by_element[cell.element],
-                _element_path(element, scopes),
+                _element_path(element),
                 subject=f"{cell.element}#{cell.sid}",
                 note=note,
                 origin=origin,
@@ -278,7 +267,7 @@ def _check_threats(
                 f"{len(cells)} threat check(s) open on {len(elements)} element(s) "
                 f"({summary})",
                 unit.id,
-                unit.folder,
+                unit.code_root,
                 subject=f"{unit.id}:threats",
                 hint=f"threats matrix --unit {unit.id} --open",
                 items=tuple(sorted(f"{c.element}#{c.sid}" for c in cells)),
@@ -299,14 +288,24 @@ def catalogue_title(matrix: Matrix, sid: str) -> str:
     return matrix.titles.get(sid, sid)
 
 
-def _element_path(element: Element, units: dict[str, Unit]) -> Path | None:
-    """The YAML file a stamp on the element lives in (a flow's: its source's)."""
+def _element_path(element: Element) -> Path | None:
+    """The source file a finding on the element points at (a flow's: its
+    touchpoint's), when the code is known."""
     tp = element.touchpoint
-    if tp is not None and tp.unit in units:
-        return units[tp.unit].folder / TOUCHPOINTS_DIR / f"{tp.slug}.yaml"
-    if element.store is not None and element.unit in units:
-        return units[element.unit].folder / "stores" / f"{element.store.slug}.yaml"
+    if tp is not None and tp.facts.file:
+        return _touchpoint_file(tp)
     return None
+
+
+def _touchpoint_file(tp: Touchpoint) -> Path | None:
+    from pathlib import Path
+
+    if not tp.facts.file:
+        return None
+    path = Path(tp.facts.file)
+    if not path.is_absolute() and tp.code_root is not None:
+        path = tp.code_root / path
+    return path
 
 
 def _declared(element: Element) -> bool:
@@ -340,7 +339,7 @@ def _check_reviews(unit: Unit, rows: list[Row], diagnostics: list[Diagnostic]) -
             "pending-review",
             f"{len(pending)} data item(s) pending ({breakdown})",
             unit.id,
-            unit.folder / LOCK_FILE,
+            unit.code_root,
             subject=f"{unit.id}:data",
             hint=f"data auto-review --unit {unit.id}",
             items=tuple(sorted(r.row.full_id for r in pending)),
@@ -348,15 +347,15 @@ def _check_reviews(unit: Unit, rows: list[Row], diagnostics: list[Diagnostic]) -
     )
 
 
-DEPRECATED_FORMS = frozenset({"op-ambiguous", "exporting-deprecated"})
+DEPRECATED_FORMS = frozenset({"op-ambiguous"})
 
 
 def _fold_deprecations(unit: Unit, diagnostics: list[Diagnostic]) -> list[Diagnostic]:
-    """One Review line for all the manifests written in a superseded form.
+    """One Review line for all the declarations written in a superseded form.
 
-    ``write`` and ``exporting`` still load, so per-ref warnings would only
-    be noise; what the reader needs is the count and the command that
-    rewrites them (a re-review states the real ops).
+    ``write`` and the legacy legal verbs still load, so per-ref warnings
+    would only be noise; what the reader needs is the count and the command
+    that rewrites them (a re-review states the real ops).
     """
     kept = [d for d in diagnostics if d.code not in DEPRECATED_FORMS]
     stale = sorted(
@@ -367,10 +366,10 @@ def _fold_deprecations(unit: Unit, diagnostics: list[Diagnostic]) -> list[Diagno
             Diagnostic(
                 Severity.WARNING,
                 "touchpoint-stale-form",
-                f"{len(stale)} manifest(s) use `write`/`exporting`; re-review "
-                "to state the operations",
+                f"{len(stale)} declaration(s) use `write` or a legacy verb; "
+                "re-review to state the operations",
                 unit.id,
-                unit.folder / TOUCHPOINTS_DIR,
+                unit.code_root,
                 subject=f"{unit.id}:stale-manifests",
                 hint=f"touchpoints auto-review --unit {unit.id} --stale",
                 items=tuple(stale),
@@ -385,8 +384,7 @@ def _check_touchpoints(
     ws: Workspace,
     diagnostics: list[Diagnostic],
 ) -> None:
-    """Pending manifests and PII-touching touchpoints in no activity."""
-    folder = unit.folder / TOUCHPOINTS_DIR
+    """Pending declarations and PII-touching touchpoints in no activity."""
     by_id = {t.full_id: t for t in touchpoints}
     gaps = [
         f
@@ -407,10 +405,10 @@ def _check_touchpoints(
             Diagnostic(
                 Severity.WARNING,
                 "flow-undeclared",
-                f"{t.full_id} sends {what} to {gap.sink}, which the manifest "
-                f"does not declare ({gap.note}); {fix} or stop sending",
+                f"{t.full_id} sends {what} to {gap.sink}, which the declaration "
+                f"does not have ({gap.note}); {fix} or stop sending",
                 unit.id,
-                folder / f"{t.slug}.yaml",
+                _touchpoint_file(t),
                 subject=gap.id,
                 hint="touchpoint_set_data with `stores`, store_add if new"
                 if to_store
@@ -427,7 +425,7 @@ def _check_touchpoints(
                 "touchpoint-pending",
                 f"{len(pending)} touchpoint(s) pending",
                 unit.id,
-                folder,
+                unit.code_root,
                 subject=f"{unit.id}:touchpoints",
                 hint=f"touchpoints auto-review --unit {unit.id}",
                 items=tuple(sorted(t.full_id for t in pending)),
@@ -451,14 +449,14 @@ def _check_touchpoints(
                 f"{len(orphans)} touchpoint(s) handling personal data in no "
                 f"activity: {names}",
                 unit.id,
-                folder,
+                unit.code_root,
                 subject=f"{unit.id}:orphans",
                 hint=f"touchpoints auto-review --unit {unit.id} --group-only",
                 items=tuple(sorted(t.full_id for t in orphans)),
             )
         )
     # Personal items nobody declares handling: informational, it usually
-    # means a manifest is missing rather than data nobody uses.
+    # means a declaration is missing rather than data nobody uses.
     referenced = {r for t in ws.all_touchpoints.values() for r in (t.data or ())}
     unreferenced = [
         r for r in ws.data[unit.id].rows if r.pii and r.full_id not in referenced
@@ -470,7 +468,7 @@ def _check_touchpoints(
                 "data-unreferenced",
                 f"{len(unreferenced)} personal data item(s) handled by no touchpoint",
                 unit.id,
-                unit.folder / DATA_DIR,
+                unit.code_root,
                 subject=f"{unit.id}:unreferenced",
                 hint="data why <unit:id>",
                 items=tuple(sorted(r.full_id for r in unreferenced)),
@@ -479,7 +477,7 @@ def _check_touchpoints(
 
 
 def _with_scope(diag: Diagnostic, scope_id: str) -> Diagnostic:
-    """Attribute an un-scoped diagnostic (from data file validation) to a unit."""
+    """Attribute an un-scoped diagnostic (from data row validation) to a unit."""
     if diag.scope_id is not None:
         return diag
     return replace(diag, scope_id=scope_id)

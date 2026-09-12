@@ -1,6 +1,6 @@
 """The threat matrix: every element x every threat, decided by simple rules.
 
-The threat model is a projection of the compliance folder, not a new
+The threat model is a projection of the compliance database, not a new
 declaration. Every **touchpoint** is a *process* (one node each, never
 grouped), every **store** a *store*, the actors and the parties with
 transfers are *parties*, and **flows** join them: actor → touchpoint (the
@@ -43,9 +43,11 @@ from model_wtf.compliance.severity import (
 )
 from model_wtf.compliance.stamps import (
     Finding,
+    Holder,
     Stamp,
     StampChallenge,
     Stamps,
+    read_all_stamps,
     read_stamps,
     write_stamps,
 )
@@ -62,7 +64,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from model_wtf.compliance.data import Row
-    from model_wtf.compliance.report import Unit
     from model_wtf.compliance.schemas import Party
     from model_wtf.compliance.stores import Store
     from model_wtf.compliance.touchpoints import Touchpoint
@@ -255,6 +256,8 @@ class Element:
     touchpoint: Touchpoint | None = None
     store: Store | None = None
     party: Party | None = None
+    party_stamps: Stamps = field(default_factory=Stamps)
+    """Stamps recorded on a party element."""
     files: list[Path] = field(default_factory=list)
     items: list[Row] = field(default_factory=list)
     """Data items on the element (a flow's payload, a store's contents)."""
@@ -410,6 +413,7 @@ def build_elements(ws: Workspace) -> dict[str, Element]:
                 items=held,
                 extra={"units": {unit_id}},
             )
+    party_stamps = read_all_stamps("party")
     for party_id, party in ws.parties.items():
         pid = f"party:{party_id}"
         elements[pid] = Element(
@@ -418,6 +422,7 @@ def build_elements(ws: Workspace) -> dict[str, Element]:
             "shared",
             party.name if isinstance(party.name, str) else party_id,
             party=party,
+            party_stamps=party_stamps.get(("", party_id), Stamps()),
         )
     _add_flows(ws, elements, rows)
     return elements
@@ -558,7 +563,7 @@ def build_matrix(
     catalogue = catalogue or load_catalogue()
     elements = build_elements(ws)
     cells: list[Cell] = []
-    actors = load_actors(ws.shared)
+    actors = load_actors()
     for element in elements.values():
         for sid in catalogue.for_element(element.kind):
             cell = decide(element, sid, catalogue, ws)
@@ -577,7 +582,7 @@ def build_matrix(
     )
     # Ids are allocated here so every reader (findings, check, why, the
     # swarm's narration) agrees; a read-only caller passes register=False.
-    matrix.ids = assign_ids(matrix, ws.shared, write=register)
+    matrix.ids = assign_ids(matrix, write=register)
     return matrix
 
 
@@ -649,7 +654,7 @@ def stamps_of(
     if element.store is not None:
         return element.store.stamps, element.store.fingerprint, None
     if element.party is not None:
-        return element.party.threats, "", None
+        return element.party_stamps, "", None
     return Stamps(), "", None
 
 
@@ -908,8 +913,6 @@ class StampError(ValueError):
 
 def stamp_cell(  # noqa: C901 - one validation per refusal, one knob per narrowing
     matrix: Matrix,
-    units: dict[str, Unit],
-    shared: Path,
     element_id: str,
     sid: str,
     *,
@@ -922,15 +925,16 @@ def stamp_cell(  # noqa: C901 - one validation per refusal, one knob per narrowi
     effect: str | None = None,
     degree: str | None = None,
     actor: str | None = None,
-) -> tuple[Path, str, Stamp | Finding | Missing]:
-    """Write one stamp on the element's YAML file; return ``(file, key, stamp)``.
+) -> tuple[Holder, str, Stamp | Finding | Missing]:
+    """Record one stamp on the element that carries it; return
+    ``(holder, key, stamp)``.
 
     ``status`` (mitigated / accepted / n/a) closes the cell; ``missing``
     instead records a finding, weighed (:mod:`severity`) when ``ws`` is
     given — ``effect``/``degree``/``actor`` let the reviewer narrow that
     assessment. A flow is stamped on its source with the sink as qualifier
     (``SID@sink``). Refused on a cell no rule left open (nothing to stamp)
-    or on an element with no file of its own.
+    or on an element that cannot carry a stamp (an undeclared touchpoint).
     """
     if "@" in sid:
         # `SID@sink` names one flow of the element: stamp that flow.
@@ -989,11 +993,11 @@ def stamp_cell(  # noqa: C901 - one validation per refusal, one knob per narrowi
         msg = "give either a status (mitigated | accepted | n/a) or a missing note"
         raise StampError(msg)
     holder, sink = _stamp_holder(element, matrix.elements)
-    path = _holder_path(holder, units, shared)
-    if path is None:
-        msg = f"{holder.id} has no YAML file to stamp"
+    target = holder_of(holder)
+    if target is None:
+        msg = f"{holder.id} cannot carry a stamp (declare the touchpoint first)"
         raise StampError(msg)
-    stamps = read_stamps(path)
+    stamps = read_stamps(target)
     key = f"{sid}@{sink}" if sink else sid
     _, fingerprint, _ = stamps_of(holder, matrix.elements)
     previous_stamp = stamps.root.get(key)
@@ -1037,19 +1041,17 @@ def stamp_cell(  # noqa: C901 - one validation per refusal, one knob per narrowi
             answered=answered,
         )
     stamps.root[key] = value
-    write_stamps(path, stamps)
+    write_stamps(target, Stamps({key: value}))
     if missing is not None and ws is not None:
         # Register the finding now: the caller's matrix predates the stamp.
         fresh = replace(cell, verdict=Verdict.MISSING, stamp_key=key, stamp=value)
         matrix.cells.append(fresh)
-        matrix.ids = assign_ids(matrix, ws.shared)
-    return path, key, value
+        matrix.ids = assign_ids(matrix)
+    return target, key, value
 
 
 def challenge_stamp(
     matrix: Matrix,
-    units: dict[str, Unit],
-    shared: Path,
     element_id: str,
     key: str,
     *,
@@ -1063,10 +1065,10 @@ def challenge_stamp(
     if element is None:
         return f"no element {element_id!r}"
     holder, _ = _stamp_holder(element, matrix.elements)
-    path = _holder_path(holder, units, shared)
-    if path is None:
-        return f"{holder.id} has no YAML file"
-    stamps = read_stamps(path)
+    target = holder_of(holder)
+    if target is None:
+        return f"{holder.id} cannot carry a stamp"
+    stamps = read_stamps(target)
     stamp = stamps.root.get(key)
     if stamp is None:
         known = ", ".join(sorted(stamps.root)) or "none"
@@ -1078,10 +1080,10 @@ def challenge_stamp(
     if stamp.answered is not None and stamp.answered.commit == commit:
         return "already answered by the current stamp"
     at = datetime.now(tz=UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    stamps.root[key] = stamp.model_copy(
+    challenged = stamp.model_copy(
         update={"challenge": StampChallenge(commit=commit, grounds=grounds, at=at)}
     )
-    write_stamps(path, stamps)
+    write_stamps(target, Stamps({key: challenged}))
     return None
 
 
@@ -1109,16 +1111,18 @@ def _stamp_holder(
     return element, None
 
 
-def _holder_path(holder: Element, units: dict[str, Unit], shared: Path) -> Path | None:
+def holder_of(holder: Element) -> Holder | None:
+    """The database holder of an element's stamps; ``None`` for a touchpoint
+    without a declaration (its cells wait for the data review)."""
     tp = holder.touchpoint
-    if tp is not None and tp.unit in units:
+    if tp is not None:
         if tp.data is None:
             return None
-        return units[tp.unit].folder / "touchpoints" / f"{tp.slug}.yaml"
-    if holder.store is not None and holder.unit in units:
-        return units[holder.unit].folder / "stores" / f"{holder.store.slug}.yaml"
+        return Holder.touchpoint(tp.unit, tp.id)
+    if holder.store is not None:
+        return Holder.store(holder.unit, holder.store.slug)
     if holder.party is not None:
-        return shared / "parties" / f"{holder.id.removeprefix('party:')}.yaml"
+        return Holder.party(holder.id.removeprefix("party:"))
     return None
 
 
@@ -1195,7 +1199,7 @@ def weigh(
     return assess(
         ws,
         ws.knowledge,
-        load_actors(ws.shared),
+        load_actors(),
         element,
         declared,
         effect=Effect(effect) if effect else None,

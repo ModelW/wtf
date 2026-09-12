@@ -11,10 +11,10 @@ from typing import TYPE_CHECKING
 import pytest
 from click.testing import CliRunner
 
-from conftest import FILES_ALL_OK
 from model_wtf.cli import cli
 from model_wtf.compliance.check import run_check
 from model_wtf.compliance.data import collect_unit
+from model_wtf.compliance.db import get_db
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.knowledge import load_knowledge
 from model_wtf.compliance.mcp_server import (
@@ -26,6 +26,7 @@ from model_wtf.compliance.mcp_server import (
 )
 from model_wtf.compliance.report import Unit
 from model_wtf.compliance.review import Lock, ReviewStatus
+from model_wtf.compliance.tables import DataItemRow, DataLockRow
 from model_wtf.opencode import (
     OPENROUTER,
     SCALEWAY,
@@ -59,16 +60,15 @@ images:
 
 @pytest.fixture
 def repo(make_repo: MakeRepo, monkeypatch: pytest.MonkeyPatch) -> Path:
-    root = make_repo(snow=SNOW_DJANGO, files=FILES_ALL_OK)
+    root = make_repo(snow=SNOW_DJANGO, seed=True)
     shutil.copytree(FIXTURE, root / "api", dirs_exist_ok=True)
-    (root / "api" / "compliance").mkdir(exist_ok=True)
     monkeypatch.setenv("MODEL_WTF_PYTHON", sys.executable)
     monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
     return root
 
 
 def _unit(root: Path) -> Unit:
-    return Unit("api", root / "api" / "compliance", "django", root / "api")
+    return Unit("api", root / "api", "django")
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +78,7 @@ def _unit(root: Path) -> Unit:
 
 def test_lock_lifecycle(repo: Path) -> None:
     unit = _unit(repo)
-    rows = {r.id: r for r in collect_unit(unit, load_knowledge(None)).rows}
+    rows = {r.id: r for r in collect_unit(unit, load_knowledge(custom=False)).rows}
     lock = Lock(unit)
 
     email = rows["shop.Customer.email"]
@@ -88,29 +88,42 @@ def test_lock_lifecycle(repo: Path) -> None:
 
     lock.mark([email], by="human", note="plain email")
     lock.save()
-    text = (unit.folder / "data.lock.yaml").read_text()
-    assert "shop.Customer.email:" in text
-    assert "by: human" in text
+    with get_db() as db:
+        stored = db.get(DataLockRow, ("api", "shop.Customer.email"))
+        assert stored is not None
+        assert stored.by == "human"
 
     again = Lock(unit)
     assert again.status_of(email).status is ReviewStatus.REVIEWED
-    entry = again.data.items["shop.Customer.email"]
+    entry = again.items["shop.Customer.email"]
     assert entry.note == "plain email"
     assert entry.reviewed_at.tzinfo is not None
 
     # A different fingerprint (schema or verdict changed) re-opens the item.
-    again.data.items["shop.Customer.email"].fingerprint = "00000000"
+    again.items["shop.Customer.email"].fingerprint = "00000000"
     assert again.status_of(email).status is ReviewStatus.PENDING_CHANGED
 
     # Entries for vanished fields are pruned.
-    again.data.items["shop.Gone.field"] = again.data.items["shop.Customer.email"]
+    again.items["shop.Gone.field"] = again.items["shop.Customer.email"]
     assert again.prune(list(rows.values())) == ["shop.Gone.field"]
+    again.save()
+    with get_db() as db:
+        assert db.get(DataLockRow, ("api", "shop.Gone.field")) is None
 
 
 def test_invalid_lock_is_a_declaration_error(repo: Path) -> None:
-    (repo / "api" / "compliance" / "data.lock.yaml").write_text("items: [1, 2]\n")
+    with get_db() as db:
+        db.add(
+            DataLockRow(
+                unit="api",
+                item_id="shop.Customer.email",
+                fingerprint="x",
+                reviewed_at="not a date",
+                by="robot",
+            )
+        )
 
-    report = run_check(repo, strict=False)
+    report = run_check(strict=False)
 
     assert "lock-invalid" in {d.code for d in report.diagnostics}
     assert report.exit_code is ExitCode.DECLARATION_ERROR
@@ -150,12 +163,12 @@ def test_override_and_reviewed_commands_write_the_lock(repo: Path) -> None:
     assert rev.exit_code == 0, rev.output
 
     lock = Lock(_unit(repo))
-    assert set(lock.data.items) == {
+    assert set(lock.items) == {
         "shop.Customer.email",
         "shop.Customer.phone",
         "shop.Order.total",
     }
-    assert all(e.by == "human" for e in lock.data.items.values())
+    assert all(e.by == "human" for e in lock.items.values())
 
     listed = runner.invoke(
         cli, ["compliance", "data", "list", *root, "--pending", "--format", "json"]
@@ -191,7 +204,7 @@ def test_model_and_field_helpers() -> None:
 
 
 def test_tools_pending_model_review(repo: Path) -> None:
-    tools = Tools(repo, batch=2)
+    tools = Tools(batch=2)
 
     pending = tools.pending()
     assert "showing 2" in pending
@@ -232,14 +245,17 @@ def test_tools_pending_model_review(repo: Path) -> None:
     assert "rejected first_name: values equal" in result
     assert "still pending" in result
 
-    override = repo / "api" / "compliance" / "data" / "shop.Customer.preferences.yaml"
-    assert (
-        override.read_text()
-        == 'pii: false\ncategory: technical\nreason: "UI theme only, models.py:14"\n'
-    )
+    with get_db() as db:
+        override = db.get(DataItemRow, ("api", "shop.Customer.preferences"))
+        assert override is not None
+        assert (override.pii, override.category, override.reason) == (
+            False,
+            "technical",
+            "UI theme only, models.py:14",
+        )
     lock = Lock(_unit(repo))
-    assert lock.data.items["shop.Customer.email"].by == "agent"
-    assert lock.data.items["shop.Customer.preferences"].note.startswith("UI theme")
+    assert lock.items["shop.Customer.email"].by == "agent"
+    assert lock.items["shop.Customer.preferences"].note.startswith("UI theme")
 
     after = tools.model("api:shop.Customer")
     assert (
@@ -254,7 +270,7 @@ def test_tools_pending_model_review(repo: Path) -> None:
 
 
 def test_tools_changed_without_git_history(repo: Path) -> None:
-    tools = Tools(repo)
+    tools = Tools()
     assert tools.changed("HEAD~1").startswith("nothing")
 
 
@@ -507,7 +523,7 @@ def test_auto_review_dry_run_and_missing_key(
 
 
 def test_tools_review_json_contents(repo: Path) -> None:
-    tools = Tools(repo)
+    tools = Tools()
 
     shown = tools.model("api:shop.Customer")
     assert "write sites of JSON-like fields" in shown
@@ -584,10 +600,12 @@ def test_tools_review_json_contents(repo: Path) -> None:
         note="n",
     )
     assert "1 overridden" in ok
-    path = repo / "api" / "compliance" / "data" / "shop.Customer.preferences.yaml"
-    assert "unknown_contents: possible" in path.read_text()
+    with get_db() as db:
+        row = db.get(DataItemRow, ("api", "shop.Customer.preferences"))
+        assert row is not None
+        assert row.unknown_contents == "possible"
     lock = Lock(_unit(repo))
-    assert lock.data.items["shop.Customer.preferences@json.phone"].by == "agent"
+    assert lock.items["shop.Customer.preferences@json.phone"].by == "agent"
     after = tools.model("api:shop.Customer")
     assert (
         "preferences@json.phone (declared content of `preferences`) | JsonContent | "

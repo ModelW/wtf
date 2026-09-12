@@ -23,7 +23,7 @@ from model_wtf.compliance.activities import (
 from model_wtf.compliance.auto_review import TOUCHPOINTS_TARGET
 from model_wtf.compliance.data import parse_full_id
 from model_wtf.compliance.data_cli import data, load_context, run_auto_review
-from model_wtf.compliance.declarations import load_declarations
+from model_wtf.compliance.declarations import party_ids
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.ops import Op, OpError, OpSpec, describe, parse_ops
 from model_wtf.compliance.options import ROOT_OPTION, model_option
@@ -55,12 +55,12 @@ def workspace_or_exit(
     only: str | None = None,
 ) -> Workspace:
     """Load the workspace, mapping tool errors to exit code 4."""
-    resolved, units, knowledge = load_context(root)
+    _, units, knowledge = load_context(root)
     if only is not None and not any(u.id == only for u in units):
         msg = f"unknown unit {only!r}; declared: {', '.join(u.id for u in units)}"
         raise click.ClickException(msg)
     try:
-        return load_workspace(resolved, units, knowledge, python=python, only=only)
+        return load_workspace(units, knowledge, python=python, only=only)
     except IntrospectionFailed as exc:
         Console(stderr=True).print(Text.assemble(("Tool error: ", "red"), str(exc)))
         ctx.exit(int(ExitCode.TOOL_ERROR))
@@ -89,7 +89,7 @@ def touchpoints() -> None:
 
 @touchpoints.command("list")
 @click.option("--unit", "only", default=None, help="Restrict to one unit.")
-@click.option("--pending", is_flag=True, help="Only touchpoints without a manifest.")
+@click.option("--pending", is_flag=True, help="Only touchpoints not yet declared.")
 @click.option("--all", "show_all", is_flag=True, help="Include ignored ones.")
 @click.option(
     "--format",
@@ -348,11 +348,11 @@ def tp_set_data(
     python: str | None,
     root: Path | None,
 ) -> None:
-    """Declare the data items a touchpoint handles (writes its manifest).
+    """Declare the data items a touchpoint handles.
 
     REFS are ``<unit>:<app.Model.field>`` data ids (``@json``/``@files`` rows
     allowed; a ref without unit means the touchpoint's unit). ``ref=<ops>``
-    states what the code does to the item, as in a manifest:
+    states what the code does to the item:
     ``ref=create``, ``ref=create,read``, ``ref='{erase: {by: subject}}'``;
     a bare ref is a read. No REF at all declares an empty list: "touches no
     inventory item, checked".
@@ -393,11 +393,11 @@ def tp_set_data(
     else:
         final = wanted
     ops = {k: v for k, v in ops.items() if k in final}
-    parties = set(load_declarations(ws.shared).parties)
+    parties = party_ids()
     transfers = list(tp.transfers) if mode in ("add", "remove") else []
     for raw in exports:
         transfers.append(_parse_export(raw, tp.unit, ws, parties))
-    path = write_manifest(
+    write_manifest(
         unit,
         tp,
         final,
@@ -407,7 +407,7 @@ def tp_set_data(
         ignore=ignore,
         answered=tp.challenge or tp.answered,
     )
-    console.print(Text.assemble(("wrote", "green"), "  ", str(path)))
+    console.print(Text.assemble(("declared", "green"), "  ", tp.full_id))
     ctx.exit(0)
 
 
@@ -445,7 +445,7 @@ def tp_set_data(
 @click.option(
     "--stale",
     is_flag=True,
-    help="Also re-review manifests written with `write` / `exporting`.",
+    help="Also re-review declarations written with `write` or a legacy verb.",
 )
 @click.option("--keep-scratch", is_flag=True, hidden=True)
 @PYTHON_OPTION
@@ -477,7 +477,7 @@ def tp_auto_review(
     the agent cannot know stay `!todo`. Same sandbox and exit codes as
     `data auto-review`.
     """
-    resolved, units, knowledge = load_context(root)
+    _, units, knowledge = load_context(root)
     if only is not None:
         units = [u for u in units if u.id == only]
         if not units:
@@ -485,7 +485,6 @@ def tp_auto_review(
             raise click.ClickException(msg)
     run_auto_review(
         ctx,
-        resolved,
         units,
         knowledge,
         base=None,
@@ -510,10 +509,7 @@ def _parse_export(raw: str, unit_id: str, ws: Workspace, parties: set[str]) -> T
         raise click.UsageError(msg)
     if party not in parties:
         known = ", ".join(sorted(parties)) or "none"
-        msg = (
-            f"unknown party {party!r}; known: {known} "
-            f"(add compliance/parties/{party}.yaml)"
-        )
+        msg = f"unknown party {party!r}; known: {known} (party_add declares one)"
         raise click.UsageError(msg)
     refs = []
     for ref in filter(None, (r.strip() for r in refs_text.split(","))):
@@ -558,8 +554,7 @@ def act_list(
     elif not acts:
         console.print(
             Text(
-                "no activity declared; `activities create <slug> --touchpoint ...` "
-                "or write compliance/activities/<slug>.yaml",
+                "no activity declared; `activities create <slug> --touchpoint ...`",
                 style="yellow",
             )
         )
@@ -702,14 +697,13 @@ def act_create(
     python: str | None,
     root: Path | None,
 ) -> None:
-    """Create ``compliance/activities/<slug>.yaml``; unknown fields become !todo."""
+    """Create an activity; unknown fields become !todo."""
     console = Console()
     ws = workspace_or_exit(ctx, root, python=python)
     for ref in refs:
         if ref not in ws.all_touchpoints:
             raise click.UsageError(_unknown_touchpoint(ref, ws))
-    path = write_activity(
-        ws.shared,
+    if not write_activity(
         slug,
         name=name,
         purpose=purpose,
@@ -718,11 +712,10 @@ def act_create(
         data_subjects=list(subjects) or None,
         recipients=list(recipients) or None,
         retention=retention,
-    )
-    if path is None:
-        msg = f"{ws.shared / 'activities' / (slug + '.yaml')} already exists"
+    ):
+        msg = f"activity {slug!r} already exists"
         raise click.ClickException(msg)
-    console.print(Text.assemble(("created", "green"), "  ", str(path)))
+    console.print(Text.assemble(("created", "green"), f"  activities/{slug}"))
     ctx.exit(0)
 
 
@@ -751,7 +744,7 @@ def act_add(
     for ref in refs:
         if ref not in ws.all_touchpoints:
             raise click.UsageError(_unknown_touchpoint(ref, ws))
-    added = add_touchpoints(activity.path, list(refs))
+    added = add_touchpoints(activity.slug, list(refs))
     console.print(
         Text.assemble(("added", "green"), f"  {len(added)} touchpoint(s) to {slug}")
     )
@@ -879,7 +872,6 @@ class Why:
                     "purpose": _plain(a.spec.purpose),
                     "legal_basis": _plain(a.spec.legal_basis),
                     "retention": _plain(a.spec.retention),
-                    "path": str(a.path.relative_to(ws.root)),
                 }
                 for a in self.activities
             ],
@@ -949,7 +941,7 @@ def why(ref: str, ws: Workspace) -> Why:
 @data.command("why")
 @click.argument("patterns", nargs=-1, required=False)
 @click.option("--model", "model", default=None, help="unit:app.Model — every field.")
-@click.option("--manifests", is_flag=True, help="Print the activity files in full.")
+@click.option("--manifests", is_flag=True, help="Print the activities in full.")
 @click.option(
     "--verbose", "-v", is_flag=True, help="List every touchpoint with its location."
 )
@@ -1060,6 +1052,29 @@ def render_why(
     out.append(f"  -> {entry.verdict_text}\n", style=VERDICT_STYLE[entry.verdict])
     if manifests:
         for act in entry.activities:
-            out.append(f"\n--- {act.path.relative_to(ws.root)}\n", style="dim")
-            out.append(act.path.read_text(encoding="utf-8"))
+            out.append(f"\n--- {act.label}\n", style="dim")
+            out.append(yaml.safe_dump(_activity_dump(act), sort_keys=False))
     return out
+
+
+def _activity_dump(act: Activity) -> dict[str, Any]:
+    """The activity's declared fields as plain YAML-able values."""
+    out: dict[str, Any] = {}
+    for key, value in act.spec.model_dump(mode="python").items():
+        if value is None or value == [] or key == "touchpoints":
+            continue
+        out[key] = _yaml_value(value)
+    out["touchpoints"] = list(act.spec.touchpoints)
+    return out
+
+
+def _yaml_value(value: object) -> object:
+    if isinstance(value, Marker):
+        return repr(value)
+    if isinstance(value, LegalBasis):
+        return value.value
+    if isinstance(value, dict):
+        return {k: _yaml_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_yaml_value(v) for v in value]
+    return value

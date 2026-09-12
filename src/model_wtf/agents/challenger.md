@@ -9,7 +9,7 @@ Repository: `{repo}`, a full git checkout. The change is `{base}..HEAD`.
 ## Procedure
 
 1. `git diff --name-only {base}..HEAD` and `git diff --stat`. Ignore the
-   `compliance/` folders (those are the reviews themselves), lockfiles,
+   `compliance.db` (that is the reviews themselves), lockfiles,
    generated code, tests and documentation unless a test reveals intent
    (e.g. a test asserting an email is sent to a new provider).
 2. Call `reviews` with the changed code files. It returns what reviewers

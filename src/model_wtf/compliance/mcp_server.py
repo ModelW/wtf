@@ -28,13 +28,12 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-import yaml
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from model_wtf.compliance.container import get_container
 from model_wtf.compliance.data import (
     CONTENT_NAME,
-    DATA_DIR,
     FILE_STORE_SUFFIX,
     JSON_SUFFIX,
     Row,
@@ -43,11 +42,18 @@ from model_wtf.compliance.data import (
     Unknown,
     collect_unit,
     is_container,
+    override_reason,
     parse_full_id,
     write_contents,
+    write_manual,
+    write_override,
 )
-from model_wtf.compliance.declarations import PARTIES_DIR, load_declarations
-from model_wtf.compliance.discovery import find_repo_root, load_units, select_manifest
+from model_wtf.compliance.declarations import (
+    load_declarations,
+    party_ids,
+    save_party,
+)
+from model_wtf.compliance.discovery import load_units, select_manifest
 from model_wtf.compliance.flows import build_flows, describe
 from model_wtf.compliance.knowledge import Knowledge, load_knowledge
 from model_wtf.compliance.ops import OPS_HELP, OpError, OpSpec, parse_ops_json
@@ -60,6 +66,7 @@ from model_wtf.compliance.rights import (
     set_right,
 )
 from model_wtf.compliance.stamps import Finding, Stamps
+from model_wtf.compliance.stores import save_store
 from model_wtf.compliance.touchpoints import (
     Scope,
     StoreWrite,
@@ -71,7 +78,7 @@ from model_wtf.compliance.touchpoints import (
     write_manifest,
 )
 from model_wtf.compliance.workspace import Workspace, load_workspace
-from model_wtf.compliance.yaml_io import Missing, load_yaml, todo_text
+from model_wtf.compliance.yaml_io import Missing, todo_text
 from model_wtf.introspect.runner import IntrospectionFailed
 
 if TYPE_CHECKING:
@@ -81,7 +88,6 @@ if TYPE_CHECKING:
     from model_wtf.compliance.report import Unit
     from model_wtf.compliance.stores import Store
 
-SHARED_FOLDER = "compliance"
 DEFAULT_BATCH = 8
 MODEL_ENV = "MODEL_WTF_AGENT_MODEL"
 ACTIVITY_LOG_ENV = "MODEL_WTF_ACTIVITY_LOG"
@@ -207,14 +213,14 @@ def field_of(row: Row) -> str:
 
 
 class Tools:
-    """The tool implementations, bound to one repository."""
+    """The tool implementations, bound to the container's repository."""
 
-    def __init__(self, root: Path, *, batch: int = DEFAULT_BATCH) -> None:
-        self.root = root
+    def __init__(self, *, batch: int = DEFAULT_BATCH) -> None:
+        self.root = get_container().root
         self.batch = batch
-        manifest = select_manifest(root)
-        self.units: list[Unit] = load_units(manifest, root, strict=False)[0]
-        self.knowledge: Knowledge = load_knowledge(root / SHARED_FOLDER)
+        manifest = select_manifest(self.root)
+        self.units: list[Unit] = load_units(manifest, self.root, strict=False)[0]
+        self.knowledge: Knowledge = load_knowledge()
         self._data: dict[str, UnitData] = {}
         self._workspace: Workspace | None = None
 
@@ -387,7 +393,7 @@ class Tools:
         description: str | None = None,
     ) -> str:
         """``store_add``: declare a store the settings do not show."""
-        from model_wtf.compliance.stores import STORES_DIR, StoreType
+        from model_wtf.compliance.stores import StoreType
 
         unit = self.unit(unit_id)
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", slug):
@@ -402,12 +408,6 @@ class Tools:
         if not name.strip():
             msg = "a human name is required"
             raise ValueError(msg)
-        folder = unit.folder / STORES_DIR
-        path = folder / f"{slug}.yaml"
-        if path.exists():
-            return (
-                f"store {unit_id}:{slug} already exists ({path.relative_to(self.root)})"
-            )
         doc: dict[str, Any] = {"type": kind.value, "name": name.strip()}
         if backend:
             doc["backend"] = backend.strip()
@@ -415,12 +415,13 @@ class Tools:
             doc["hosts"] = [h.strip() for h in hosts if h.strip()]
         if description:
             doc["description"] = description.strip()
-        folder.mkdir(parents=True, exist_ok=True)
-        path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+        if not save_store(unit.id, slug, doc):
+            return f"store {unit_id}:{slug} already exists"
+        self._data.pop(unit.id, None)
         self._workspace = None
         _log_activity("store", id=f"{unit_id}:{slug}", name=name.strip())
         return (
-            f"created store {unit_id}:{slug} ({path.relative_to(self.root)}); "
+            f"created store {unit_id}:{slug}; "
             "declare the copy on the touchpoint with touchpoint_set_data `stores`"
         )
 
@@ -429,7 +430,7 @@ class Tools:
     def workspace(self, *, refresh: bool = False) -> Workspace:
         """The cross-linked workspace, built on first use."""
         if refresh or self._workspace is None:
-            self._workspace = load_workspace(self.root, self.units, self.knowledge)
+            self._workspace = load_workspace(self.units, self.knowledge)
         return self._workspace
 
     def touchpoint_pending(self, unit_id: str | None = None) -> str:
@@ -597,10 +598,8 @@ class Tools:
         ws = self.workspace(refresh=True)
         matrix = build_matrix(ws)
         try:
-            path, key, written = stamp_cell(
+            holder, key, written = stamp_cell(
                 matrix,
-                {u.id: u for u in self.units},
-                self.root / "compliance",
                 element,
                 sid,
                 status=status,
@@ -646,7 +645,7 @@ class Tools:
         )
         self._workspace = None
         tail = f" ({severity}{', ' + fid if fid else ''})" if severity else ""
-        return f"Stamped {element} {sid} in {self._rel(path)}{tail}."
+        return f"Stamped {element} {sid} on {holder.element_id}{tail}."
 
     def _threat_title(self, sid: str) -> str:
         from model_wtf.compliance.threats import load_catalogue
@@ -833,8 +832,6 @@ class Tools:
             element, _, key = ref.partition("#")
             refused = challenge_stamp(
                 build_matrix(ws, register=False),
-                {u.id: u for u in self.units},
-                self.root / SHARED_FOLDER,
                 element,
                 key,
                 commit=commit,
@@ -865,15 +862,7 @@ class Tools:
             return str(path)
 
     def _override_reason(self, unit: Unit, item_id: str) -> str | None:
-        path = unit.folder / DATA_DIR / f"{item_id}.yaml"
-        if not path.is_file():
-            return None
-        try:
-            payload = load_yaml(path)
-        except Exception:
-            return None
-        reason = payload.get("reason") if isinstance(payload, dict) else None
-        return reason if isinstance(reason, str) else None
+        return override_reason(unit.id, item_id)
 
     def data_search(self, query: str, unit_id: str | None = None) -> str:
         """``data_search``: fuzzy lookup of data ids so refs are never invented."""
@@ -944,27 +933,26 @@ class Tools:
         if not description.strip() or not reason.strip():
             msg = "description and reason (file:line) are both required"
             raise ValueError(msg)
-        path = unit.folder / DATA_DIR / f"{item_id}.yaml"
-        lines = [
-            f"description: {_yaml_str(description.strip())}",
-            f"pii: {'true' if pii else 'false'}",
-            f"sensitivity: {sensitivity}",
-            f"category: {category}",
-        ]
-        if store:
-            lines.append(f"store: {store}")
         if transient and store:
             msg = "a transient item has no store; pass transient=False for kept data"
             raise ValueError(msg)
-        if transient:
-            lines.append("transient: true")
-        lines.append(f"reason: {_yaml_str(reason.strip())}")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        if not write_manual(
+            unit,
+            item_id,
+            description=description.strip(),
+            pii=pii,
+            sensitivity=sensitivity,
+            category=category,
+            store=store,
+            transient=transient,
+            reason=reason.strip(),
+        ):
+            msg = f"{unit_id}:{item_id} already exists; reference it instead"
+            raise ValueError(msg)
         self.data(unit, refresh=True)
         self.workspace(refresh=True)
         _log_activity("manual", id=f"{unit_id}:{item_id}", category=category)
-        return f"created {unit_id}:{item_id} ({path.relative_to(self.root)})"
+        return f"created {unit_id}:{item_id}"
 
     def data_flag(
         self,
@@ -977,8 +965,8 @@ class Tools:
         """``data_flag``: record what the code says about one right of one item.
 
         ``verdict: missing`` writes ``rights.<right>: !missing "[agent] note"``;
-        ``verdict: exempt`` writes ``{exempt: <ground>, note}``. Both land in
-        the item's data file, other keys untouched.
+        ``verdict: exempt`` writes ``{exempt: <ground>, note}``. Both land on
+        the item's data row, other columns untouched.
         """
         ws = self.workspace()
         row = ws.rows.get(ref)
@@ -1014,9 +1002,8 @@ class Tools:
             msg = "verdict must be missing or exempt"
             raise ValueError(msg)
         unit = self.unit(row.unit)
-        path = unit.folder / DATA_DIR / f"{row.id}.yaml"
         try:
-            set_right(path, right_value, value)
+            set_right(unit.id, row.id, right_value, value)
         except ValidationError as exc:
             msg = f"{ref}: {exc.errors()[0]['msg']}"
             raise ValueError(msg) from exc
@@ -1034,7 +1021,7 @@ class Tools:
         scope: str | None = None,
         stores: list[StoreDecision] | None = None,
     ) -> str:
-        """``touchpoint_set_data``: write a touchpoint's manifest.
+        """``touchpoint_set_data``: write a touchpoint's declaration.
 
         ``scope`` (subject | staff | public | system) says who the touchpoint
         serves; when omitted the inference from auth classes stands.
@@ -1075,7 +1062,7 @@ class Tools:
                 refs.append(full)
             bucket = ops.setdefault(full, [])
             bucket.extend(o for o in parsed if o not in bucket)
-        parties = set(load_declarations(self.root / SHARED_FOLDER).parties)
+        parties = party_ids()
         exports: list[Transfer] = []
         for export in transfers or []:
             if export.party not in parties:
@@ -1124,7 +1111,7 @@ class Tools:
         if problems:
             return "Error: nothing written; fix these:\n  " + "\n  ".join(problems)
         unit = self.unit(tp.unit)
-        path = write_manifest(
+        write_manifest(
             unit,
             tp,
             refs,
@@ -1150,8 +1137,7 @@ class Tools:
             sent = f", transfers to {len(exports)} part{plural}"
         if writes:
             sent += f", writes to {len(writes)} store(s)"
-        rel = path.relative_to(self.root)
-        out = f"{ref}: {len(refs)} data item(s) declared{sent} ({rel})"
+        out = f"{ref}: {len(refs)} data item(s) declared{sent}"
         if warnings:
             out += "\nWarnings:\n  " + "\n  ".join(warnings)
         ws = self.workspace()
@@ -1193,7 +1179,7 @@ class Tools:
 
     def parties_list(self) -> str:
         """``parties_list``: declared parties, one per line."""
-        decl = load_declarations(self.root / SHARED_FOLDER)
+        decl = load_declarations()
         if not decl.parties:
             return "no party declared"
         lines = []
@@ -1231,10 +1217,6 @@ class Tools:
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", party_id):
             msg = f"party id {party_id!r} must be kebab-case (e.g. `mapbox`)"
             raise ValueError(msg)
-        folder = self.root / SHARED_FOLDER / PARTIES_DIR
-        path = folder / f"{party_id}.yaml"
-        if path.exists():
-            return f"party {party_id} already exists"
         if country is not None and not re.fullmatch(r"[A-Z]{2}", country):
             msg = "country must be ISO 3166-1 alpha-2 (e.g. US); omit when unsure"
             raise ValueError(msg)
@@ -1246,11 +1228,11 @@ class Tools:
             safeguard=safeguard,
             dpf_certified=dpf_certified,
         )
-        folder.mkdir(parents=True, exist_ok=True)
-        path.write_text(spec.to_yaml(), encoding="utf-8")
+        if not save_party(party_id, spec.to_spec()):
+            return f"party {party_id} already exists"
+        self._workspace = None
         _log_activity("party", id=party_id, name=name.strip())
-        shown = path.relative_to(self.root)
-        return f"created party {party_id} ({shown}); address/email are !todo"
+        return f"created party {party_id}; address/email are !todo"
 
     def activities_graph(self) -> str:
         """``activities_graph``: every data-handling touchpoint with its edges."""
@@ -1306,7 +1288,7 @@ class Tools:
         consent_record: Verdict | None = None,
         interest: str | None = None,
     ) -> str:
-        """``activity_create``: a new activity file; unknown fields stay !todo.
+        """``activity_create``: a new activity; unknown fields stay !todo.
 
         ``purpose``, ``legal_basis`` and ``consent_record`` accept a
         ``{"missing": "why"}`` verdict when the agent established that
@@ -1339,8 +1321,7 @@ class Tools:
         if isinstance(record, str) and record not in ws.rows:
             msg = f"consent_record {record!r} is not a data item"
             raise ValueError(msg)
-        path = write_activity(
-            ws.shared,
+        created = write_activity(
             slug,
             name=name.strip(),
             purpose=purpose_value,
@@ -1351,7 +1332,7 @@ class Tools:
             consent_record=record,
             interest=interest,
         )
-        assert path is not None  # noqa: S101 - existence checked above
+        assert created  # noqa: S101 - existence checked above
         self.workspace(refresh=True)
         _log_activity(
             "activity",
@@ -1374,7 +1355,7 @@ class Tools:
         if unknown:
             msg = f"unknown touchpoints: {', '.join(unknown)}"
             raise ValueError(msg)
-        added = add_touchpoints(activity.path, touchpoints)
+        added = add_touchpoints(activity.slug, touchpoints)
         self.workspace(refresh=True)
         _log_activity("activity-add", id=slug, touchpoints=len(added))
         return f"{slug}: {len(added)} touchpoint(s) added"
@@ -1458,7 +1439,7 @@ class Tools:
         return "\n".join(out)
 
     def _apply_contents(self, unit: Unit, row: Row, d: Decision) -> str | None:
-        """Write a ``contents`` file for a JSON-like column; ``None`` on success."""
+        """Write a ``contents`` row for a JSON-like column; ``None`` on success."""
         kn = self.knowledge
         if row.field is None or not is_container(row.field):
             return f"{row.type} is not a JSON-like column; contents does not apply"
@@ -1479,15 +1460,14 @@ class Tools:
                 cats = ", ".join(sorted(kn.categories))
                 return f"{name}: unknown category {content.category!r}; use {cats}"
             parsed[name] = (content.pii, content.sensitivity, content.category)
-        path = write_contents(
+        if not write_contents(
             unit,
             row.id,
             parsed,
             unknown=Unknown(d.unknown_contents),
             reason=(d.reason or "").strip(),
-        )
-        if path is None:
-            return f"a file already exists ({row.id}.yaml); leave it"
+        ):
+            return f"a data row already exists for {row.id}; leave it"
         fresh = self.data(unit, refresh=True).rows
         lock = Lock(unit)
         lock.mark(
@@ -1518,20 +1498,16 @@ class Tools:
         )
         if all(new is None or new == cur for new, cur in wanted):
             return "values equal the current classification; use ok=true"
-        path = unit.folder / DATA_DIR / f"{row.id}.yaml"
-        if path.exists():
-            return f"an override already exists ({path.name}); leave it or use ok=true"
-        lines: list[str] = []
-        if d.pii is not None:
-            lines.append(f"pii: {'true' if d.pii else 'false'}")
-        if d.sensitivity is not None:
-            lines.append(f"sensitivity: {d.sensitivity}")
-        if d.category is not None:
-            lines.append(f"category: {d.category}")
         assert d.reason is not None  # noqa: S101 - checked above
-        lines.append(f"reason: {_yaml_str(d.reason.strip())}")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        if not write_override(
+            unit,
+            row.id,
+            pii=d.pii,
+            sensitivity=d.sensitivity,
+            category=d.category,
+            reason=d.reason.strip(),
+        ):
+            return f"an override already exists for {row.id}; leave it or use ok=true"
         lock = Lock(unit)
         lock.mark(
             [row], by="agent", note=d.reason.strip(), model=os.environ.get(MODEL_ENV)
@@ -1568,10 +1544,10 @@ class Tools:
 
 
 def build_server(  # noqa: C901 - one flat list of tool registrations
-    root: Path, *, batch: int = DEFAULT_BATCH
+    *, batch: int = DEFAULT_BATCH
 ) -> MCPServer:
-    """Create the MCP server bound to ``root``."""
-    tools = Tools(root, batch=batch)
+    """Create the MCP server bound to the container's repository."""
+    tools = Tools(batch=batch)
     server = MCPServer(
         "model-wtf",
         instructions=(
@@ -2186,10 +2162,6 @@ def _verdict(value: Verdict | None) -> str | Missing | None:
     return Missing(f"{AGENT_PREFIX} {why}")
 
 
-def _yaml_str(value: str) -> str:
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
-
-
 def _relative(path_str: str | None, root: Path) -> str | None:
     if not path_str:
         return None
@@ -2318,10 +2290,9 @@ def changed_python_files(root: Path, base: str) -> list[str]:
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
-def serve(root: Path | None = None, *, batch: int = DEFAULT_BATCH) -> None:
-    """Run the stdio server (blocking)."""
-    resolved = root.resolve() if root else find_repo_root(Path.cwd())
-    build_server(resolved, batch=batch).run("stdio")
+def serve(*, batch: int = DEFAULT_BATCH) -> None:
+    """Run the stdio server (blocking); the container must be configured."""
+    build_server(batch=batch).run("stdio")
 
 
 __all__ = ["DEFAULT_BATCH", "MODEL_ENV", "Decision", "Tools", "build_server", "serve"]

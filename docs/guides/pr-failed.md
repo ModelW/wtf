@@ -92,12 +92,12 @@ Your code calls a host (or reads a `*_URL` / `*_HOST` setting) nothing
 declares. Three honest answers:
 
 - another organisation's service: declare the party
-  (`compliance/parties/hubspot.yaml`: name, country, website, `hosts`, and a
+  (`party_add hubspot`: name, country, website, `hosts`, and a
   Chapter V safeguard when outside the EEA) and add the transfer to the
   touchpoint's `transfers:`;
 - a service the project runs itself, or infrastructure whose operator is a
   deployment fact (a realtime server, the SMTP relay): declare a store
-  (`<unit>/compliance/stores/tmw.yaml`: `type`, `name`, `hosts: [TMW_URL]`)
+  (`store_add tmw`: `type`, `name`, `hosts: [TMW_URL]`)
   and add the copy to the touchpoint's `stores:`;
 - the project's own API: add the host to the settings the introspection
   reads (`ALLOWED_HOSTS`, a `*_URL`).

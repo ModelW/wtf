@@ -58,14 +58,14 @@ personal"). `data contents <unit:id> name=yes,personal,contact ... [--unknown no
 field with a bare `ok`: it follows the write sites `data_model` lists and
 declares the contents itself.
 
-Humans correct the rules with `<unit>/compliance/data/<app.Model.field>.yaml`
+Humans correct the rules with a `data_items` row (`data override`)
 (any subset of `pii` / `sensitivity` / `category` / `store`, plus a `reason`),
 and add data the ORM does not know with a complete manual item
 (`description`, `pii`, `sensitivity`, `category`, optional `store`) under any
 other id.
 
 `init --custom-sensitivity` / `--custom-categories` copy the built-in scale
-or category list into `compliance/sensitivity/` / `compliance/categories/`
+or category list into the `sensitivity_levels` / `categories` tables
 for editing; a renamed entry declares `replaces: [<built-in id>]` so the
 rules still resolve, and `check` verifies every built-in id is covered once.
 
@@ -74,7 +74,7 @@ rules still resolve, and `check` verifies every built-in id is covered once.
 
 
 The inventory is virtual, so what has been looked at is tracked in
-`<unit>/compliance/data.lock.yaml` (fingerprint of the field facts *and* of
+the `data_locks` table (fingerprint of the field facts *and* of
 the verdict, who, when, note). `data list` shows a `Review` column
 (`pending:new`, `pending:changed`, `reviewed`, `override`, `known`) and
 `--pending` filters on it; `check` fails with exit 1 while

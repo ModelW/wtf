@@ -19,7 +19,7 @@ skipped), a field's own `storage=` → `files-<app.Model.field>`,
 `CELERY_BROKER_URL` → `queue-celery`, `WAGTAILSEARCH_BACKENDS` →
 `search-<alias>`.
 
-Optional `<unit>/compliance/stores/<slug>.yaml` files can override facts of an
+Optional `stores` rows (`store_add`) can override facts of an
 introspected store (`backend`, `name`, `provider`, `location` as a region or
 country, `retention`, `description`), declare a store the settings do not show
 (`type: realtime`, `external`, `browser`, ... — `type` is then mandatory), or

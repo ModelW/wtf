@@ -1,11 +1,12 @@
 """Built-in knowledge: sensitivity scale, categories of personal data, rules.
 
-Everything lives as YAML under ``model_wtf/knowledge/`` so that it can be
-read, diffed and reviewed like the declarations it classifies. A repository
-may replace the sensitivity scale or the category list with its own files
-(``compliance/sensitivity/``, ``compliance/categories/``); each custom entry
-can say which built-in id(s) it ``replaces`` so the rules — which speak the
-built-in vocabulary — still resolve.
+Everything built in lives as YAML under ``model_wtf/knowledge/`` so that it
+can be read, diffed and reviewed like the declarations it classifies. A
+repository may replace the sensitivity scale or the category list with its
+own (the ``sensitivity_levels`` / ``categories`` tables of the database,
+seeded by ``init --custom-sensitivity`` / ``--custom-categories``); each
+custom entry can say which built-in id(s) it ``replaces`` so the rules —
+which speak the built-in vocabulary — still resolve.
 """
 
 from __future__ import annotations
@@ -20,10 +21,13 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from sqlalchemy import select
 
+from model_wtf.compliance.db import get_db
 from model_wtf.compliance.declarations import format_errors
 from model_wtf.compliance.report import Diagnostic, Severity, marker_diagnostics
 from model_wtf.compliance.schemas import NonEmpty, StrictModel, is_valid_id
+from model_wtf.compliance.tables import CategoryRow, SensitivityRow
 from model_wtf.compliance.yaml_io import Marker, load_yaml
 
 if TYPE_CHECKING:
@@ -287,14 +291,16 @@ class Knowledge:
         return sorted(self.sensitivity, key=lambda k: self.sensitivity[k].rank)
 
 
-def load_knowledge(shared: Path | None) -> Knowledge:
-    """Load built-ins and apply the repo's custom scale/categories if present.
+def load_knowledge(*, custom: bool = True) -> Knowledge:
+    """Load built-ins and apply the repo's custom scale/categories if any.
+
+    ``custom=False`` skips the database: the built-in vocabulary alone.
 
     Raises
     ------
     KnowledgeError
-        Built-in files must always be valid; custom files are validated with
-        the same schemas and additionally must cover every built-in id
+        Built-in files must always be valid; custom entries are validated
+        with the same schemas and additionally must cover every built-in id
         exactly once (directly or through ``replaces``).
     """
     diagnostics: list[Diagnostic] = []
@@ -311,20 +317,16 @@ def load_knowledge(shared: Path | None) -> Knowledge:
     if diagnostics:
         raise KnowledgeError(diagnostics)
 
-    if shared is not None:
-        custom_levels = shared / SENSITIVITY_DIR
-        if custom_levels.is_dir():
-            levels = _load_dir(custom_levels, SensitivityLevel, diagnostics, "shared")
-            _check_coverage(
-                levels, set(sensitivity), custom_levels, "level", diagnostics
-            )
-            _check_unique_ranks(levels, custom_levels, diagnostics)
+    if custom:
+        levels = _custom_levels(diagnostics)
+        if levels:
+            _check_coverage(levels, set(sensitivity), "level", diagnostics)
+            _check_unique_ranks(levels, diagnostics)
             aliases.update(_aliases(levels))
             sensitivity = levels
-        custom_cats = shared / CATEGORIES_DIR
-        if custom_cats.is_dir():
-            cats = _load_dir(custom_cats, Category, diagnostics, "shared")
-            _check_coverage(cats, set(categories), custom_cats, "category", diagnostics)
+        cats = _custom_categories(diagnostics)
+        if cats:
+            _check_coverage(cats, set(categories), "category", diagnostics)
             aliases.update(_aliases(cats))
             categories = cats
 
@@ -339,6 +341,65 @@ def load_knowledge(shared: Path | None) -> Knowledge:
     )
     knowledge.library = library
     return knowledge
+
+
+def _custom_levels(diagnostics: list[Diagnostic]) -> dict[str, SensitivityLevel]:
+    """The project's own scale from the ``sensitivity_levels`` table."""
+    out: dict[str, SensitivityLevel] = {}
+    with get_db() as db:
+        rows = db.scalars(select(SensitivityRow).order_by(SensitivityRow.id)).all()
+    for row in rows:
+        raw = {
+            "rank": row.rank,
+            "description": row.description,
+            "criteria": row.criteria,
+            "handling": row.handling,
+            "dpia": row.dpia,
+            "replaces": list(row.replaces or []),
+        }
+        level = _validate_custom(
+            SensitivityLevel, raw, f"sensitivity/{row.id}", diagnostics
+        )
+        if level is not None:
+            out[row.id] = level
+    return out
+
+
+def _custom_categories(diagnostics: list[Diagnostic]) -> dict[str, Category]:
+    """The project's own categories from the ``categories`` table."""
+    out: dict[str, Category] = {}
+    with get_db() as db:
+        rows = db.scalars(select(CategoryRow).order_by(CategoryRow.id)).all()
+    for row in rows:
+        raw = {
+            "description": row.description,
+            "examples": list(row.examples or []),
+            "register_label": row.register_label,
+            "legal": row.legal,
+            "dpia": row.dpia,
+            "replaces": list(row.replaces or []),
+        }
+        cat = _validate_custom(Category, raw, f"categories/{row.id}", diagnostics)
+        if cat is not None:
+            out[row.id] = cat
+    return out
+
+
+def _validate_custom[M: BaseModel](
+    model: type[M], raw: dict[str, Any], label: str, diagnostics: list[Diagnostic]
+) -> M | None:
+    try:
+        instance = model.model_validate(raw)
+    except ValidationError as exc:
+        diagnostics.extend(
+            Diagnostic(
+                Severity.ERROR, "schema-error", f"{label}: {loc}: {msg}", "shared"
+            )
+            for loc, msg in format_errors(exc)
+        )
+        return None
+    diagnostics.extend(marker_diagnostics(instance, label, "shared"))
+    return instance
 
 
 def _load_library(diagnostics: list[Diagnostic]) -> dict[str, LibraryModel]:
@@ -379,7 +440,6 @@ def _aliases(custom: dict[str, Any]) -> dict[str, str]:
 def _check_coverage(
     custom: dict[str, Any],
     defaults: set[str],
-    folder: Path,
     what: str,
     diagnostics: list[Diagnostic],
 ) -> None:
@@ -396,7 +456,6 @@ def _check_coverage(
                         f"{what}-replaces-unknown",
                         f"{custom_id} replaces unknown built-in {what} {replaced!r}",
                         "shared",
-                        folder / f"{custom_id}.yaml",
                     )
                 )
                 continue
@@ -414,13 +473,12 @@ def _check_coverage(
                     f"{what}-coverage",
                     f"built-in {what} {name!r} is {how} by the custom {what} set",
                     "shared",
-                    folder,
                 )
             )
 
 
 def _check_unique_ranks(
-    custom: dict[str, SensitivityLevel], folder: Path, diagnostics: list[Diagnostic]
+    custom: dict[str, SensitivityLevel], diagnostics: list[Diagnostic]
 ) -> None:
     seen: dict[int, str] = {}
     for level_id, level in custom.items():
@@ -432,7 +490,6 @@ def _check_unique_ranks(
                     f"levels {seen[level.rank]!r} and {level_id!r} "
                     f"share rank {level.rank}",
                     "shared",
-                    folder / f"{level_id}.yaml",
                 )
             )
         seen[level.rank] = level_id
@@ -476,9 +533,18 @@ def _load_dir[M: BaseModel](
                 for loc, msg in format_errors(exc)
             )
             continue
-        diagnostics.extend(marker_diagnostics(instance, path, scope))
+        diagnostics.extend(marker_diagnostics(instance, path.stem, scope, path))
         out[path.stem] = instance
     return out
+
+
+def builtin_entries(name: str) -> dict[str, dict[str, Any]]:
+    """Raw mappings of a built-in folder (``sensitivity`` / ``categories``),
+    keyed by id; what ``init`` copies into the custom tables."""
+    return {
+        path.stem: dict(load_yaml(path) or {})
+        for path in sorted(_builtin_dir(name).glob("*.yaml"))
+    }
 
 
 def _load_adequacy() -> frozenset[str]:

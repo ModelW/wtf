@@ -2,14 +2,16 @@
 
 The inventory is *virtual*: it is recomputed from the code (Django
 introspection) and the knowledge on every call, and nothing generated is
-written to disk. What humans write lives in ``<unit>/compliance/data/``:
+stored. What humans write lives in the ``data_items`` table, one row per
+``(unit, id)``:
 
-* ``<app.Model.field>.yaml`` for a field that exists in the code — an
-  **override** of any subset of ``pii`` / ``sensitivity`` / ``category``
-  with a mandatory ``reason``;
-* ``<anything>.yaml`` for an id the code does not know — a **manual item**
-  (a store outside the ORM: a bucket, a cache, an external sheet) that must
-  be described in full.
+* an ``override`` for a field that exists in the code — any subset of
+  ``pii`` / ``sensitivity`` / ``category`` with a mandatory ``reason``;
+* a ``manual`` item for an id the code does not know (a store outside the
+  ORM: a bucket, a cache, an external sheet) that must be described in
+  full;
+* a ``contents`` declaration for a JSON-like column (below);
+* a ``rights`` block on a ``<app.Model>.*`` glob for a whole model.
 
 Row ids are ``<unit>:<app_label>.<Model>.<field>``; the unit prefix is what
 lets the same model shipped in two images be classified independently.
@@ -23,7 +25,7 @@ overridden on their own.
 A JSON-like column (``JSONField``, ``ArrayField``, ``HStoreField``; not
 Wagtail's ``StreamField``, which is CMS content) is a **container**: one
 ``pii/sensitivity/category`` triple cannot describe a blob holding a name, an
-address and an IBAN. Its override file may instead declare ``contents``, one
+address and an IBAN. Its row may instead declare ``contents``, one
 entry per *kind* of information (not per JSON path), each classified like a
 field; every entry becomes a row ``<app.Model.field>@json.<name>`` and the
 column's own verdict is **derived** (``pii`` = any, ``sensitivity`` = max,
@@ -41,22 +43,23 @@ explicitly; the slug must exist in the unit's stores and not be ignored.
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Annotated, Any
 
-import yaml
 from pydantic import Field, StringConstraints, ValidationError, model_validator
+from sqlalchemy import select
 
+from model_wtf.compliance.db import get_db
 from model_wtf.compliance.declarations import format_errors
 from model_wtf.compliance.knowledge import Dpia, Knowledge
 from model_wtf.compliance.report import Diagnostic, Severity, marker_diagnostics
 from model_wtf.compliance.rights import Right, RightsSpec
 from model_wtf.compliance.schemas import NonEmpty, StrictModel
 from model_wtf.compliance.stores import UnitStores, collect_stores
-from model_wtf.compliance.yaml_io import Marker, load_yaml, todo_text
+from model_wtf.compliance.tables import DataContentRow, DataItemRow
+from model_wtf.compliance.yaml_io import TODO, Marker
 from model_wtf.introspect.runner import (
     FieldInfo,
     IntrospectionUnavailable,
@@ -67,11 +70,8 @@ from model_wtf.introspect.runner import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from model_wtf.compliance.report import Unit
 
-DATA_DIR = "data"
 FIELD_ID_PARTS = 3
 FILE_STORE_SUFFIX = "@files"
 FILE_STORE_FIELD = "content"
@@ -126,7 +126,7 @@ class Content(StrictModel):
 
 
 class Contents(StrictModel):
-    """``data/<field id>.yaml`` for a container column: what the blob holds."""
+    """A ``contents`` row for a container column: what the blob holds."""
 
     contents: dict[Annotated[str, StringConstraints(pattern=CONTENT_NAME)], Content]
     unknown_contents: Unknown
@@ -134,7 +134,7 @@ class Contents(StrictModel):
 
 
 class Override(StrictModel):
-    """``data/<field id>.yaml`` for a field the code knows."""
+    """An ``override`` row for a field the code knows."""
 
     pii: bool | None = None
     sensitivity: str | None = None
@@ -142,7 +142,7 @@ class Override(StrictModel):
     store: str | None = None
     """Slug of the store holding the value, when the settings get it wrong."""
     reason: NonEmpty | Marker | None = None
-    """Why the rule was wrong. Optional when the file only carries ``rights``."""
+    """Why the rule was wrong. Optional when the row only carries ``rights``."""
     rights: RightsSpec | None = None
     """Exemptions or observed gaps per right (see :mod:`rights`)."""
 
@@ -151,26 +151,26 @@ class Override(StrictModel):
         given = (self.pii, self.sensitivity, self.category, self.store)
         classifies = any(v is not None for v in given)
         if classifies and self.reason is None:
-            msg = "reason: required when the file changes the classification"
+            msg = "reason: required when the row changes the classification"
             raise ValueError(msg)
         return self
 
 
 class RightsOnly(StrictModel):
-    """``data/<app.Model>.*.yaml``: a rights block for every field of a model."""
+    """A ``<app.Model>.*`` row: a rights block for every field of a model."""
 
     rights: RightsSpec
 
 
 class ManualItem(StrictModel):
-    """``data/<id>.yaml`` for something the code does not expose."""
+    """A ``manual`` row for something the code does not expose."""
 
     description: NonEmpty | Marker
     pii: bool | Marker
     sensitivity: str | Marker
     category: str | Marker
     store: str | Marker | None = None
-    """Slug of the store holding the item (``stores/`` declares external ones)."""
+    """Slug of the store holding the item (a ``stores`` row declares external ones)."""
     transient: bool = Field(
         default=False,
         description="Processed but never kept by this project (a card number "
@@ -214,7 +214,7 @@ class Row:
     unknown_contents: Unknown | None = None
     """Exhaustiveness of ``contents`` (container columns with a declaration)."""
     rights: RightsSpec | None = None
-    """Exemptions / observed gaps, from the item's file or the model glob file."""
+    """Exemptions / observed gaps, from the item's row or the model glob row."""
     transient: bool = False
     """Manual item never kept by this project; only transfers matter."""
 
@@ -301,7 +301,7 @@ def collect_unit(
     """
     data = UnitData(unit)
     inventory: Inventory | None = None
-    code_root = unit.code_root or unit.folder.parent
+    code_root = unit.code_root
     if unit.discover == "django" or (
         unit.discover == "none" and is_django_unit(code_root)
     ):
@@ -319,7 +319,7 @@ def collect_unit(
 
     data.stores = collect_stores(unit, inventory)
     data.diagnostics.extend(data.stores.diagnostics)
-    overrides = _load_data_files(unit, data.diagnostics)
+    overrides = load_data_items(unit.id)
     model_rights = _pop_model_rights(unit, overrides, data.diagnostics)
 
     known: set[str] = set()
@@ -356,15 +356,19 @@ def collect_unit(
     return data
 
 
+def item_label(unit_id: str, item_id: str) -> str:
+    """How a data row is named in diagnostics (``data/api:shop.User.email``)."""
+    return f"data/{unit_id}:{item_id}"
+
+
 def _pop_model_rights(
     unit: Unit, overrides: dict[str, dict[str, Any]], diagnostics: list[Diagnostic]
 ) -> dict[str, RightsSpec]:
-    """Take the ``<app.Model>.*`` files out of ``overrides``; ``{label: rights}``."""
+    """Take the ``<app.Model>.*`` rows out of ``overrides``; ``{label: rights}``."""
     out: dict[str, RightsSpec] = {}
     for stem in [s for s in overrides if s.endswith(".*")]:
         raw = overrides.pop(stem)
-        path = unit.folder / DATA_DIR / f"{stem}.yaml"
-        spec = _validate(RightsOnly, raw, path, diagnostics)
+        spec = _validate(RightsOnly, raw, item_label(unit.id, stem), diagnostics)
         if spec is not None:
             out[stem[:-2]] = spec.rights
     return out
@@ -414,7 +418,7 @@ def _apply_model_rights(
     """Glob rights apply to every field of the model without its own block.
 
     Rights on a non-personal item are meaningless (nothing to exempt), so
-    the glob only lands on ``pii`` rows; an item file with its own ``rights``
+    the glob only lands on ``pii`` rows; an item row with its own ``rights``
     wins over the glob, right by right.
     """
     if not model_rights:
@@ -432,9 +436,9 @@ def _apply_model_rights(
                 Diagnostic(
                     Severity.ERROR,
                     "data-ref-unknown",
-                    f"{label}.*.yaml: no model {label!r} in unit {unit.id}",
+                    f"{item_label(unit.id, label + '.*')}: no model {label!r} "
+                    f"in unit {unit.id}",
                     unit.id,
-                    unit.folder / DATA_DIR / f"{label}.*.yaml",
                 )
             )
 
@@ -452,16 +456,15 @@ def _check_store_references(data: UnitData) -> None:
         if row.store is None or row.source not in (Source.OVERRIDE, Source.MANUAL):
             continue
         store = data.stores.get(row.store)
-        path = data.unit.folder / DATA_DIR / f"{row.id}.yaml"
+        label = item_label(data.unit.id, row.id)
         if store is None:
             slugs = ", ".join(s.slug for s in data.stores.visible()) or "none"
             data.diagnostics.append(
                 Diagnostic(
                     Severity.ERROR,
                     "store-unknown",
-                    f"{path.name}: store {row.store!r} is not declared; known: {slugs}",
+                    f"{label}: store {row.store!r} is not declared; known: {slugs}",
                     data.unit.id,
-                    path,
                 )
             )
         elif store.ignore:
@@ -469,9 +472,8 @@ def _check_store_references(data: UnitData) -> None:
                 Diagnostic(
                     Severity.ERROR,
                     "store-ignored-referenced",
-                    f"{path.name}: store {row.store!r} is ignored but referenced",
+                    f"{label}: store {row.store!r} is ignored but referenced",
                     data.unit.id,
-                    path,
                 )
             )
 
@@ -543,14 +545,14 @@ def _classify(
         if not known.fixed:
             assumption, check = known.assumption, known.check
     if override_raw is not None:
-        path = unit.folder / DATA_DIR / f"{item_id}.yaml"
-        override = _validate(Override, override_raw, path, diagnostics)
+        label = item_label(unit.id, item_id)
+        override = _validate(Override, override_raw, label, diagnostics)
         if override is not None:
             pii = override.pii if override.pii is not None else pii
             level = override.sensitivity or level
             category = override.category or category
             store = override.store or store
-            _check_vocabulary(level, category, knowledge, path, diagnostics)
+            _check_vocabulary(level, category, knowledge, label, diagnostics)
             rights = override.rights
             if override.reason is not None or rights is None:
                 source = Source.OVERRIDE
@@ -559,10 +561,9 @@ def _classify(
                     Diagnostic(
                         Severity.ERROR,
                         "rights-on-non-personal",
-                        f"{path.name}: rights declared on a non-personal item "
+                        f"{label}: rights declared on a non-personal item "
                         "(nothing to exempt)",
                         unit.id,
-                        path,
                     )
                 )
     dpia = (
@@ -610,10 +611,9 @@ def _rows_for(
             Diagnostic(
                 Severity.ERROR,
                 "schema-error",
-                f"{item_id}.yaml: `contents` is only for JSON-like columns; "
-                f"{item_id} is a {finfo.type}",
+                f"{item_label(unit.id, item_id)}: `contents` is only for JSON-like "
+                f"columns; {item_id} is a {finfo.type}",
                 unit.id,
-                unit.folder / DATA_DIR / f"{item_id}.yaml",
             )
         )
         raw = None
@@ -631,7 +631,7 @@ def _container_rows(
     raw: dict[str, Any],
     diagnostics: list[Diagnostic],
 ) -> list[Row]:
-    """A container column with a ``contents`` file: its items plus the derived column.
+    """A container column with a ``contents`` row: its items plus the derived column.
 
     The column is first classified by the rules (so ``rule`` and the
     presumption are known), then replaced by the derivation over the items.
@@ -639,8 +639,8 @@ def _container_rows(
     column = _classify(
         unit.id, item_id, finfo, model, knowledge, None, diagnostics, unit
     )
-    path = unit.folder / DATA_DIR / f"{item_id}.yaml"
-    declared = _validate(Contents, raw, path, diagnostics)
+    label = item_label(unit.id, item_id)
+    declared = _validate(Contents, raw, label, diagnostics)
     if declared is None:
         return [column]
     items: list[Row] = []
@@ -648,7 +648,7 @@ def _container_rows(
         level = None if isinstance(content.sensitivity, Marker) else content.sensitivity
         category = None if isinstance(content.category, Marker) else content.category
         if level is not None and category is not None:
-            _check_vocabulary(level, category, knowledge, path, diagnostics)
+            _check_vocabulary(level, category, knowledge, label, diagnostics)
         items.append(
             Row(
                 unit=unit.id,
@@ -671,10 +671,9 @@ def _container_rows(
             Diagnostic(
                 Severity.WARNING,
                 "json-unknown-contents",
-                f"{path.name}: other things may be written into {item_id} "
+                f"{label}: other things may be written into {item_id} "
                 "(unknown_contents: possible)",
                 unit.id,
-                path,
             )
         )
     return [derive_column(column, items, declared.unknown_contents, knowledge), *items]
@@ -751,26 +750,25 @@ def _manual_row(
     knowledge: Knowledge,
     diagnostics: list[Diagnostic],
 ) -> Row | None:
-    path = unit.folder / DATA_DIR / f"{item_id}.yaml"
+    label = item_label(unit.id, item_id)
     if "description" not in raw:
         diagnostics.append(
             Diagnostic(
                 Severity.ERROR,
                 "data-orphan",
-                f"{path.name}: no such field in the code; a manual item needs "
+                f"{label}: no such field in the code; a manual item needs "
                 "description, pii, sensitivity and category",
                 unit.id,
-                path,
             )
         )
         return None
-    item = _validate(ManualItem, raw, path, diagnostics)
+    item = _validate(ManualItem, raw, label, diagnostics)
     if item is None:
         return None
     level = None if isinstance(item.sensitivity, Marker) else item.sensitivity
     category = None if isinstance(item.category, Marker) else item.category
     if level is not None and category is not None:
-        _check_vocabulary(level, category, knowledge, path, diagnostics)
+        _check_vocabulary(level, category, knowledge, label, diagnostics)
     dpia = (
         knowledge.dpia_for(level, category)
         if level in knowledge.sensitivity and category in knowledge.categories
@@ -791,58 +789,61 @@ def _manual_row(
     )
 
 
-def _load_data_files(
-    unit: Unit, diagnostics: list[Diagnostic]
-) -> dict[str, dict[str, Any]]:
-    """Raw mappings of every ``data/*.yaml`` keyed by file stem."""
-    folder = unit.folder / DATA_DIR
-    raw_files: dict[str, dict[str, Any]] = {}
-    if not folder.is_dir():
-        return raw_files
-    for path in sorted(folder.glob("*.yaml")):
-        try:
-            data = load_yaml(path)
-        except (OSError, yaml.YAMLError) as exc:
-            diagnostics.append(
-                Diagnostic(
-                    Severity.ERROR, "yaml-error", f"{path.name}: {exc}", unit.id, path
-                )
-            )
-            continue
-        if not isinstance(data, dict):
-            diagnostics.append(
-                Diagnostic(
-                    Severity.ERROR,
-                    "schema-error",
-                    f"{path.name}: expected a mapping",
-                    unit.id,
-                    path,
-                )
-            )
-            continue
-        raw_files[path.stem] = data
-    return raw_files
+def _item_raw(row: DataItemRow) -> dict[str, Any]:
+    """A ``data_items`` row as the mapping its schema validates.
+
+    The row's ``kind`` decides which keys are meaningful; whatever is set
+    is passed through so a stray value is reported by the schema, not
+    silently dropped.
+    """
+    raw: dict[str, Any] = {}
+    if row.kind == "contents":
+        raw["contents"] = {
+            c.name: {"pii": c.pii, "sensitivity": c.sensitivity, "category": c.category}
+            for c in row.contents
+        }
+        raw["unknown_contents"] = row.unknown_contents
+        raw["reason"] = row.reason if row.reason is not None else TODO
+        return raw
+    for key in ("description", "pii", "sensitivity", "category", "store", "reason"):
+        value = getattr(row, key)
+        if value is not None:
+            raw[key] = value
+    if row.transient:
+        raw["transient"] = True
+    if row.rights is not None:
+        raw["rights"] = row.rights
+    return raw
+
+
+def load_data_items(unit_id: str) -> dict[str, dict[str, Any]]:
+    """Raw mappings of every ``data_items`` row of a unit keyed by item id."""
+    with get_db() as db:
+        rows = db.scalars(
+            select(DataItemRow)
+            .where(DataItemRow.unit == unit_id)
+            .order_by(DataItemRow.id)
+        ).all()
+        return {row.id: _item_raw(row) for row in rows}
 
 
 def _validate[M: StrictModel](
-    model: type[M], raw: dict[str, Any], path: Path, diagnostics: list[Diagnostic]
+    model: type[M], raw: dict[str, Any], label: str, diagnostics: list[Diagnostic]
 ) -> M | None:
     try:
         instance = model.model_validate(raw)
     except ValidationError as exc:
         diagnostics.extend(
-            Diagnostic(
-                Severity.ERROR, "schema-error", f"{path.name}: {loc}: {msg}", None, path
-            )
+            Diagnostic(Severity.ERROR, "schema-error", f"{label}: {loc}: {msg}", None)
             for loc, msg in format_errors(exc)
         )
         return None
     # A marker inside ``rights`` is reported per item by the rights derivation
-    # (it knows which items and which activities); the file-level line would
+    # (it knows which items and which activities); the row-level line would
     # say the same thing twice.
     diagnostics.extend(
         d
-        for d in marker_diagnostics(instance, path, None)
+        for d in marker_diagnostics(instance, label, None)
         if not (d.subject or "").split("#", 1)[-1].startswith("rights.")
     )
     return instance
@@ -852,7 +853,7 @@ def _check_vocabulary(
     level: str,
     category: str,
     knowledge: Knowledge,
-    path: Path,
+    label: str,
     diagnostics: list[Diagnostic],
 ) -> None:
     if level not in knowledge.sensitivity:
@@ -860,10 +861,9 @@ def _check_vocabulary(
             Diagnostic(
                 Severity.ERROR,
                 "unknown-level",
-                f"{path.name}: sensitivity {level!r} is not one of "
+                f"{label}: sensitivity {level!r} is not one of "
                 f"{', '.join(knowledge.ordered_levels())}",
                 None,
-                path,
             )
         )
     if category not in knowledge.categories:
@@ -871,10 +871,9 @@ def _check_vocabulary(
             Diagnostic(
                 Severity.ERROR,
                 "unknown-category",
-                f"{path.name}: category {category!r} is not one of "
+                f"{label}: category {category!r} is not one of "
                 f"{', '.join(sorted(knowledge.categories))}",
                 None,
-                path,
             )
         )
 
@@ -911,6 +910,17 @@ def parse_content_entry(
     return name, (pii_text.lower() in ("yes", "true"), level, category)
 
 
+# ---------------------------------------------------------------------------
+# writing
+# ---------------------------------------------------------------------------
+
+
+def has_data_item(unit_id: str, item_id: str) -> bool:
+    """Whether a row exists for ``(unit, id)``."""
+    with get_db() as db:
+        return db.get(DataItemRow, (unit_id, item_id)) is not None
+
+
 def write_contents(
     unit: Unit,
     local_id: str,
@@ -918,20 +928,112 @@ def write_contents(
     *,
     unknown: Unknown,
     reason: str | None,
-) -> Path | None:
-    """Write a ``contents`` declaration file; ``None`` when it already exists."""
-    path = unit.folder / DATA_DIR / f"{local_id}.yaml"
-    if path.exists():
-        return None
-    lines = ["contents:" if contents else "contents: {}"]
-    for name, (pii, level, category) in contents.items():
-        lines.append(
-            f"  {name}: {{pii: {'true' if pii else 'false'}, "
-            f"sensitivity: {level}, category: {category}}}"
+) -> bool:
+    """Write a ``contents`` declaration; ``False`` when a row already exists."""
+    with get_db() as db:
+        if db.get(DataItemRow, (unit.id, local_id)) is not None:
+            return False
+        row = DataItemRow(
+            unit=unit.id,
+            id=local_id,
+            kind="contents",
+            unknown_contents=unknown.value,
+            reason=reason if reason else TODO,
         )
-    lines.append(f"unknown_contents: {unknown.value}")
-    reason_text = json.dumps(reason, ensure_ascii=False) if reason else todo_text()
-    lines.append(f"reason: {reason_text}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return path
+        row.contents = [
+            DataContentRow(
+                unit=unit.id,
+                item_id=local_id,
+                name=name,
+                position=index,
+                pii=pii,
+                sensitivity=level,
+                category=category,
+            )
+            for index, (name, (pii, level, category)) in enumerate(contents.items())
+        ]
+        db.add(row)
+    return True
+
+
+def write_override(
+    unit: Unit,
+    local_id: str,
+    *,
+    pii: bool | None,
+    sensitivity: str | None,
+    category: str | None,
+    reason: str | Marker | None,
+    store: str | None = None,
+) -> bool:
+    """Write an ``override`` row; ``False`` when one already exists."""
+    with get_db() as db:
+        if db.get(DataItemRow, (unit.id, local_id)) is not None:
+            return False
+        db.add(
+            DataItemRow(
+                unit=unit.id,
+                id=local_id,
+                kind="override",
+                pii=pii,
+                sensitivity=sensitivity,
+                category=category,
+                store=store,
+                reason=reason if reason else TODO,
+            )
+        )
+    return True
+
+
+def write_manual(
+    unit: Unit,
+    item_id: str,
+    *,
+    description: str | Marker,
+    pii: bool | Marker,
+    sensitivity: str | Marker,
+    category: str | Marker,
+    store: str | Marker | None = None,
+    transient: bool = False,
+    reason: str | None = None,
+) -> bool:
+    """Write a ``manual`` row; ``False`` when one already exists."""
+    with get_db() as db:
+        if db.get(DataItemRow, (unit.id, item_id)) is not None:
+            return False
+        db.add(
+            DataItemRow(
+                unit=unit.id,
+                id=item_id,
+                kind="manual",
+                description=description,
+                pii=pii,
+                sensitivity=sensitivity,
+                category=category,
+                store=store,
+                transient=transient,
+                reason=reason,
+            )
+        )
+    return True
+
+
+def set_rights(unit_id: str, item_id: str, rights: dict[str, Any]) -> None:
+    """Set the ``rights`` block of an item row, creating a rights-only row
+    (``override`` for a field, ``rights`` for a ``<app.Model>.*`` glob) when
+    the item has none yet. Every other column is left as it is."""
+    with get_db() as db:
+        row = db.get(DataItemRow, (unit_id, item_id))
+        if row is None:
+            kind = "rights" if item_id.endswith(".*") else "override"
+            row = DataItemRow(unit=unit_id, id=item_id, kind=kind)
+            db.add(row)
+        row.rights = rights
+
+
+def override_reason(unit_id: str, item_id: str) -> str | None:
+    """The ``reason`` a human gave on an item row, when it is text."""
+    with get_db() as db:
+        row = db.get(DataItemRow, (unit_id, item_id))
+    reason = row.reason if row is not None else None
+    return reason if isinstance(reason, str) else None

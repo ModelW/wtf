@@ -4,8 +4,9 @@ Compliance as code for Model W projects. The tool reads a repository, builds
 an inventory of what the application does with personal data — the data
 items, the entry points that touch them, where the data goes, the
 processing activities — and a threat model on top of it. Every judgement a
-human or an agent makes is written next to the code as a small YAML file
-and checked on every pull request: the **gate** fails a change that
+human or an agent makes is written into `compliance.db`, a SQLite database
+committed next to the code, and checked on every pull request: the **gate**
+fails a change that
 introduces a gap, and a **challenger** agent re-opens the reviews a change
 undermines.
 
@@ -47,10 +48,10 @@ uv run model-wtf compliance check
 
 ## Principles
 
-- **Facts from the code, decisions in files.** Introspection produces the
-  facts (models, routes, schemas, auth, calls); nothing is guessed from
+- **Facts from the code, decisions in the database.** Introspection produces
+  the facts (models, routes, schemas, auth, calls); nothing is guessed from
   names alone. Every decision — a classification, a declaration, a stamp —
-  is a YAML file under version control, with who made it and why.
+  is a row of `compliance.db` under version control, with who made it and why.
 - **Deterministic first, agents second.** Whatever can be decided from a
   fact is decided by a rule; agents get the questions that need reading,
   one narrow question at a time, with one write tool each. Their output is

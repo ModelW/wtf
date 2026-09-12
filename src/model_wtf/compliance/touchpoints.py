@@ -10,9 +10,10 @@ groups touchpoints under one purpose. The word "process" is not used here.
 Like the data inventory, touchpoints are *virtual*: introspected from the
 running configuration (Django URL resolver, Ninja's OpenAPI document,
 Procrastinate/Celery registries, the admin site; SvelteKit's generated
-``$types.d.ts`` resolved with the project's TypeScript) and never written
-to disk. What humans (or the agent) write is the optional **manifest**
-``<unit>/compliance/touchpoints/<slug>.yaml``::
+``$types.d.ts`` resolved with the project's TypeScript) and never stored.
+What humans (or the agent) write is the optional **declaration**, a row of
+the ``touchpoints`` table with its data refs, transfers and store writes.
+Read as a mapping (the form :class:`Manifest` validates) it looks like::
 
     data:                       # data items and what the code does to them
       - api:orders.Order.customer_email: create  # `ref: <op>`, `ref: [ops]`,
@@ -20,11 +21,11 @@ to disk. What humans (or the agent) write is the optional **manifest**
       - api:people.User.*: {erase: {by: subject}}         # globs for whole models
       - api:orders.Order.payload@json.iban       # a bare ref = read
     transfers:                  # what leaves to another organisation
-      - party: mapbox           # id in compliance/parties/
+      - party: mapbox           # a declared party id
         data: [api:geo.Address.position]
         purpose: geocoding      # optional, one line
     stores:                     # what this code copies into another store
-      - store: tmw              # slug in <unit>/compliance/stores/ (or unit:slug)
+      - store: tmw              # a store slug (or unit:slug)
         data: [api:orders.Order.reference]
         purpose: kitchen board  # optional, one line
     ignore: false               # health checks, static assets
@@ -35,12 +36,12 @@ ref carries what this touchpoint *does* to the item (``create``, ``read``,
 reads them, the touchpoint only states facts. ``write`` is a deprecated
 alias for ``[create, update]`` and warns.
 
-``transfers`` (GDPR wording, Ch. V / Art. 4(9); ``exporting`` is accepted
-with a deprecation warning) is where the Art. 30 "recipients" column comes
-from: every call to an external API, every email provider, every analytics
-beacon is a transfer of the listed items to that party. The party must exist
-in ``compliance/parties/`` (the agent creates it with ``!todo`` details when
-it meets a new one); its ``country`` drives the third-country logic.
+``transfers`` (GDPR wording, Ch. V / Art. 4(9)) is where the Art. 30
+"recipients" column comes from: every call to an external API, every email
+provider, every analytics beacon is a transfer of the listed items to that
+party. The party must be declared (the agent creates it with ``!todo``
+details when it meets a new one); its ``country`` drives the third-country
+logic.
 
 ``stores`` is the sibling for the project's own second-tier stores: the
 data items already say where they *live* (``store: db-default``), a
@@ -49,7 +50,7 @@ project operates (a realtime document server, a search index, a spreadsheet
 export). It is a store flow, not a transfer: no recipient, no Chapter V,
 but the store's threat cells apply and the copy shows in the flows.
 
-A touchpoint is **pending** until its manifest has a ``data`` key; the list
+A touchpoint is **pending** until its declaration has ``data``; the list
 names every inventory item the code reads or writes, personal or not (the
 register filters on ``pii`` downstream; the data-flow model needs all of
 it). An explicit empty list means "touches no inventory item, checked" and
@@ -60,7 +61,6 @@ unit; unknown ones are declaration errors.
 from __future__ import annotations
 
 import hashlib
-import io
 import re
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -69,16 +69,22 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
-from ruamel.yaml import YAML as RuamelYAML
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from sqlalchemy import select
 
+from model_wtf.compliance.db import get_db
 from model_wtf.compliance.declarations import format_errors
-from model_wtf.compliance.ops import OpError, OpSpec, Read, parse_ops, render_ops
+from model_wtf.compliance.ops import OpError, OpSpec, Read, parse_ops
 from model_wtf.compliance.report import Diagnostic, Severity
 from model_wtf.compliance.schemas import StrictModel
-from model_wtf.compliance.stamps import Stamps, read_stamps, stamp_lines
-from model_wtf.compliance.yaml_io import load_yaml
+from model_wtf.compliance.stamps import Stamps, read_all_stamps
+from model_wtf.compliance.tables import (
+    StoreWriteRow,
+    TouchpointDataRow,
+    TouchpointRow,
+    TransferRow,
+    UndeclaredRow,
+)
 from model_wtf.introspect.runner import (
     IntrospectionFailed,
     IntrospectionUnavailable,
@@ -93,7 +99,6 @@ if TYPE_CHECKING:
     from model_wtf.compliance.data import Row
     from model_wtf.compliance.report import Unit
 
-TOUCHPOINTS_DIR = "touchpoints"
 SCHEMA = 1
 IGNORED_BY_DEFAULT = (
     re.compile(r"^whealth_"),
@@ -192,7 +197,7 @@ def infer_scope(facts: Introspected) -> Scope:
 class Transfer(StrictModel):
     """One outbound flow: these items go to that party (another organisation)."""
 
-    party: str = Field(description="Party id, a file in `compliance/parties/`")
+    party: str = Field(description="A declared party id")
     data: list[str] = Field(
         default_factory=list, description="Inventory refs of what is sent"
     )
@@ -250,7 +255,7 @@ class ManifestChallenge(StrictModel):
 
 
 class Manifest(StrictModel):
-    """``touchpoints/<slug>.yaml``."""
+    """A touchpoint's declaration, as a mapping."""
 
     data: list[DataEntry] | None = Field(
         default=None,
@@ -260,9 +265,6 @@ class Manifest(StrictModel):
     transfers: list[Transfer] = Field(
         default_factory=list,
         description="What leaves to another organisation's API",
-    )
-    exporting: list[Transfer] | None = Field(
-        default=None, description="Deprecated spelling of `transfers`"
     )
     stores: list[StoreWrite] = Field(
         default_factory=list,
@@ -291,23 +293,12 @@ class Manifest(StrictModel):
         description="The last challenge a re-review closed (kept so the same "
         "grounds are not raised twice)",
     )
-    threats: Stamps = Field(
-        default_factory=Stamps,
-        description="Stamps closing the threat cells the matrix left open "
-        "(`SID` or `SID@sink` -> {status, note} or !missing)",
-    )
     undeclared: list[Undeclared] = Field(
         default_factory=list,
-        description="Flows a reviewer found in the code that this manifest "
-        "does not declare (see `flow_report`); each is a finding until the "
+        description="Flows a reviewer found in the code that this declaration "
+        "does not have (see `flow_report`); each is a finding until the "
         "transfer is declared or the code stops sending",
     )
-
-    @model_validator(mode="after")
-    def _fold_exporting(self) -> Manifest:
-        if self.exporting:
-            self.transfers = [*self.transfers, *self.exporting]
-        return self
 
     def entries(self) -> list[tuple[str, list[OpSpec], list[str]]]:
         """``(ref pattern, ops, warnings)`` per entry.
@@ -396,7 +387,7 @@ class Touchpoint:
     unit: str
     facts: Introspected
     data: tuple[str, ...] | None = None
-    """``unit:id`` data references; ``None`` = no manifest yet (pending)."""
+    """``unit:id`` data references; ``None`` = no declaration yet (pending)."""
     ops: dict[str, tuple[OpSpec, ...]] = field(default_factory=dict)
     """Per full ref, what this touchpoint does to it (globs expanded)."""
     transfers: tuple[Transfer, ...] = ()
@@ -418,7 +409,7 @@ class Touchpoint:
     flow or to the project's own host (set by the workspace after linking):
     they do not keep the touchpoint pending and vanish on the next rewrite."""
     stamps: Stamps = field(default_factory=Stamps)
-    """Threat stamps declared in the manifest."""
+    """Threat stamps recorded on the touchpoint."""
     calls: tuple[str, ...] = ()
     """Full ids of the touchpoints this one calls (cross-unit edges)."""
     code_root: Path | None = None
@@ -433,11 +424,6 @@ class Touchpoint:
     def full_id(self) -> str:
         """``unit:id``."""
         return f"{self.unit}:{self.id}"
-
-    @property
-    def slug(self) -> str:
-        """File stem of the manifest: the id with path separators made safe."""
-        return slugify(self.id)
 
     @property
     def pending(self) -> bool:
@@ -490,7 +476,7 @@ class Touchpoint:
         return self.transfers
 
     def ops_of(self, ref: str) -> tuple[OpSpec, ...]:
-        """The ops on one full ref (``read`` when the manifest is bare)."""
+        """The ops on one full ref (``read`` when the declaration is bare)."""
         return self.ops.get(ref, (Read(),) if self.data and ref in self.data else ())
 
     def location(self, root: Path) -> str | None:
@@ -569,20 +555,9 @@ class UnitTouchpoints:
         return [t for t in self.items if not t.ignore]
 
 
-def slugify(touchpoint_id: str) -> str:
-    """Manifest file stem for a touchpoint id.
-
-    ``/kitchen/[restaurant_uuid]`` → ``kitchen__[restaurant_uuid]``,
-    ``admin:orders.Order`` → ``admin__orders.Order``, ``/`` → ``__root__``:
-    ``/`` and ``:`` are the two characters a filesystem may refuse.
-    """
-    if touchpoint_id == "/":
-        return "__root__"
-    return touchpoint_id.strip("/").replace("/", "__").replace(":", "__")
-
-
-def _matches_manifest(touchpoint_id: str, stem: str) -> bool:
-    return slugify(touchpoint_id) == stem
+def touchpoint_label(unit_id: str, touchpoint_id: str) -> str:
+    """How a declaration is named in diagnostics."""
+    return f"touchpoints/{unit_id}:{touchpoint_id}"
 
 
 def collect_touchpoints(
@@ -593,11 +568,11 @@ def collect_touchpoints(
     known_parties: set[str] | None = None,
     known_stores: set[str] | None = None,
 ) -> UnitTouchpoints:
-    """Introspect ``unit`` and apply its manifests.
+    """Introspect ``unit`` and apply its declarations.
 
     ``known_data`` maps unit id → set of data item ids, ``known_parties`` is
     the set of party ids and ``known_stores`` the set of ``unit:slug`` store
-    ids, all used to validate what manifests reference. Pass ``None`` to
+    ids, all used to validate what declarations reference. Pass ``None`` to
     skip a validation.
     """
     result = UnitTouchpoints(unit)
@@ -606,12 +581,12 @@ def collect_touchpoints(
     result.introspected = facts is not None
     result.own_hosts = tuple(payload.own_hosts) if payload is not None else ()
     manifests = _load_manifests(unit, result.diagnostics)
+    stamps = read_all_stamps("touchpoint")
     used: set[str] = set()
     for item in facts or []:
-        stem = slugify(item.id)
-        manifest = manifests.get(stem)
+        manifest = manifests.get(item.id)
         if manifest is not None:
-            used.add(stem)
+            used.add(item.id)
         result.items.append(
             _apply(
                 unit,
@@ -621,16 +596,17 @@ def collect_touchpoints(
                 result.diagnostics,
                 known_parties,
                 known_stores,
+                stamps=stamps.get((unit.id, item.id), Stamps()),
             )
         )
-    for stem in sorted(set(manifests) - used):
+    for tp_id in sorted(set(manifests) - used):
         result.diagnostics.append(
             Diagnostic(
                 Severity.ERROR,
                 "touchpoint-orphan-manifest",
-                f"{stem}.yaml: no touchpoint {stem!r} in unit {unit.id}",
+                f"{touchpoint_label(unit.id, tp_id)}: no touchpoint {tp_id!r} "
+                f"in unit {unit.id}",
                 unit.id,
-                unit.folder / TOUCHPOINTS_DIR / f"{stem}.yaml",
             )
         )
     result.items.sort(key=lambda t: (t.facts.kind.value, t.id))
@@ -668,7 +644,7 @@ def _camel(snake: str) -> str:
 def _introspect(
     unit: Unit, diagnostics: list[Diagnostic], *, python: str | None
 ) -> Payload | None:
-    code_root = unit.code_root or unit.folder.parent
+    code_root = unit.code_root
     discover = unit.discover
     if discover == "none" and is_django_unit(code_root):
         discover = "django"
@@ -702,21 +678,21 @@ def _introspect(
 def _resolve_refs(
     refs: list[str],
     unit: Unit,
-    path: Path,
+    label: str,
     known_data: dict[str, set[str]] | None,
     diagnostics: list[Diagnostic],
 ) -> list[str]:
     """``unit:id`` for every ref (unit defaults to this one); unknown ones dropped."""
     out: list[str] = []
     for ref in refs:
-        out.extend(_resolve_one(ref, unit, path, known_data, diagnostics))
+        out.extend(_resolve_one(ref, unit, label, known_data, diagnostics))
     return out
 
 
 def _resolve_one(
     ref: str,
     unit: Unit,
-    path: Path,
+    label: str,
     known_data: dict[str, set[str]] | None,
     diagnostics: list[Diagnostic],
 ) -> list[str]:
@@ -735,9 +711,8 @@ def _resolve_one(
             Diagnostic(
                 Severity.ERROR,
                 "data-ref-unknown-unit",
-                f"{path.name}: {ref!r} names unknown unit {ref_unit!r}",
+                f"{label}: {ref!r} names unknown unit {ref_unit!r}",
                 unit.id,
-                path,
             )
         )
         return []
@@ -748,9 +723,8 @@ def _resolve_one(
                 Diagnostic(
                     Severity.ERROR,
                     "data-ref-unknown",
-                    f"{path.name}: {full!r} matches no data item",
+                    f"{label}: {full!r} matches no data item",
                     unit.id,
-                    path,
                 )
             )
         return [f"{ref_unit}:{i}" for i in matched]
@@ -759,9 +733,8 @@ def _resolve_one(
             Diagnostic(
                 Severity.ERROR,
                 "data-ref-unknown",
-                f"{path.name}: no data item {full!r} (`data list` shows the ids)",
+                f"{label}: no data item {full!r} (`data list` shows the ids)",
                 unit.id,
-                path,
             )
         )
         return []
@@ -776,6 +749,8 @@ def _apply(
     diagnostics: list[Diagnostic],
     known_parties: set[str] | None = None,
     known_stores: set[str] | None = None,
+    *,
+    stamps: Stamps | None = None,
 ) -> Touchpoint:
     ignored_by_default = any(p.search(facts.id) for p in IGNORED_BY_DEFAULT)
     if manifest is None:
@@ -785,8 +760,10 @@ def _apply(
             scope=infer_scope(facts),
             ignore=ignored_by_default,
             calls=tuple(facts.calls),
+            stamps=stamps or Stamps(),
+            code_root=unit.code_root,
         )
-    path = unit.folder / TOUCHPOINTS_DIR / f"{slugify(facts.id)}.yaml"
+    label = touchpoint_label(unit.id, facts.id)
     data: tuple[str, ...] | None = None
     ops: dict[str, list[OpSpec]] = {}
     if manifest.data is not None:
@@ -796,34 +773,22 @@ def _apply(
                 Diagnostic(
                     Severity.WARNING,
                     "op-ambiguous",
-                    f"{path.name}: {ref}: {w}",
+                    f"{label}: {ref}: {w}",
                     unit.id,
-                    path,
                     subject=f"{unit.id}:{facts.id}",
                 )
                 for w in warnings
             )
-            for full in _resolve_one(ref, unit, path, known_data, diagnostics):
+            for full in _resolve_one(ref, unit, label, known_data, diagnostics):
                 if full not in resolved:
                     resolved.append(full)
                 bucket = ops.setdefault(full, [])
                 bucket.extend(o for o in entry_ops if o not in bucket)
         data = tuple(resolved)
-    if manifest.exporting is not None:
-        diagnostics.append(
-            Diagnostic(
-                Severity.WARNING,
-                "exporting-deprecated",
-                f"{path.name}: `exporting` is now `transfers` (GDPR wording)",
-                unit.id,
-                path,
-                subject=f"{unit.id}:{facts.id}",
-            )
-        )
     transfers = tuple(
         Transfer(
             party=transfer.party,
-            data=_resolve_refs(transfer.data, unit, path, known_data, diagnostics),
+            data=_resolve_refs(transfer.data, unit, label, known_data, diagnostics),
             purpose=transfer.purpose,
         )
         for transfer in manifest.transfers
@@ -833,10 +798,9 @@ def _apply(
             Diagnostic(
                 Severity.ERROR,
                 "party-unknown",
-                f"{path.name}: transfers to {transfer.party!r}, which is not in "
-                "compliance/parties/",
+                f"{label}: transfers to {transfer.party!r}, which is not a "
+                "declared party",
                 unit.id,
-                path,
             )
             for transfer in transfers
             if transfer.party not in known_parties
@@ -844,7 +808,7 @@ def _apply(
     stores = tuple(
         StoreWrite(
             store=write.store if ":" in write.store else f"{unit.id}:{write.store}",
-            data=_resolve_refs(write.data, unit, path, known_data, diagnostics),
+            data=_resolve_refs(write.data, unit, label, known_data, diagnostics),
             purpose=write.purpose,
         )
         for write in manifest.stores
@@ -854,10 +818,9 @@ def _apply(
             Diagnostic(
                 Severity.ERROR,
                 "store-unknown",
-                f"{path.name}: writes to store {write.store!r}, which no unit "
-                "declares (compliance/stores/<slug>.yaml)",
+                f"{label}: writes to store {write.store!r}, which no unit "
+                "declares (store_add / a `stores` row)",
                 unit.id,
-                path,
             )
             for write in stores
             if write.store not in known_stores
@@ -876,38 +839,81 @@ def _apply(
         challenge=manifest.challenge,
         answered=manifest.answered,
         undeclared=tuple(manifest.undeclared),
-        stamps=manifest.threats,
+        stamps=stamps or Stamps(),
         calls=tuple(facts.calls),
         code_root=unit.code_root,
     )
 
 
+def _ops_form(ops: list[Any]) -> Any:
+    """The tool form ``[{"op": v, ...}]`` as the manifest form (``v`` or
+    ``{v: meta}``); ``None`` for a bare read."""
+    forms: list[Any] = []
+    for item in ops:
+        if not isinstance(item, dict):
+            forms.append(item)
+            continue
+        meta = {k: v for k, v in item.items() if k != "op"}
+        verb = item.get("op")
+        forms.append({verb: meta} if meta else verb)
+    if forms == ["read"]:
+        return None
+    return forms[0] if len(forms) == 1 else forms
+
+
+def _manifest_raw(row: TouchpointRow) -> dict[str, Any]:
+    """A ``touchpoints`` row (and its children) as the mapping
+    :class:`Manifest` validates."""
+    raw: dict[str, Any] = {"ignore": row.ignore}
+    if row.declared:
+        entries: list[Any] = []
+        for item in row.data:
+            value = _ops_form(list(item.ops or []))
+            entries.append(item.ref if value is None else {item.ref: value})
+        raw["data"] = entries
+    if row.transfers:
+        raw["transfers"] = [
+            {"party": t.party_id, "data": list(t.data), "purpose": t.purpose}
+            for t in row.transfers
+        ]
+    if row.store_writes:
+        raw["stores"] = [
+            {"store": w.store, "data": list(w.data), "purpose": w.purpose}
+            for w in row.store_writes
+        ]
+    if row.undeclared:
+        raw["undeclared"] = [
+            {
+                "sink": u.sink,
+                "data": list(u.data),
+                "note": u.note,
+                "commit": u.commit,
+                "at": u.at,
+            }
+            for u in row.undeclared
+        ]
+    for key in ("scope", "note", "challenge", "answered"):
+        value = getattr(row, key)
+        if value is not None:
+            raw[key] = value
+    return raw
+
+
+def declared_touchpoints(unit_id: str) -> dict[str, dict[str, Any]]:
+    """Raw declarations of a unit, by touchpoint id."""
+    with get_db() as db:
+        rows = db.scalars(
+            select(TouchpointRow)
+            .where(TouchpointRow.unit == unit_id)
+            .order_by(TouchpointRow.id)
+        ).all()
+        return {row.id: _manifest_raw(row) for row in rows}
+
+
 def _load_manifests(unit: Unit, diagnostics: list[Diagnostic]) -> dict[str, Manifest]:
-    folder = unit.folder / TOUCHPOINTS_DIR
     out: dict[str, Manifest] = {}
-    if not folder.is_dir():
-        return out
-    for path in sorted(folder.glob("*.yaml")):
-        try:
-            raw = load_yaml(path)
-        except (OSError, yaml.YAMLError) as exc:
-            diagnostics.append(
-                Diagnostic(
-                    Severity.ERROR, "yaml-error", f"{path.name}: {exc}", unit.id, path
-                )
-            )
-            continue
-        if not isinstance(raw, dict):
-            diagnostics.append(
-                Diagnostic(
-                    Severity.ERROR,
-                    "schema-error",
-                    f"{path.name}: expected a mapping",
-                    unit.id,
-                    path,
-                )
-            )
-            continue
+    for tp_id, raw in declared_touchpoints(unit.id).items():
+        label = touchpoint_label(unit.id, tp_id)
         try:
             manifest = Manifest.model_validate(raw)
             manifest.entries()  # ops vocabulary check, with the ref in the error
@@ -916,9 +922,8 @@ def _load_manifests(unit: Unit, diagnostics: list[Diagnostic]) -> dict[str, Mani
                 Diagnostic(
                     Severity.ERROR,
                     "schema-error",
-                    f"{path.name}: {loc}: {msg}",
+                    f"{label}: {loc}: {msg}",
                     unit.id,
-                    path,
                 )
                 for loc, msg in format_errors(exc)
             )
@@ -927,14 +932,18 @@ def _load_manifests(unit: Unit, diagnostics: list[Diagnostic]) -> dict[str, Mani
                 Diagnostic(
                     Severity.ERROR,
                     "schema-error",
-                    f"{path.name}: data: {exc}",
+                    f"{label}: data: {exc}",
                     unit.id,
-                    path,
                 )
             )
         else:
-            out[path.stem] = manifest
+            out[tp_id] = manifest
     return out
+
+
+def _ops_json(ops: Sequence[OpSpec]) -> list[dict[str, Any]]:
+    """Ops in the tool form stored in the database."""
+    return [{"op": op.op.value, **op.payload()} for op in ops] or [{"op": "read"}]
 
 
 def write_manifest(
@@ -949,43 +958,24 @@ def write_manifest(
     ignore: bool = False,
     scope: Scope | None = None,
     answered: ManifestChallenge | None = None,
-    stamps: Stamps | None = None,
     undeclared: Sequence[Undeclared] | None = None,
     resolve_sink: Callable[[str], str] | None = None,
-) -> Path:
-    """Create or replace the manifest of ``touchpoint``; return its path.
+) -> None:
+    """Create or replace the declaration of ``touchpoint``.
 
     ``undeclared`` (default: the touchpoint's current ones) are carried over
     minus those the new ``transfers`` / ``stores`` now declare — declaring
     the flow is how an undeclared one is closed. ``resolve_sink`` maps a
     reviewer's free-text sink to its canonical ``party:``/``store:`` id so
-    entries written before the party or store existed close too.
+    entries recorded before the party or store existed close too.
 
-    ``answered`` records the challenge this declaration closes; ``stamps``
-    (default: the touchpoint's current ones) are carried over so a
-    re-declaration does not lose the threat review.
+    ``answered`` records the challenge this declaration closes; the
+    threat stamps live in their own table and survive a re-declaration.
 
     ``ops`` maps a ref (or glob) to its ops; refs absent from it are bare
-    reads. Entries are written in the order of ``data``, one per line, the
-    ops in the compact manifest form (``ref: create``,
-    ``ref: {erase: {by: subject}}``, ``ref: [create, read]``).
+    reads. Entries are kept in the order of ``data``.
     """
-    path = unit.folder / TOUCHPOINTS_DIR / f"{touchpoint.slug}.yaml"
     ops = ops or {}
-    lines: list[str] = []
-    if ignore:
-        lines.append("ignore: true")
-    if scope is not None:
-        lines.append(f"scope: {scope.value}")
-    lines.append("data:" if data else "data: []")
-    for ref in data:
-        lines.extend(_entry_lines(ref, list(ops.get(ref, ()))))
-    lines.extend(_flow_lines("transfers", "party", transfers or []))
-    lines.extend(_flow_lines("stores", "store", stores or []))
-    if note:
-        lines.append(f"note: {_scalar(note)}")
-    if answered is not None:
-        lines.extend(_challenge_lines("answered", answered))
     kept = touchpoint.undeclared if undeclared is None else tuple(undeclared)
     declared_to = {f"party:{t.party}" for t in transfers or ()}
     for write in stores or ():
@@ -993,69 +983,76 @@ def write_manifest(
         if ":" not in write.store:
             declared_to.add(f"store:{unit.id}:{write.store}")
     resolve = resolve_sink or (lambda sink: sink)
-    lines.extend(
-        _undeclared_lines(
-            [
-                u
-                for u in kept
-                if resolve(u.sink) not in declared_to
-                and not resolve(u.sink).startswith("own:")
-            ]
+    still = [
+        u
+        for u in kept
+        if resolve(u.sink) not in declared_to and not resolve(u.sink).startswith("own:")
+    ]
+    with get_db() as db:
+        row = db.get(TouchpointRow, (unit.id, touchpoint.id))
+        if row is None:
+            row = TouchpointRow(unit=unit.id, id=touchpoint.id)
+            db.add(row)
+        row.declared = True
+        row.ignore = ignore
+        row.scope = scope.value if scope is not None else None
+        row.note = note or None
+        row.challenge = None
+        row.answered = (
+            answered.model_dump(mode="json", exclude_none=True) if answered else None
         )
-    )
-    if stamps is None:
-        # From disk, not from the (possibly cached) touchpoint: a stamp
-        # written by another process since must survive the rewrite.
-        stamps = read_stamps(path) if path.is_file() else touchpoint.stamps
-    lines.extend(stamp_lines(stamps))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return path
-
-
-def _flow_lines(
-    key: str, target: str, entries: Sequence[Transfer | StoreWrite]
-) -> list[str]:
-    """``transfers:`` / ``stores:`` blocks, one entry per target."""
-    if not entries:
-        return []
-    lines = [f"{key}:"]
-    for entry in entries:
-        lines.append(f"  - {target}: {getattr(entry, target)}")
-        lines.append("    data: [" + ", ".join(entry.data) + "]")
-        if entry.purpose:
-            lines.append(f"    purpose: {_scalar(entry.purpose)}")
-    return lines
-
-
-def _undeclared_lines(found: list[Undeclared]) -> list[str]:
-    if not found:
-        return []
-    lines = ["undeclared:"]
-    for entry in found:
-        lines.append(f"  - sink: {_scalar(entry.sink)}")
-        lines.append("    data: [" + ", ".join(entry.data) + "]")
-        lines.append(f"    note: {_scalar(entry.note)}")
-        if entry.commit:
-            lines.append(f"    commit: {entry.commit}")
-        if entry.at:
-            lines.append(f"    at: {_scalar(entry.at)}")
-    return lines
-
-
-def _challenge_lines(key: str, challenge: ManifestChallenge) -> list[str]:
-    lines = [f"{key}:", f"  commit: {challenge.commit}"]
-    if challenge.at:
-        lines.append(f"  at: {_scalar(challenge.at)}")
-    lines.append(f"  grounds: {_scalar(challenge.grounds)}")
-    return lines
+        row.data = [
+            TouchpointDataRow(
+                unit=unit.id,
+                touchpoint_id=touchpoint.id,
+                ref=ref,
+                position=index,
+                ops=_ops_json(list(ops.get(ref, ()))),
+            )
+            for index, ref in enumerate(data)
+        ]
+        row.transfers = [
+            TransferRow(
+                unit=unit.id,
+                touchpoint_id=touchpoint.id,
+                party_id=t.party,
+                position=index,
+                data=list(t.data),
+                purpose=t.purpose,
+            )
+            for index, t in enumerate(transfers or [])
+        ]
+        row.store_writes = [
+            StoreWriteRow(
+                unit=unit.id,
+                touchpoint_id=touchpoint.id,
+                store=w.store,
+                position=index,
+                data=list(w.data),
+                purpose=w.purpose,
+            )
+            for index, w in enumerate(stores or [])
+        ]
+        row.undeclared = [
+            UndeclaredRow(
+                unit=unit.id,
+                touchpoint_id=touchpoint.id,
+                sink=u.sink,
+                position=index,
+                data=list(u.data),
+                note=u.note,
+                commit=u.commit,
+                at=u.at,
+            )
+            for index, u in enumerate(still)
+        ]
 
 
 def report_undeclared(
     unit: Unit, touchpoint: Touchpoint, found: Undeclared
 ) -> str | None:
-    """Append an ``undeclared:`` entry to an existing manifest; the reason it
-    was refused, if so (no manifest, or the sink already declared/reported)."""
+    """Add an undeclared flow to an existing declaration; the reason it was
+    refused, if so (no declaration, or the sink already declared/reported)."""
     if touchpoint.data is None or touchpoint.ignore:
         return "not declared: declare the touchpoint first (touchpoint_set_data)"
     if any(t.party == found.sink.removeprefix("party:") for t in touchpoint.transfers):
@@ -1064,32 +1061,29 @@ def report_undeclared(
         return f"{found.sink} is already a declared store write of this touchpoint"
     if any(u.sink == found.sink for u in touchpoint.undeclared):
         return f"{found.sink} is already reported on this touchpoint"
-    path = unit.folder / TOUCHPOINTS_DIR / f"{touchpoint.slug}.yaml"
-    doc = _yaml().load(path.read_text(encoding="utf-8")) or {}
-    entry = {"sink": found.sink, "data": list(found.data), "note": found.note}
-    if found.commit:
-        entry["commit"] = found.commit
-    if found.at:
-        entry["at"] = found.at
-    doc.setdefault("undeclared", []).append(entry)
-    buf = io.StringIO()
-    _yaml().dump(doc, buf)
-    path.write_text(buf.getvalue(), encoding="utf-8")
+    with get_db() as db:
+        row = db.get(TouchpointRow, (unit.id, touchpoint.id))
+        if row is None:
+            return "not declared: declare the touchpoint first (touchpoint_set_data)"
+        row.undeclared.append(
+            UndeclaredRow(
+                unit=unit.id,
+                touchpoint_id=touchpoint.id,
+                sink=found.sink,
+                position=len(row.undeclared),
+                data=list(found.data),
+                note=found.note,
+                commit=found.commit,
+                at=found.at,
+            )
+        )
     return None
-
-
-def _yaml() -> RuamelYAML:
-    y = RuamelYAML()
-    y.preserve_quotes = True
-    y.width = 4096
-    y.indent(mapping=2, sequence=4, offset=2)
-    return y
 
 
 def challenge_manifest(
     unit: Unit, touchpoint: Touchpoint, *, commit: str, grounds: str
 ) -> str | None:
-    """Add a ``challenge:`` block to an existing manifest; the reason it was
+    """Record a challenge on an existing declaration; the reason it was
     refused, if so (same rules as :meth:`Lock.challenge`)."""
     if touchpoint.data is None or touchpoint.ignore:
         return "not declared: a pending or ignored touchpoint needs no challenge"
@@ -1097,81 +1091,27 @@ def challenge_manifest(
         return f"already challenged at {touchpoint.challenge.commit}"
     if touchpoint.answered is not None and touchpoint.answered.commit == commit:
         return "already answered by the current declaration"
-    path = unit.folder / TOUCHPOINTS_DIR / f"{touchpoint.slug}.yaml"
-    text = path.read_text(encoding="utf-8").rstrip("\n")
     at = datetime.now(tz=UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    block = _challenge_lines(
-        "challenge", ManifestChallenge(commit=commit, grounds=grounds, at=at)
-    )
-    path.write_text(text + "\n" + "\n".join(block) + "\n", encoding="utf-8")
+    with get_db() as db:
+        row = db.get(TouchpointRow, (unit.id, touchpoint.id))
+        if row is None:
+            return "not declared: a pending or ignored touchpoint needs no challenge"
+        row.challenge = ManifestChallenge(
+            commit=commit, grounds=grounds, at=at
+        ).model_dump(mode="json", exclude_none=True)
     return None
 
 
-class _FlowDumper(yaml.SafeDumper):
-    """Block mappings, flow style for the leaf mappings (``{by: subject}``)."""
-
-    def increase_indent(self, flow: bool = False, indentless: bool = False) -> None:
-        """Indent list items under their key."""
-        super().increase_indent(flow, False)
-
-
-def _flow_yaml(value: Any, *, flow: bool | None = None) -> str:
-    """Op metadata (a mapping or a list of verbs/mappings) as YAML text.
-
-    ``flow=None`` lets PyYAML pick (block for nested, flow for leaves);
-    ``flow=True`` forces the whole value on one line.
-    """
-    return yaml.dump(
-        value,
-        Dumper=_FlowDumper,
-        sort_keys=False,
-        allow_unicode=True,
-        default_flow_style=flow,
-        width=10**6,
-    ).rstrip("\n")
-
-
-def _entry_lines(ref: str, ops: Sequence[OpSpec]) -> list[str]:
-    """The manifest lines for one ``data`` entry, as compact as the ops allow."""
-    value = render_ops(list(ops))
-    if value is None:
-        return [f"  - {ref}"]
-    if isinstance(value, str):
-        return [f"  - {ref}: {value}"]
-    if isinstance(value, list) and _shallow(value):
-        # ``[read, create, {rectify: {by: staff}}]`` on one line reads better
-        # than a block list of three.
-        return [f"  - {ref}: {_flow_yaml(value, flow=True)}"]
-    return [f"  - {ref}:", *_indent(_flow_yaml(value), 6)]
-
-
-def _shallow(value: list[Any]) -> bool:
-    """Whether every element is a verb or a mapping of plain scalars."""
-    return all(
-        isinstance(v, str)
-        or (
-            isinstance(v, dict)
-            and all(
-                isinstance(m, dict)
-                and all(not isinstance(x, dict | list) for x in m.values())
-                for m in v.values()
+def touchpoints_using(data_ref: str) -> list[tuple[str, str]]:
+    """``(unit, touchpoint id)`` of every declaration listing ``data_ref``
+    verbatim (globs are expanded by the workspace, not here)."""
+    with get_db() as db:
+        rows = db.execute(
+            select(TouchpointDataRow.unit, TouchpointDataRow.touchpoint_id).where(
+                TouchpointDataRow.ref == data_ref
             )
-        )
-        for v in value
-    )
-
-
-def _indent(text: str, spaces: int) -> list[str]:
-    return [" " * spaces + line for line in text.splitlines()]
-
-
-def _scalar(value: str) -> str:
-    """One YAML scalar, quoted only when needed (no document markers)."""
-    return (
-        yaml.safe_dump(value, default_style=None, width=10**6)
-        .strip()
-        .removesuffix("\n...")
-    )
+        ).all()
+    return [(unit, tp_id) for unit, tp_id in rows]
 
 
 def data_index(rows_by_unit: dict[str, list[Row]]) -> dict[str, set[str]]:

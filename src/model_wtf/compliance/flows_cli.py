@@ -36,9 +36,9 @@ def flows() -> None:
 def _load(
     ctx: click.Context, root: Path | None, python: str | None, only: str | None
 ) -> tuple[Flows, Workspace]:
-    resolved, units, knowledge = load_context(root)
+    _, units, knowledge = load_context(root)
     try:
-        ws = load_workspace(resolved, units, knowledge, python=python, only=only)
+        ws = load_workspace(units, knowledge, python=python, only=only)
     except IntrospectionFailed as exc:
         Console(stderr=True).print(Text.assemble(("Tool error: ", "red"), str(exc)))
         ctx.exit(int(ExitCode.TOOL_ERROR))

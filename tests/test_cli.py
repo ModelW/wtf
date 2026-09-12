@@ -9,13 +9,23 @@ from typing import TYPE_CHECKING
 import pytest
 from click.testing import CliRunner
 
-from conftest import FILES_ALL_OK, SNOW_FRONT_UNDECLARED, SNOW_TWO_UNITS
+from conftest import (
+    APP_OK,
+    PARTY_ACME,
+    SNOW_FRONT_UNDECLARED,
+    SNOW_TWO_UNITS,
+    seed_app,
+    seed_party,
+)
 from model_wtf.cli import cli
+from model_wtf.compliance.yaml_io import TODO, Missing, Todo
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from conftest import Invoke, MakeRepo
+
+CODE_DIRS = ("api", "front")
 
 
 # ---------------------------------------------------------------------------
@@ -24,7 +34,7 @@ if TYPE_CHECKING:
 
 
 def test_text_output_lists_all_scopes(make_repo: MakeRepo, invoke: Invoke) -> None:
-    root = make_repo(snow=SNOW_TWO_UNITS, files=FILES_ALL_OK)
+    root = make_repo(snow=SNOW_TWO_UNITS, dirs=CODE_DIRS, seed=True)
 
     result = invoke("--root", str(root))
 
@@ -32,7 +42,7 @@ def test_text_output_lists_all_scopes(make_repo: MakeRepo, invoke: Invoke) -> No
     assert "Compliance scopes" in result.output
     for scope_id in ("shared", "api", "front"):
         assert re.search(rf"\b{scope_id}\b", result.output)
-    assert "front/compliance" in result.output
+    assert "compliance.db" in result.output
     assert "./front" not in result.output
     assert "Exit code" not in result.output
 
@@ -52,7 +62,7 @@ def test_text_output_lists_all_scopes(make_repo: MakeRepo, invoke: Invoke) -> No
 def test_json_output_is_valid_and_matches_exit_code(
     make_repo: MakeRepo, invoke: Invoke, snow: str, *, strict: bool, expected_exit: int
 ) -> None:
-    root = make_repo(snow=snow, files=FILES_ALL_OK)
+    root = make_repo(snow=snow, dirs=CODE_DIRS, seed=True)
     args = ["--root", str(root), "--format", "json"]
     if strict:
         args.append("--strict")
@@ -94,7 +104,7 @@ def test_github_output_emits_annotation(
     severity: str,
     expected_exit: int,
 ) -> None:
-    root = make_repo(snow=SNOW_FRONT_UNDECLARED, files=FILES_ALL_OK)
+    root = make_repo(snow=SNOW_FRONT_UNDECLARED, dirs=CODE_DIRS, seed=True)
 
     result = invoke("--root", str(root), "--format", "github", *extra)
 
@@ -112,18 +122,8 @@ def test_github_output_emits_annotation(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("snow", "files", "fragment"),
-    [
-        pytest.param(
-            SNOW_FRONT_UNDECLARED, FILES_ALL_OK, "declares no", id="unit-no-compliance"
-        ),
-    ],
-)
-def test_strict_turns_exit_zero_into_three(
-    make_repo: MakeRepo, invoke: Invoke, snow: str, files: dict[str, str], fragment: str
-) -> None:
-    root = make_repo(snow=snow, files=files)
+def test_strict_turns_exit_zero_into_three(make_repo: MakeRepo, invoke: Invoke) -> None:
+    root = make_repo(snow=SNOW_FRONT_UNDECLARED, dirs=CODE_DIRS, seed=True)
 
     lenient = invoke("--root", str(root))
     strict = invoke("--root", str(root), "--strict")
@@ -133,7 +133,7 @@ def test_strict_turns_exit_zero_into_three(
     assert strict.exit_code == 3
     assert "Errors" in strict.output
     for result in (lenient, strict):
-        assert fragment in result.output
+        assert "declares no" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -141,53 +141,52 @@ def test_strict_turns_exit_zero_into_three(
 # ---------------------------------------------------------------------------
 
 
-def _with_open_questions() -> dict[str, str]:
-    files = dict(FILES_ALL_OK)
-    files["compliance/app.yaml"] = files["compliance/app.yaml"].replace(
-        "description: Back-office for the Kerfufoo client portal.",
-        "description: !todo",
+def _with_open_questions() -> None:
+    seed_app(**{**APP_OK, "description": TODO})
+    seed_party(
+        "acme",
+        name="ACME Corp",
+        country="FR",
+        address=Todo("ask legal"),
+        email=TODO,
     )
-    files["compliance/parties/acme.yaml"] = (
-        'name: ACME Corp\ncountry: FR\naddress: !todo "ask legal"\nemail: !todo\n'
-    )
-    return files
 
 
-def test_todos_fold_per_file_and_allow_todo_waves_them(
+def test_todos_fold_per_record_and_allow_todo_waves_them(
     make_repo: MakeRepo, invoke: Invoke
 ) -> None:
-    root = make_repo(snow=SNOW_TWO_UNITS, files=_with_open_questions())
+    root = make_repo(snow=SNOW_TWO_UNITS, dirs=CODE_DIRS, seed=True)
+    _with_open_questions()
 
     result = invoke("--root", str(root))
     waved = invoke("--root", str(root), "--allow-todo")
 
     assert result.exit_code == 1
     assert "Todo" in result.output
-    assert "compliance/app.yaml: description" in result.output
-    # One line per file, notes kept.
-    assert 'compliance/parties/acme.yaml: address "ask legal", email' in result.output
+    assert "app: description" in result.output
+    # One line per record, notes kept.
+    assert 'parties/acme: address "ask legal", email' in result.output
     assert "3 todo" in result.output
     assert waved.exit_code == 0
-    assert "compliance/app.yaml: description" in waved.output  # still listed
+    assert "app: description" in waved.output  # still listed
 
 
 def test_missing_always_fails(make_repo: MakeRepo, invoke: Invoke) -> None:
-    files = dict(FILES_ALL_OK)
-    files["compliance/parties/acme.yaml"] = (
-        "name: ACME Corp\ncountry: FR\naddress: 1 rue\n"
-        'email: !missing "no privacy contact exists"\n'
+    root = make_repo(snow=SNOW_TWO_UNITS, dirs=CODE_DIRS, seed=True)
+    seed_party(
+        "acme",
+        **{**PARTY_ACME, "email": Missing("no privacy contact exists")},
     )
-    root = make_repo(snow=SNOW_TWO_UNITS, files=files)
 
     result = invoke("--root", str(root), "--allow-todo")
     github = invoke("--root", str(root), "--format", "github")
 
     assert result.exit_code == 1
     assert "Missing" in result.output
-    assert 'acme.yaml: email "no privacy contact exists"' in result.output
+    assert 'parties/acme: email "no privacy contact exists"' in result.output
     assert "1 missing" in result.output
     assert any(
-        line.startswith("::error file=compliance/parties/acme.yaml,title=missing::")
+        line.startswith("::error title=missing::parties/acme: email is !missing")
         for line in github.stdout.splitlines()
     )
 
@@ -195,18 +194,19 @@ def test_missing_always_fails(make_repo: MakeRepo, invoke: Invoke) -> None:
 def test_todo_flag_prints_the_questionnaire(
     make_repo: MakeRepo, invoke: Invoke
 ) -> None:
-    root = make_repo(snow=SNOW_TWO_UNITS, files=_with_open_questions())
+    root = make_repo(snow=SNOW_TWO_UNITS, dirs=CODE_DIRS, seed=True)
+    _with_open_questions()
 
     result = invoke("--root", str(root), "--todo")
 
     lines = result.output.splitlines()
-    assert lines[0].startswith("compliance/app.yaml description: What the product does")
-    assert "compliance/parties/acme.yaml address" in result.output
+    assert lines[0].startswith("app description: What the product does")
+    assert "parties/acme address" in result.output
     assert "Compliance scopes" not in result.output
 
 
 def test_todo_flag_on_a_clean_repo(make_repo: MakeRepo, invoke: Invoke) -> None:
-    root = make_repo(snow=SNOW_TWO_UNITS, files=FILES_ALL_OK)
+    root = make_repo(snow=SNOW_TWO_UNITS, dirs=CODE_DIRS, seed=True)
 
     result = invoke("--root", str(root), "--todo")
 
@@ -214,15 +214,16 @@ def test_todo_flag_on_a_clean_repo(make_repo: MakeRepo, invoke: Invoke) -> None:
 
 
 def test_json_groups_by_section(make_repo: MakeRepo, invoke: Invoke) -> None:
-    root = make_repo(snow=SNOW_TWO_UNITS, files=_with_open_questions())
+    root = make_repo(snow=SNOW_TWO_UNITS, dirs=CODE_DIRS, seed=True)
+    _with_open_questions()
 
     data = json.loads(invoke("--root", str(root), "--format", "json").stdout)
 
     assert set(data["sections"]) == {"errors", "missing", "todo", "review", "info"}
     assert [d["subject"] for d in data["sections"]["todo"]] == [
-        "app.yaml#description",
-        "acme.yaml#address",
-        "acme.yaml#email",
+        "app#description",
+        "parties/acme#address",
+        "parties/acme#email",
     ]
     assert data["sections"]["todo"][1]["note"] == "ask legal"
     assert data["sections"]["errors"] == []
@@ -236,7 +237,7 @@ def test_json_groups_by_section(make_repo: MakeRepo, invoke: Invoke) -> None:
 def test_root_defaults_to_enclosing_git_checkout(
     make_repo: MakeRepo, invoke: Invoke, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = make_repo(snow=SNOW_TWO_UNITS, files=FILES_ALL_OK, dirs=("front/src",))
+    root = make_repo(snow=SNOW_TWO_UNITS, dirs=(*CODE_DIRS, "front/src"), seed=True)
     monkeypatch.chdir(root / "front" / "src")
 
     result = invoke("--format", "json")
@@ -251,7 +252,7 @@ def test_root_defaults_to_enclosing_git_checkout(
 
 
 def test_missing_manifest_exits_three(make_repo: MakeRepo, invoke: Invoke) -> None:
-    root = make_repo(files=FILES_ALL_OK)
+    root = make_repo(dirs=CODE_DIRS, seed=True)
 
     result = invoke("--root", str(root))
 
@@ -276,7 +277,7 @@ def test_nonexistent_root_is_a_usage_error(invoke: Invoke, tmp_path: Path) -> No
 def test_unexpected_exception_exits_four_on_stderr(
     make_repo: MakeRepo, invoke: Invoke, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = make_repo(snow=SNOW_TWO_UNITS, files=FILES_ALL_OK)
+    root = make_repo(snow=SNOW_TWO_UNITS, dirs=CODE_DIRS, seed=True)
 
     def boom(*_args: object, **_kwargs: object) -> None:
         msg = "disk on fire"
@@ -294,7 +295,7 @@ def test_unexpected_exception_exits_four_on_stderr(
 
 def test_global_root_option(make_repo: MakeRepo) -> None:
     """``model-wtf --root X compliance ...`` applies to every subcommand."""
-    root = make_repo(snow=SNOW_TWO_UNITS, files=FILES_ALL_OK)
+    root = make_repo(snow=SNOW_TWO_UNITS, dirs=CODE_DIRS, seed=True)
     runner = CliRunner()
 
     result = runner.invoke(cli, ["--root", str(root), "compliance", "check"])
@@ -307,10 +308,6 @@ def test_global_root_option(make_repo: MakeRepo) -> None:
 
 
 def test_version_flag_reports_the_installed_distribution() -> None:
-    from click.testing import CliRunner
-
-    from model_wtf.cli import cli
-
     out = CliRunner().invoke(cli, ["--version"])
     assert out.exit_code == 0, out.output
     # The number itself comes from the tag at release time (0.0.0 in a

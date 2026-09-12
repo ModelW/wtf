@@ -33,8 +33,6 @@ from model_wtf.compliance.touchpoints import Kind, Scope
 from model_wtf.compliance.yaml_io import Marker, Missing
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from model_wtf.compliance.activities import Activity
     from model_wtf.compliance.data import Row
     from model_wtf.compliance.ops import OpSpec
@@ -311,45 +309,28 @@ class _Derivation:
                             "todo",
                             f"{ref}: {finding.detail}",
                             row.unit,
-                            self._path(row),
                             subject=f"{ref}#{finding.right.value}",
-                            hint="fill the party's country in compliance/parties/",
+                            hint="fill the party's country",
                         )
                     )
         diagnostics.extend(self._unused_parties())
         return diagnostics, items
 
     def _unused_parties(self) -> list[Diagnostic]:
-        """A party file nothing refers to is a question: a transfer the
-        reviewer forgot to declare, or a vendor listed "just in case"
-        (every oEmbed provider a library knows about) to delete."""
-        used: set[str] = set()
-        app = self.ws.app
-        if app is not None:
-            used.update(
-                ref for ref in (app.controller, app.processor) if isinstance(ref, str)
-            )
-        for tp in self.ws.all_touchpoints.values():
-            used.update(t.party for t in tp.transfers)
-        for activity in self.ws.activities.items.values():
-            spec = activity.spec
-            used.update(spec.recipients)
-            used.update(
-                ref for ref in (spec.controller, spec.processor) if isinstance(ref, str)
-            )
-        parties_dir = self.ws.shared / "parties"
+        """A party nothing refers to is a question: a transfer the reviewer
+        forgot to declare, or a vendor listed "just in case" (every oEmbed
+        provider a library knows about) to delete."""
         return [
             Diagnostic(
                 Severity.WARNING,
                 "todo",
-                f"parties/{party_id}.yaml: no transfer, activity or role refers "
+                f"parties/{party_id}: no transfer, activity or role refers "
                 "to this party",
                 "shared",
-                parties_dir / f"{party_id}.yaml",
-                subject=f"parties/{party_id}.yaml",
-                hint="declare the transfer that sends it data, or delete the file",
+                subject=f"parties/{party_id}",
+                hint="declare the transfer that sends it data, or delete the party",
             )
-            for party_id in sorted(set(self.ws.parties) - used)
+            for party_id in self.ws.unused_parties()
         ]
 
     def _manual_reviews(self, row: Row) -> list[Diagnostic]:
@@ -362,7 +343,6 @@ class _Derivation:
                 "manual-exemption",
                 f"{row.full_id}: {right.value} handled outside the code ({value.note})",
                 row.unit,
-                self._path(row),
                 subject=f"{row.full_id}#{right.value}",
                 hint="confirm the process still exists",
             )
@@ -644,14 +624,7 @@ class _Derivation:
     def _transfer(self, row: Row) -> Finding | None:
         ref = row.full_id
         parties = self.ws.parties
-        sent_to = sorted(
-            {
-                t.party
-                for tp in self.ws.all_touchpoints.values()
-                for t in tp.transfers
-                if ref in t.data
-            }
-        )
+        sent_to = self.ws.parties_transferring(ref)
         declared = row.rights.get(Right.TRANSFER) if row.rights is not None else None
         if not sent_to and not isinstance(declared, Missing):
             return None
@@ -868,18 +841,13 @@ class _Derivation:
         return Diagnostic(
             severity,
             code,
-            f"{activity.path.name}: {message}",
+            f"{activity.label}: {message}",
             "shared",
-            activity.path,
-            subject=f"activities/{activity.slug}",
+            subject=activity.label,
             hint=hint,
         )
 
     # -- helpers ------------------------------------------------------------
-
-    def _path(self, row: Row) -> Path:
-        unit = next(u for u in self.ws.units if u.id == row.unit)
-        return unit.folder / "data" / f"{row.id}.yaml"
 
     def _diagnostic(self, row: Row, finding: Finding) -> Diagnostic:
         origin = finding.origin or "derived"
@@ -894,7 +862,6 @@ class _Derivation:
             finding.code(),
             message,
             row.unit,
-            self._path(row),
             subject=f"{finding.ref}#{finding.right.value}",
             note=finding.note,
             origin=origin,
@@ -943,67 +910,30 @@ def _is_agent(note: str | None) -> bool:
 
 
 def set_right(
-    path: Path,
+    unit_id: str,
+    item_id: str,
     right: Right,
     value: Exemption | Missing,
-) -> Path:
-    """Write one right into the ``rights:`` block of a data file.
+) -> None:
+    """Write one right into the ``rights`` block of a data item.
 
-    The file is created when absent (a rights-only override is valid), and
-    when it exists every other key is kept as written: only the ``rights``
-    block is re-emitted, so a human's ``reason`` or ``contents`` survive an
-    agent's flag.
+    The row is created when absent (a rights-only override is valid), and
+    when it exists every other column is kept as written: only ``rights``
+    changes, so a human's ``reason`` or ``contents`` survive an agent's flag.
     """
-    from model_wtf.compliance.yaml_io import load_yaml
+    from model_wtf.compliance.data import load_data_items, set_rights
 
-    text = path.read_text(encoding="utf-8") if path.exists() else ""
-    raw = load_yaml(path) if text.strip() else {}
-    if not isinstance(raw, dict):
-        msg = f"{path.name}: expected a mapping"
-        raise ValueError(msg)
-    rights = dict(raw.get("rights") or {})
+    current = load_data_items(unit_id).get(item_id, {})
+    rights = dict(current.get("rights") or {})
     rights[right.value] = value
-    # Validate the merged block before touching the disk.
+    # Validate the merged block before touching the database.
     RightsSpec.model_validate(rights)
-    block = ["rights:"]
+    stored: dict[str, object] = {}
     for name, entry in rights.items():
-        block.append(f"  {name}: {_right_text(entry)}")
-    body = _strip_rights_block(text).rstrip("\n")
-    out = (body + "\n" if body else "") + "\n".join(block) + "\n"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(out, encoding="utf-8")
-    return path
-
-
-def _right_text(entry: object) -> str:
-    """Flow form of one right entry: a marker tag or ``{exempt: ..., note: ...}``."""
-    from model_wtf.compliance.yaml_io import marker_text
-
-    if isinstance(entry, Marker):
-        return marker_text(entry)
-    ex = entry if isinstance(entry, Exemption) else Exemption.model_validate(entry)
-    text = f"{{exempt: {ex.exempt.value}"
-    if ex.note:
-        text += f", note: {_yaml_scalar(ex.note)}"
-    return text + "}"
-
-
-def _strip_rights_block(text: str) -> str:
-    """Remove the top-level ``rights:`` mapping (and its indented lines)."""
-    out: list[str] = []
-    skipping = False
-    for line in text.splitlines():
-        if line.startswith("rights:"):
-            skipping = True
-            continue
-        if skipping and (line.startswith((" ", "\t")) or not line.strip()):
-            continue
-        skipping = False
-        out.append(line)
-    return "\n".join(out)
-
-
-def _yaml_scalar(value: str) -> str:
-    import yaml
-
-    return yaml.safe_dump(value, width=10**6).strip().removesuffix("\n...")
+        if isinstance(entry, Marker):
+            stored[name] = {entry.tag.lstrip("!"): entry.note}
+        elif isinstance(entry, Exemption):
+            stored[name] = entry.model_dump(mode="json", exclude_none=True)
+        else:
+            stored[name] = entry
+    set_rights(unit_id, item_id, stored)

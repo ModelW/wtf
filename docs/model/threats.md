@@ -38,7 +38,7 @@ count yet: their flows are unknown until they are reviewed.
 ## Stamps
 
 An open cell is closed by a **stamp** in the element's own YAML
-(touchpoint manifest, `stores/<slug>.yaml`, `parties/<id>.yaml`):
+(the `threat_stamps` table, keyed by the touchpoint, store or party):
 
 ```yaml
 threats:
@@ -77,7 +77,7 @@ on the most sensitive item reached (`public` 0 … `special` 4); escalation
 counts 4, denial is capped at 2. Likelihood is the most feared *actor* the
 touchpoint's scope lets in — `anonymous`, `subject`, `staff`, `system`,
 each with a `malice` and a `reach` in `knowledge/threats/_actors.yaml`,
-overridable in `compliance/actors.yaml` — minus the actors already
+overridable per project in the `actors` table — minus the actors already
 **entitled** to that data through another declared touchpoint (staff
 counting pictures they see in the back-office is not a finding). Buckets:
 `critical` / `high` / `medium` / `low` / `info`. The reviewer may only
@@ -85,7 +85,7 @@ narrow (`--degree existence`, `--effect denial`, `--actor subject`) with a
 reason; `check` tags and sorts findings by risk.
 
 Every finding gets a stable id, `F-0042`, allocated in
-`compliance/findings.lock.yaml` on first sighting and never reused (a fixed
+the `findings` table on first sighting and never reused (a fixed
 finding is closed with a date, not deleted, so a ticket citing it still
 resolves). `threats findings` lists them most severe first — several
 threats with the same evidence on one element fold into one row — and

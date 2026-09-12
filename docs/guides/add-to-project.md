@@ -14,13 +14,16 @@ uv run model-wtf compliance init       # prompts for the product and the control
 
 `init` writes:
 
-- `compliance/app.yaml` (name, `description: !todo`, controller, processor),
-  `compliance/parties/<controller>.yaml` and `<processor>.yaml` with
-  `!todo` contact details, a README;
+- `compliance.db` at the repository root, with the app (name,
+  `description: !todo`, controller, processor) and one party per
+  organisation with `!todo` contact details;
 - a `compliance:` block on every image of `snow.yml` (the discovery engine
-  guessed from the code) and the per-unit `<unit>/compliance/` folders;
+  guessed from the code);
 - `.github/workflows/compliance.yml`, the gate on every pull request;
-- a managed block in `.github/CODEOWNERS` when `origin` is on GitHub.
+- the SQLite transient files (`*.db-wal`, `*.db-shm`, `*.db-lock`) in
+  `.gitignore`.
+
+It creates no folder: every declaration is a row of the database.
 
 It never overwrites anything. Re-run it later to add what is missing.
 
@@ -51,7 +54,7 @@ One agent per model, in parallel (`--workers`, default 16), rounds until
 nothing is pending. Each agent reads the model and its write sites and
 either confirms the rule's classification or writes an override with a
 reason; JSON-like columns get their `contents:` declared. Read what it
-wrote under `<unit>/compliance/data/` — the notes cite code, check a few.
+wrote (`data list`, `data why`) — the notes cite code, check a few.
 Correct with `data override` where it is wrong; the lock remembers the
 review commit so the same item is not re-reviewed until its field changes.
 
@@ -98,8 +101,8 @@ their `F-` id.
 
 ## 7. Commit and open the PR
 
-Commit everything the tool wrote — `snow.yml`, `.github/`, `compliance/`,
-`<unit>/compliance/` — and open the pull request. The gate on that first PR
+Commit everything the tool wrote — `snow.yml`, `.github/`, `.gitignore`,
+`compliance.db` — and open the pull request. The gate on that first PR
 will report everything as *introduced* (the base has no compliance state
 yet): that is the bootstrap, merge with that in mind. From the next PR on,
 only what changes counts.

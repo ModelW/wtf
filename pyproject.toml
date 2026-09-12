@@ -32,6 +32,7 @@ dependencies = [
     "pydantic>=2.13.5",
     "ruamel-yaml>=0.19.1",
     "mcp>=1.2",
+    "sqlalchemy>=2.0.52",
 ]
 
 [project.urls]

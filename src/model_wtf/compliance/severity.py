@@ -14,7 +14,7 @@ A ``!missing`` stamp says a control is absent. How much that matters is
   (``anonymous`` > ``subject`` > ``staff`` > ``system``), each with a
   ``malice`` (propensity to attack) and a ``reach`` (how easy it is to be
   that actor), declared in ``knowledge/threats/_actors.yaml`` and
-  overridable per project in ``compliance/actors.yaml``.
+  overridable per project in the ``actors`` table.
 
 An actor already **entitled** to the data — whose scope performs that same
 kind of operation on those items through declared touchpoints — is not a
@@ -34,21 +34,21 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
 
+from model_wtf.compliance.db import get_db
 from model_wtf.compliance.ops import Op
+from model_wtf.compliance.tables import ActorRow
 from model_wtf.compliance.threats_gen import builtin_threats_dir
 from model_wtf.compliance.touchpoints import Kind, Scope
 from model_wtf.compliance.yaml_io import load_yaml
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from model_wtf.compliance.knowledge import Knowledge
     from model_wtf.compliance.threats import Element
     from model_wtf.compliance.workspace import Workspace
 
 ACTORS_FILE = "_actors.yaml"
-PROJECT_ACTORS_FILE = "actors.yaml"
 
 
 class Effect(StrEnum):
@@ -111,7 +111,7 @@ def bucket(score: float) -> Severity:
 
 
 class Actor(BaseModel):
-    """One ``_actors.yaml`` / ``compliance/actors.yaml`` entry."""
+    """One ``_actors.yaml`` entry, or a project's ``actors`` row."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -126,17 +126,48 @@ class Actor(BaseModel):
         return self.malice * self.reach
 
 
-def load_actors(shared: Path | None = None) -> dict[str, Actor]:
-    """Built-in actors, with the project's ``compliance/actors.yaml`` on top."""
+def load_actors(*, custom: bool = True) -> dict[str, Actor]:
+    """Built-in actors, with the project's ``actors`` rows on top."""
     raw = load_yaml(builtin_threats_dir() / ACTORS_FILE) or {}
     actors = {name: Actor.model_validate(v) for name, v in raw.items()}
-    if shared is not None and (shared / PROJECT_ACTORS_FILE).is_file():
-        custom = load_yaml(shared / PROJECT_ACTORS_FILE) or {}
-        for name, value in custom.items():
-            base = actors.get(name)
-            merged = {**(base.model_dump() if base else {}), **(value or {})}
-            actors[name] = Actor.model_validate(merged)
+    if not custom:
+        return actors
+    with get_db() as db:
+        rows = db.scalars(select(ActorRow).order_by(ActorRow.name)).all()
+    for row in rows:
+        base = actors.get(row.name)
+        given = {
+            k: getattr(row, k)
+            for k in ("title", "malice", "reach", "note")
+            if getattr(row, k) is not None
+        }
+        merged = {**(base.model_dump() if base else {}), **given}
+        actors[row.name] = Actor.model_validate(merged)
     return actors
+
+
+def set_actor(
+    name: str,
+    *,
+    malice: float | None = None,
+    reach: float | None = None,
+    title: str | None = None,
+    note: str | None = None,
+) -> None:
+    """Dial one actor for this project (the given fields override the built-in)."""
+    with get_db() as db:
+        row = db.get(ActorRow, name)
+        if row is None:
+            row = ActorRow(name=name)
+            db.add(row)
+        if malice is not None:
+            row.malice = malice
+        if reach is not None:
+            row.reach = reach
+        if title is not None:
+            row.title = title
+        if note is not None:
+            row.note = note
 
 
 # Scope → the actors who can call the touchpoint as the scope implies. A
@@ -366,4 +397,5 @@ __all__ = [
     "load_actors",
     "reachable_actors",
     "resolve_effect",
+    "set_actor",
 ]

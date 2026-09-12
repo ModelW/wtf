@@ -8,7 +8,7 @@ api:checkout: 1 touchpoint(s) pending
 ```
 
 and your branch has a new commit from the workflow, touching a
-`compliance/` file: a `challenge:` block with a commit, a timestamp and one
+declaration: a `challenge` block with a commit, a timestamp and one
 line of **grounds** — the hunk and the assertion it undermines.
 
 ## What a challenge is
@@ -25,7 +25,7 @@ Three kinds of ref:
 
 | Ref | Re-opens |
 |---|---|
-| `api:shop.Customer.email` | a data item's classification (`data.lock.yaml`) |
+| `api:shop.Customer.email` | a data item's classification (its review) |
 | `api:checkout` | a touchpoint's declaration (its manifest) |
 | `api:checkout#AC01`, `api:checkout#DS06@party:mapbox` | one threat stamp |
 

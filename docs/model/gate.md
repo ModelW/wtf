@@ -5,7 +5,7 @@ How a pull request is judged: `check` on both sides, a diff by finding identity,
 Nobody expects a repository to be clean on day one; the gate expects it to
 **not get worse**. `model-wtf compliance ghate` runs the whole `check`
 twice — on the base ref, checked out into a temporary `git worktree` with
-its own `compliance/` state, and on the head (the working tree by default,
+its own `compliance.db`, and on the head (the working tree by default,
 so uncommitted work is gated too) — and fails only on findings the change
 **introduces**.
 
@@ -89,7 +89,7 @@ setting) re-opens that one stamp — `element#SID` — and the cell is stale
 listed when a settings file is in the diff, since their stamps cite
 settings.
 
-A challenge is recorded in `data.lock.yaml` (`challenge: {commit,
+A challenge is recorded on the item's review (`challenge: {commit,
 grounds}`), in the touchpoint manifest, or on the stamp itself, and makes
 the item `pending:challenged` (the cell `stale`), which the gate counts as
 introduced. The record is

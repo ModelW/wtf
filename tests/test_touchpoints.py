@@ -11,15 +11,22 @@ from typing import TYPE_CHECKING
 import pytest
 from click.testing import CliRunner
 
-from conftest import FILES_ALL_OK
+from conftest import seed_activity, seed_touchpoint
 from model_wtf.cli import cli
 from model_wtf.compliance.check import run_check
+from model_wtf.compliance.db import get_db
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.knowledge import load_knowledge
 from model_wtf.compliance.mcp_server import Tools
 from model_wtf.compliance.report import Section, Unit
-from model_wtf.compliance.touchpoints import slugify
+from model_wtf.compliance.tables import (
+    ActivityRow,
+    DataItemRow,
+    PartyRow,
+)
+from model_wtf.compliance.touchpoints import declared_touchpoints
 from model_wtf.compliance.workspace import load_workspace
+from model_wtf.compliance.yaml_io import TODO, Missing
 from model_wtf.introspect.runner import run_node_script
 
 if TYPE_CHECKING:
@@ -46,10 +53,9 @@ HAS_NODE = (
 @pytest.fixture
 def repo(make_repo: MakeRepo, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Django fixture as ``api`` and, when node is available, SvelteKit as ``front``."""
-    root = make_repo(snow=SNOW_BOTH, files=FILES_ALL_OK)
+    root = make_repo(snow=SNOW_BOTH, seed=True)
     shutil.copytree(FIXTURES / "djproj", root / "api", dirs_exist_ok=True)
     (root / "front").mkdir(exist_ok=True)
-    (root / "front" / "compliance").mkdir(exist_ok=True)
     if HAS_NODE:
         src = FIXTURES / "skproj"
         for name in ("package.json", "svelte.config.js", "tsconfig.json", "src"):
@@ -64,20 +70,20 @@ def repo(make_repo: MakeRepo, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
-def folder_of_tp(root: Path) -> Path:
-    """The ``api`` unit's touchpoints folder."""
-    return root / "api" / "compliance" / "touchpoints"
-
-
 def _units(root: Path) -> list[Unit]:
     return [
-        Unit("api", root / "api" / "compliance", "django", root / "api"),
-        Unit("front", root / "front" / "compliance", "sveltekit", root / "front"),
+        Unit("api", root / "api", "django"),
+        Unit("front", root / "front", "sveltekit"),
     ]
 
 
 def _ws(root: Path):
-    return load_workspace(root, _units(root), load_knowledge(None))
+    return load_workspace(_units(root), load_knowledge(custom=False))
+
+
+def _manifest(unit: str, touchpoint_id: str) -> dict[str, object]:
+    """The stored declaration in its mapping form."""
+    return declared_touchpoints(unit)[touchpoint_id]
 
 
 def test_django_touchpoints_introspected(repo: Path) -> None:
@@ -189,25 +195,32 @@ def test_run_node_script_requires_node_modules(tmp_path: Path) -> None:
 
 
 def test_manifests_and_reference_checks(repo: Path) -> None:
-    folder = repo / "api" / "compliance" / "touchpoints"
-    folder.mkdir(parents=True)
-    (folder / "checkout.yaml").write_text(
-        "data:\n  - shop.Customer.email: write\n  - api:shop.Order.total\n"
-        "  - shop.Customer.nope\n  - other:shop.Customer.email\n"
-        "  - shop.Customer.*: {delete: {mode: anonymise}}\n"
-        "  - shop.Customer.iban: [create, {rectify: {by: staff}}]\n"
-        "  - shop.Customer.zzz*: read\n"
+    seed_touchpoint(
+        "api",
+        "checkout",
+        data=[
+            {"shop.Customer.email": "write"},
+            "api:shop.Order.total",
+            "shop.Customer.nope",
+            "other:shop.Customer.email",
+            {"shop.Customer.*": {"delete": {"mode": "anonymise"}}},
+            {"shop.Customer.iban": ["create", {"rectify": {"by": "staff"}}]},
+            {"shop.Customer.zzz*": "read"},
+        ],
     )
-    (folder / "whealth_recap.yaml").write_text("ignore: true\n")
-    (folder / "getCustomer.yaml").write_text("data: []\n")
-    (folder / "ghost.yaml").write_text("data: []\n")
-    (folder / "contact.yaml").write_text("data: []\ncolour: red\n")
-    (folder / "task__shop.send_receipt.yaml").write_text(
-        "data:\n  - shop.Customer.email: {frobnicate: {}}\n"
+    seed_touchpoint("api", "whealth_recap", ignore=True)
+    seed_touchpoint("api", "getCustomer", data=[])
+    seed_touchpoint("api", "ghost", data=[])
+    seed_touchpoint(
+        "api",
+        "task:shop.send_receipt",
+        data=[{"shop.Customer.email": {"frobnicate": {}}}],
     )
-    (folder / "admin__shop.Customer.yaml").write_text(
-        "data:\n  - shop.Customer.email: {delete: {mode: vanish}}\n"
-        "exporting: [{party: acme, data: [shop.Customer.email]}]\n"
+    seed_touchpoint(
+        "api",
+        "admin:shop.Customer",
+        data=[{"shop.Customer.email": {"delete": {"mode": "vanish"}}}],
+        transfers=[{"party": "acme", "data": ["shop.Customer.email"]}],
     )
 
     ws = _ws(repo)
@@ -248,48 +261,50 @@ def test_manifests_and_reference_checks(repo: Path) -> None:
     schema = by_code["schema-error"]
     assert any("unknown op 'frobnicate'" in m for m in schema)
     assert any("delete: mode" in m for m in schema)
-    assert any("colour" in m for m in schema)
-    # ``exporting`` still loads (folded into transfers) but says so.
     admin = tps.get("admin:shop.Customer")
     assert admin is not None
-    assert admin.pending  # its manifest failed on the delete mode
-    (folder / "admin__shop.Customer.yaml").write_text(
-        "data: [shop.Customer.email]\n"
-        "exporting: [{party: acme, data: [shop.Customer.email]}]\n"
+    assert admin.pending  # its declaration failed on the delete mode
+    seed_touchpoint(
+        "api",
+        "admin:shop.Customer",
+        data=["shop.Customer.email"],
+        transfers=[{"party": "acme", "data": ["shop.Customer.email"]}],
     )
     ws = _ws(repo)
     admin = ws.touchpoints["api"].get("admin:shop.Customer")
     assert admin is not None
     assert [t.party for t in admin.transfers] == ["acme"]
-    assert "exporting-deprecated" in {d.code for d in ws.touchpoints["api"].diagnostics}
-    assert slugify("/kitchen/[restaurant_uuid]") == "kitchen__[restaurant_uuid]"
-    assert slugify("/") == "__root__"
-    assert slugify("admin:orders.Order") == "admin__orders.Order"
 
 
 def test_activities_derivation_and_check(repo: Path) -> None:
-    folder = repo / "api" / "compliance" / "touchpoints"
-    folder.mkdir(parents=True)
-    (folder / "checkout.yaml").write_text(
-        "data:\n  - shop.Customer.email\n  - shop.Customer.iban\n  - shop.Order.total\n"
+    seed_touchpoint(
+        "api",
+        "checkout",
+        data=["shop.Customer.email", "shop.Customer.iban", "shop.Order.total"],
     )
-    (folder / "task__shop.send_receipt.yaml").write_text(
-        "data:\n  - shop.Customer.email\n"
+    seed_touchpoint("api", "task:shop.send_receipt", data=["shop.Customer.email"])
+    seed_touchpoint(
+        "api",
+        "admin:shop.Customer",
+        data=["shop.Customer.email", "shop.Customer.phone"],
     )
-    (folder / "admin__shop.Customer.yaml").write_text(
-        "data:\n  - shop.Customer.email\n  - shop.Customer.phone\n"
+    seed_activity(
+        "ordering",
+        name="Ordering",
+        purpose="Take and deliver orders",
+        legal_basis="contract",
+        data_subjects=["customers"],
+        touchpoints=["api:checkout", "api:task:shop.send_receipt", "api:ghost"],
+        recipients=["stripe"],
+        retention=Missing("orders are never purged"),
     )
-    acts = repo / "compliance" / "activities"
-    acts.mkdir()
-    (acts / "ordering.yaml").write_text(
-        "name: Ordering\npurpose: Take and deliver orders\nlegal_basis: contract\n"
-        "data_subjects: [customers]\n"
-        "touchpoints: [api:checkout, api:task:shop.send_receipt, api:ghost]\n"
-        'recipients: [stripe]\nretention: !missing "orders are never purged"\n'
-    )
-    (acts / "support.yaml").write_text(
-        "name: Support\npurpose: !todo\nlegal_basis: contract\n"
-        "data_subjects: [customers]\ntouchpoints: [api:admin:shop.Customer]\n"
+    seed_activity(
+        "support",
+        name="Support",
+        purpose=TODO,
+        legal_basis="contract",
+        data_subjects=["customers"],
+        touchpoints=["api:admin:shop.Customer"],
     )
 
     ws = _ws(repo)
@@ -315,7 +330,7 @@ def test_activities_derivation_and_check(repo: Path) -> None:
     assert codes == ["activity-unknown-touchpoint", "missing", "party-unknown", "todo"]
 
     # ``check`` is a to-do list: one of each kind of work lands in its section.
-    report = run_check(repo, strict=False)
+    report = run_check(strict=False)
     sections = {s: [d.code for d in ds] for s, ds in report.by_section().items()}
     assert sorted(sections[Section.ERRORS]) == [
         "activity-unknown-touchpoint",
@@ -343,27 +358,33 @@ def test_activities_derivation_and_check(repo: Path) -> None:
     ]
     assert report.exit_code is ExitCode.DECLARATION_ERROR
     missing = next(d for d in report.diagnostics if d.code == "missing")
-    assert missing.subject == "ordering.yaml#retention"
+    assert missing.subject == "activities/ordering#retention"
     assert missing.note == "orders are never purged"
     todo = next(d for d in report.diagnostics if d.code == "todo")
-    assert todo.subject == "support.yaml#purpose"
+    assert todo.subject == "activities/support#purpose"
 
     # Without the errors: exit 1 because of the !missing, whatever the flags.
-    (acts / "ordering.yaml").write_text(
-        (acts / "ordering.yaml")
-        .read_text()
-        .replace(", api:ghost", "")
-        .replace("recipients: [stripe]\n", "")
+    seed_activity(
+        "ordering",
+        name="Ordering",
+        purpose="Take and deliver orders",
+        legal_basis="contract",
+        data_subjects=["customers"],
+        touchpoints=["api:checkout", "api:task:shop.send_receipt"],
+        retention=Missing("orders are never purged"),
     )
-    (acts / "support.yaml").write_text(
-        (acts / "support.yaml").read_text().replace("purpose: !todo", "purpose: Help")
+    seed_activity(
+        "support",
+        name="Support",
+        purpose="Help",
+        legal_basis="contract",
+        data_subjects=["customers"],
+        touchpoints=["api:admin:shop.Customer"],
     )
-    for unit_folder in (folder, repo / "front" / "compliance" / "touchpoints"):
-        unit_folder.mkdir(exist_ok=True)
-    report = run_check(repo, strict=False)
+    report = run_check(strict=False)
     assert not report.by_section()[Section.ERRORS]
     assert report.exit_code is ExitCode.FINDINGS
-    assert run_check(repo, strict=False, allow_todo=True).exit_code is ExitCode.FINDINGS
+    assert run_check(strict=False, allow_todo=True).exit_code is ExitCode.FINDINGS
 
 
 def test_cli_touchpoints_activities_why(repo: Path) -> None:
@@ -415,13 +436,15 @@ def test_cli_touchpoints_activities_why(repo: Path) -> None:
         ],
     )
     assert set_ok.exit_code == 0, set_ok.output
-    manifest = repo / "api" / "compliance" / "touchpoints" / "checkout.yaml"
-    assert manifest.read_text() == (
-        "data:\n  - api:shop.Customer.email: [create, read]\n"
-        "  - api:shop.Customer.iban\n"
-        "  - api:shop.Customer.phone:\n      delete: {mode: anonymise}\n"
-        "note: api.py:24\n"
-    )
+    assert _manifest("api", "checkout") == {
+        "data": [
+            {"api:shop.Customer.email": ["create", "read"]},
+            "api:shop.Customer.iban",
+            {"api:shop.Customer.phone": {"delete": {"mode": "anonymise"}}},
+        ],
+        "ignore": False,
+        "note": "api.py:24",
+    }
     bad_op = runner.invoke(
         cli, [*tp, "set-data", "api:checkout", "shop.Customer.email=frob", *root]
     )
@@ -431,10 +454,10 @@ def test_cli_touchpoints_activities_why(repo: Path) -> None:
         cli, [*tp, "set-data", "api:checkout", "shop.Order.total", *root, "--add"]
     )
     assert added.exit_code == 0, added.output
-    assert "api:shop.Order.total" in manifest.read_text()
+    assert "api:shop.Order.total" in _manifest("api", "checkout")["data"]
     nothing = runner.invoke(cli, [*tp, "set-data", "api:getCustomer", *root])
     assert nothing.exit_code == 0
-    assert (manifest.parent / "getCustomer.yaml").read_text() == "data: []\n"
+    assert _manifest("api", "getCustomer") == {"data": [], "ignore": False}
 
     act = ["compliance", "activities"]
     empty = runner.invoke(cli, [*act, "list", *root])
@@ -459,16 +482,24 @@ def test_cli_touchpoints_activities_why(repo: Path) -> None:
         ],
     )
     assert created.exit_code == 0, created.output
-    path = repo / "compliance" / "activities" / "ordering.yaml"
-    # Retention is not scaffolded: the policy lives in `retention_purge` ops.
-    assert "retention" not in path.read_text()
+    with get_db() as db:
+        stored = db.get(ActivityRow, "ordering")
+        assert stored is not None
+        # Retention is not scaffolded: the policy lives in `retention_purge` ops.
+        assert stored.retention is None
     again = runner.invoke(cli, [*act, "create", "ordering", *root])
     assert again.exit_code == 1
     add = runner.invoke(
         cli, [*act, "add", "ordering", "api:task:shop.send_receipt", *root]
     )
     assert add.exit_code == 0, add.output
-    assert "api:task:shop.send_receipt" in path.read_text()
+    with get_db() as db:
+        stored = db.get(ActivityRow, "ordering")
+        assert stored is not None
+        assert [f"{t.unit}:{t.touchpoint_id}" for t in stored.touchpoints] == [
+            "api:checkout",
+            "api:task:shop.send_receipt",
+        ]
     add_bad = runner.invoke(cli, [*act, "add", "ordering", "api:nope", *root])
     assert add_bad.exit_code == 2
 
@@ -528,7 +559,7 @@ def test_cli_touchpoints_activities_why(repo: Path) -> None:
 
 
 def test_mcp_read_tools(repo: Path) -> None:
-    tools = Tools(repo)
+    tools = Tools()
     pending = tools.touchpoint_pending("api")
     assert "api:checkout | route | ninja" in pending
     shown = tools.touchpoint_show("api:checkout")
@@ -551,7 +582,7 @@ def test_mcp_read_tools(repo: Path) -> None:
 def test_mcp_touchpoint_write_tools(repo: Path) -> None:
     from model_wtf.compliance.mcp_server import DataRef
 
-    tools = Tools(repo)
+    tools = Tools()
 
     found = tools.data_search("customer.email", "api")
     assert "api:shop.Customer.email | pii=yes" in found
@@ -577,8 +608,11 @@ def test_mcp_touchpoint_write_tools(repo: Path) -> None:
         tools.data_add_manual(
             "api", "checkout.card_number", "d", True, "confidential", "financial", "r"
         )
-    manual = repo / "api" / "compliance" / "data" / "checkout.card_number.yaml"
-    assert "description:" in manual.read_text()
+    with get_db() as db:
+        manual = db.get(DataItemRow, ("api", "checkout.card_number"))
+        assert manual is not None
+        assert (manual.kind, manual.transient) == ("manual", True)
+        assert manual.description == "Card number forwarded to the PSP, never stored"
     assert "api:checkout.card_number" in tools.data_search("card_number")
 
     bad = tools.touchpoint_set_data(
@@ -609,13 +643,19 @@ def test_mcp_touchpoint_write_tools(repo: Path) -> None:
         reason="api.py:22-30",
     )
     assert "3 data item(s) declared" in ok
-    manifest = repo / "api" / "compliance" / "touchpoints" / "checkout.yaml"
-    assert manifest.read_text() == (
-        "data:\n  - api:shop.Customer.email: create\n  - api:checkout.card_number\n"
-        "  - api:shop.Customer.*:\n      retention_purge:\n"
-        "        after: {years: 1}\n        since: creation\n"
-        "note: api.py:22-30\n"
-    )
+    assert _manifest("api", "checkout") == {
+        "data": [
+            {"api:shop.Customer.email": "create"},
+            "api:checkout.card_number",
+            {
+                "api:shop.Customer.*": {
+                    "retention_purge": {"after": {"years": 1}, "since": "creation"}
+                }
+            },
+        ],
+        "ignore": False,
+        "note": "api.py:22-30",
+    }
     bad_ops = tools.touchpoint_set_data(
         "api:checkout",
         [
@@ -633,7 +673,9 @@ def test_mcp_touchpoint_write_tools(repo: Path) -> None:
     )
     assert "Warnings:" in aliased
     assert "ambiguous" in aliased
-    assert "[create, update]" in manifest.read_text()
+    assert _manifest("api", "checkout")["data"] == [
+        {"api:shop.Customer.email": ["create", "update"]}
+    ]
     tools.touchpoint_set_data(
         "api:checkout",
         [
@@ -673,10 +715,12 @@ def test_mcp_touchpoint_write_tools(repo: Path) -> None:
     assert "1 touchpoint(s) added" in added
     with pytest.raises(ValueError, match="no activity"):
         tools.activity_add_touchpoints("nope", ["api:checkout"])
-    text = (repo / "compliance" / "activities" / "ordering.yaml").read_text()
-    assert "legal_basis: contract" in text
-    assert "retention" not in text
-    assert "api:task:shop.send_receipt" in text
+    with get_db() as db:
+        stored = db.get(ActivityRow, "ordering")
+        assert stored is not None
+        assert stored.legal_basis == "contract"
+        assert stored.retention is None
+        assert "task:shop.send_receipt" in {t.touchpoint_id for t in stored.touchpoints}
     assert "activities: NONE" not in tools.activities_graph()
     assert "ordering | Take orders | 2 touchpoints" in tools.activities_list()
     assert "held by 1 activity" in tools.data_why("api:shop.Customer.email")
@@ -690,20 +734,18 @@ def test_touchpoint_targets_and_orphans(repo: Path) -> None:
     )
 
     units = _units(repo)
-    knowledge = load_knowledge(None)
-    pending, roots = pending_touchpoints(repo, units, knowledge, python=None)
+    knowledge = load_knowledge(custom=False)
+    pending, roots = pending_touchpoints(units, knowledge, python=None)
     assert "api:checkout" in pending
     assert "api:whealth_recap" not in pending
     assert roots
     assert TOUCHPOINTS_TARGET.dispatcher == "tp_dispatcher"
     assert TOUCHPOINTS_TARGET.closing_tool == "touchpoint_set_data"
-    assert orphan_touchpoints(repo, units, knowledge, python=None) == []
+    assert orphan_touchpoints(units, knowledge, python=None) == []
 
-    folder = repo / "api" / "compliance" / "touchpoints"
-    folder.mkdir(parents=True)
-    (folder / "checkout.yaml").write_text("data: [shop.Customer.email]\n")
-    (folder / "getCustomer.yaml").write_text("data: []\n")
-    assert orphan_touchpoints(repo, units, knowledge, python=None) == ["api:checkout"]
+    seed_touchpoint("api", "checkout", data=["shop.Customer.email"])
+    seed_touchpoint("api", "getCustomer", data=[])
+    assert orphan_touchpoints(units, knowledge, python=None) == ["api:checkout"]
 
 
 def test_touchpoints_auto_review_cli_dry_paths(
@@ -745,7 +787,7 @@ def test_touchpoints_auto_review_cli_dry_paths(
 def test_exports_and_parties(repo: Path) -> None:
     from model_wtf.compliance.mcp_server import DataRef, ExportDecision
 
-    tools = Tools(repo)
+    tools = Tools()
     assert "acme | " in tools.parties_list()
 
     with pytest.raises(ValueError, match="kebab"):
@@ -754,9 +796,10 @@ def test_exports_and_parties(repo: Path) -> None:
         tools.party_add("mapbox", "Mapbox", country="usa")
     made = tools.party_add("mapbox", "Mapbox, Inc.", website="https://mapbox.com")
     assert "created party mapbox" in made
-    party = repo / "compliance" / "parties" / "mapbox.yaml"
-    assert "address: !todo" in party.read_text()
-    assert 'website: "https://mapbox.com"' in party.read_text()
+    with get_db() as db:
+        party = db.get(PartyRow, "mapbox")
+        assert party is not None
+        assert (party.address, party.website) == (TODO, "https://mapbox.com")
     assert "already exists" in tools.party_add("mapbox", "Mapbox")
 
     unknown_party = tools.touchpoint_set_data(
@@ -777,13 +820,18 @@ def test_exports_and_parties(repo: Path) -> None:
         ],
     )
     assert "transfers to 1 party" in ok
-    manifest = repo / "api" / "compliance" / "touchpoints" / "checkout.yaml"
-    assert manifest.read_text() == (
-        "data:\n  - api:shop.Customer.email\n"
-        "transfers:\n  - party: mapbox\n    data: [api:shop.Customer.phone]\n"
-        "    purpose: geocoding\n"
-        "note: api.py:22\n"
-    )
+    assert _manifest("api", "checkout") == {
+        "data": ["api:shop.Customer.email"],
+        "transfers": [
+            {
+                "party": "mapbox",
+                "data": ["api:shop.Customer.phone"],
+                "purpose": "geocoding",
+            }
+        ],
+        "ignore": False,
+        "note": "api.py:22",
+    }
     shown = tools.touchpoint_show("api:checkout")
     assert "transfers to mapbox (geocoding): api:shop.Customer.phone" in shown
 
@@ -794,10 +842,20 @@ def test_exports_and_parties(repo: Path) -> None:
     # Exported items count as handled by the activity even if not in `data`.
     assert "api:shop.Customer.phone" in ordering.derived.data
 
-    # A manifest naming an undeclared party is a declaration error.
-    manifest.write_text(
-        "data: []\nexporting:\n  - party: ghost\n    data: [shop.Customer.email]\n"
+    # A declaration naming an undeclared party is a declaration error. The
+    # party FK is enforced, so the check runs on the row as loaded.
+    with get_db() as db:
+        db.add(PartyRow(id="ghost", name="G", country="FR", address="a", email="e"))
+    seed_touchpoint(
+        "api",
+        "checkout",
+        data=[],
+        transfers=[{"party": "ghost", "data": ["shop.Customer.email"]}],
     )
+    with get_db() as db:
+        ghost = db.get(PartyRow, "ghost")
+        assert ghost is not None
+        ghost.country = "Nowhere"  # invalid: the party fails validation
     ws = _ws(repo)
     codes = [d.code for d in ws.touchpoints["api"].diagnostics]
     assert "party-unknown" in codes
@@ -818,11 +876,9 @@ def test_exports_and_parties(repo: Path) -> None:
         ],
     )
     assert good.exit_code == 0, good.output
-    text = (
-        repo / "api" / "compliance" / "touchpoints" / "getCustomer.yaml"
-    ).read_text()
-    assert "party: mapbox" in text
-    assert "purpose: lookup" in text
+    assert _manifest("api", "getCustomer")["transfers"] == [
+        {"party": "mapbox", "data": ["api:shop.Customer.email"], "purpose": "lookup"}
+    ]
 
 
 def test_auth_wrappers_applied_around_the_view_are_facts() -> None:

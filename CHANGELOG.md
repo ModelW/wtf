@@ -3,6 +3,27 @@
 One section per released version, newest first. The release workflow puts
 the matching section on the GitHub release.
 
+## Unreleased
+
+- **Storage moves from YAML to SQLite.** Every declaration — the app, the
+  parties, data overrides and reviews, touchpoint declarations, stores,
+  activities, threat stamps, the findings register, custom vocabularies
+  and actors — lives in one `compliance.db` at the repository root; the
+  `compliance/` folders are gone and `snow.yml`'s `compliance:` block only
+  names the discovery engine (`dir` is dropped). The database is tuned to
+  diff well (WAL, no auto-vacuum, a checkpoint on close) and `init` adds
+  its transient files to `.gitignore`. Cross-references (hosts, data refs,
+  transfers, recipients, stamps, locks) are normalised tables queried with
+  SQL rather than loaded and joined in Python. No migration from the YAML
+  layout: it is a new system.
+- The `CODEOWNERS` step of `init` (and its `check` diagnostic and flags)
+  is removed.
+- Marker subjects are `<record>#<field>` (`parties/acme#address`,
+  `activities/ordering#retention`, `app#description`) instead of file
+  names.
+- The library takes the repository from a process-wide container set
+  once per command (`--root`); no `root=` / `shared=` arguments.
+
 ## 1.1.0
 
 - Scaleway as a model provider next to OpenRouter: `--model scaleway/<model>`

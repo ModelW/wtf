@@ -8,9 +8,9 @@ import pytest
 
 from conftest import SNOW_FRONT_UNDECLARED, SNOW_TWO_UNITS
 from model_wtf.compliance.discovery import (
+    code_root_of,
     find_repo_root,
     load_units,
-    normalise_folder,
     select_manifest,
 )
 from model_wtf.compliance.report import DeclarationError, Severity
@@ -86,19 +86,20 @@ def test_load_units_from_snow_in_manifest_order(make_repo: MakeRepo) -> None:
 
     assert diagnostics == []
     assert [u.id for u in units] == ["api", "front"]
-    assert [u.folder for u in units] == [
-        (root / "api" / "compliance").resolve(),
-        (root / "front" / "compliance").resolve(),
+    assert [u.code_root for u in units] == [
+        (root / "api").resolve(),
+        (root / "front").resolve(),
     ]
+    assert [u.discover for u in units] == ["none", "sveltekit"]
 
 
 def test_load_units_from_model_wtf_reads_units_key(make_repo: MakeRepo) -> None:
     text = """
 units:
   - id: worker
+    dockerfile: worker/Dockerfile
     compliance:
       discover: none
-      dir: docs/compliance
 """
     root = make_repo(model_wtf=text)
 
@@ -106,8 +107,8 @@ units:
 
     assert diagnostics == []
     assert [u.id for u in units] == ["worker"]
-    # ``context`` omitted defaults to ".", so the folder hangs off the root.
-    assert units[0].folder == (root / "docs" / "compliance").resolve()
+    # ``context`` omitted defaults to "."; the Dockerfile's folder is the code.
+    assert units[0].code_root == (root / "worker").resolve()
 
 
 @pytest.mark.parametrize(
@@ -197,9 +198,9 @@ images:
             id="unknown-engine",
         ),
         pytest.param(
-            "images:\n  - id: api\n    compliance: {discover: none, dirr: x}\n",
-            "images.0.compliance.dirr",
-            id="compliance-unknown-key",
+            "images:\n  - id: api\n    compliance: {discover: none, dir: x}\n",
+            "images.0.compliance.dir",
+            id="compliance-dir-gone",
         ),
         pytest.param(
             "images:\n  - id: api\n    context: 3\n    compliance: {discover: none}\n",
@@ -224,44 +225,26 @@ def test_load_units_malformed_manifest(
 
 
 # ---------------------------------------------------------------------------
-# normalise_folder
+# code_root_of
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("context", "dockerfile", "folder", "expected"),
+    ("context", "dockerfile", "expected"),
     [
-        pytest.param(".", None, None, ("compliance",), id="dot-context"),
-        pytest.param("api", None, None, ("api", "compliance"), id="nested"),
-        pytest.param(
-            ".",
-            "front/Dockerfile",
-            None,
-            ("front", "compliance"),
-            id="next-to-dockerfile",
-        ),
-        pytest.param(
-            ".",
-            "front/Dockerfile",
-            "docs/c",
-            ("docs", "c"),
-            id="dir-wins-over-dockerfile",
-        ),
-        pytest.param(
-            "front/../api", None, None, ("api", "compliance"), id="dotdot-collapsed"
-        ),
-        pytest.param("./front", None, "./c", ("front", "c"), id="dot-prefixes"),
+        pytest.param(".", None, (), id="dot-context"),
+        pytest.param("api", None, ("api",), id="nested"),
+        pytest.param(".", "front/Dockerfile", ("front",), id="next-to-dockerfile"),
+        pytest.param("front/../api", None, ("api",), id="dotdot-collapsed"),
+        pytest.param("./front", None, ("front",), id="dot-prefixes"),
     ],
 )
-def test_normalise_folder(
+def test_code_root_of(
     tmp_path: Path,
     context: str,
     dockerfile: str | None,
-    folder: str | None,
     expected: tuple[str, ...],
 ) -> None:
     root = tmp_path.resolve()
 
-    assert normalise_folder(root, context, dockerfile, folder) == root.joinpath(
-        *expected
-    )
+    assert code_root_of(root, context, dockerfile) == root.joinpath(*expected)

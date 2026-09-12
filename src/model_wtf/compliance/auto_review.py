@@ -13,7 +13,7 @@ pure dispatcher and each reviewer subagent gets a tiny, fully specified job
 (two tool calls in the common case) with a rubric and a hard step limit.
 
 The loop is a watchdog, not a conversation: every round recomputes what is
-pending from disk, so a killed run resumes where it stopped.
+pending from the database, so a killed run resumes where it stopped.
 """
 
 from __future__ import annotations
@@ -41,6 +41,7 @@ from rich.progress import (
 )
 from rich.text import Text
 
+from model_wtf.compliance.container import get_container
 from model_wtf.compliance.data import collect_unit
 from model_wtf.compliance.mcp_server import ACTIVITY_LOG_ENV, MODEL_ENV, model_of
 from model_wtf.compliance.review import Lock
@@ -372,7 +373,6 @@ def pending_models(
 
 
 def pending_touchpoints(
-    root: Path,
     units: list[Unit],
     knowledge: Knowledge,
     *,
@@ -381,24 +381,24 @@ def pending_touchpoints(
 ) -> tuple[list[str], list[Path]]:
     """Pending touchpoint full ids and the import roots to make readable.
 
-    With ``stale``, manifests written in a superseded form (``write``,
-    ``exporting``) count as pending too: a re-review restates the real ops.
+    With ``stale``, declarations written in a superseded form (``write``,
+    a legacy verb) count as pending too: a re-review restates the real ops.
     """
-    ws = load_workspace(root, units, knowledge, python=python)
+    ws = load_workspace(units, knowledge, python=python)
     wanted = {t.full_id for t in ws.pending_touchpoints()}
     if stale:
         wanted.update(
             d.subject
             for unit_tps in ws.touchpoints.values()
             for d in unit_tps.diagnostics
-            if d.code in ("op-ambiguous", "exporting-deprecated") and d.subject
+            if d.code == "op-ambiguous" and d.subject
         )
     roots = [Path(p) for d in ws.data.values() for p in d.sys_path]
     return sorted(wanted), roots
 
 
 def orphan_touchpoints(
-    root: Path, units: list[Unit], knowledge: Knowledge, *, python: str | None
+    units: list[Unit], knowledge: Knowledge, *, python: str | None
 ) -> list[str]:
     """Touchpoints handling or transferring data that belong to no activity.
 
@@ -407,7 +407,7 @@ def orphan_touchpoints(
     the activity map must not have to be rebuilt when it is. Whether an
     activity matters for the register is filtered at read time.
     """
-    ws = load_workspace(root, units, knowledge, python=python)
+    ws = load_workspace(units, knowledge, python=python)
     return sorted(
         t.full_id
         for t in ws.all_touchpoints.values()
@@ -481,17 +481,16 @@ class Target:
         return f"Review exactly these {self.noun}s, one at a time:\n{listed}"
 
     def pending(
-        self, root: Path, units: list[Unit], knowledge: Knowledge, python: str | None
+        self, units: list[Unit], knowledge: Knowledge, python: str | None
     ) -> tuple[list[str], list[Path]]:
         """Pending ids and readable roots."""
         if self.kind == "data":
             return pending_models(units, knowledge, python=python)
         if self.kind == "touchpoints":
             return pending_touchpoints(
-                root, units, knowledge, python=python, stale=self.stale
+                units, knowledge, python=python, stale=self.stale
             )
         return pending_threats(
-            root,
             units,
             knowledge,
             python=python,
@@ -508,7 +507,6 @@ TOPICS_TARGET = Target("topics")
 
 
 def pending_threats(
-    root: Path,
     units: list[Unit],
     knowledge: Knowledge,
     *,
@@ -529,7 +527,7 @@ def pending_threats(
         work_by_touchpoint,
     )
 
-    ws = load_workspace(root, units, knowledge, python=python)
+    ws = load_workspace(units, knowledge, python=python)
     matrix = build_matrix(ws)
     roots = [Path(p) for d in ws.data.values() for p in d.sys_path]
     if not by_topic:
@@ -933,12 +931,11 @@ class Reporter:
                 self.log(text)
 
     def sync(self, done: int) -> None:
-        """Re-align the bar with what the lock files actually say."""
+        """Re-align the bar with what the database actually says."""
         self.progress.update(self.task, completed=done)
 
 
 def auto_review(
-    repo_root: Path,
     units: list[Unit],
     knowledge: Knowledge,
     *,
@@ -958,8 +955,8 @@ def auto_review(
 
     ``workers`` > 1 runs that many OpenCode sessions per round in parallel,
     each dispatching its own shard of the pending list (``batch`` items per
-    worker). Writes are one file per touchpoint and a merge-on-save lock
-    file for data, so shards do not collide.
+    worker). Every write is a row-level transaction on the database, so
+    shards do not collide.
 
     With ``group`` (touchpoints only), a final single session groups the
     PII-touching touchpoints into activities once nothing is pending — or
@@ -971,11 +968,10 @@ def auto_review(
     OpenCodeUnavailable
         Before anything runs, when ``opencode`` or the API key is missing.
     """
-    before, readable = target.pending(repo_root, units, knowledge, python)
+    repo_root = get_container().root
+    before, readable = target.pending(units, knowledge, python)
     remaining = list(before)
-    needs_grouping = group and bool(
-        orphan_touchpoints(repo_root, units, knowledge, python=python)
-    )
+    needs_grouping = group and bool(orphan_touchpoints(units, knowledge, python=python))
     if not remaining and not base and not needs_grouping:
         return LoopResult(0, 0, 0, [], "nothing pending")
 
@@ -1040,7 +1036,7 @@ def auto_review(
                         style="red",
                     )
                 )
-            now, _ = target.pending(repo_root, units, knowledge, python)
+            now, _ = target.pending(units, knowledge, python)
             progressed = len(now) < len(remaining)
             remaining = now
             reporter.sync(len(before) - len(remaining))
@@ -1062,7 +1058,7 @@ def auto_review(
             prompt = target.round_message
         group_now = group and (not remaining or max_rounds == 0)
         if group_now and oc.budget_left() != 0:
-            orphans = orphan_touchpoints(repo_root, units, knowledge, python=python)
+            orphans = orphan_touchpoints(units, knowledge, python=python)
             if orphans:
                 reporter.log(
                     Text(
@@ -1077,7 +1073,7 @@ def auto_review(
                     on_event=reporter.on_event,
                 )
                 last_message = result.final_text or result.stderr_tail
-                left = orphan_touchpoints(repo_root, units, knowledge, python=python)
+                left = orphan_touchpoints(units, knowledge, python=python)
                 reporter.log(
                     Text(
                         f"  -> {len(orphans) - len(left)} grouped, {len(left)} still "
@@ -1115,7 +1111,6 @@ class ChallengeResult:
 
 
 def challenge(
-    repo_root: Path,
     units: list[Unit],
     knowledge: Knowledge,
     *,
@@ -1130,15 +1125,16 @@ def challenge(
 
     The agent reads the diff with git, asks ``reviews`` what reviewers
     asserted about the changed files, and calls ``challenge`` on what the
-    change undermines. Challenges land in the lock file / manifests; the
-    caller decides whether to commit them.
+    change undermines. Challenges land in the database; the caller decides
+    whether to commit them.
 
     Raises
     ------
     OpenCodeUnavailable
         Before anything runs, when ``opencode`` or the API key is missing.
     """
-    _, readable = DATA_TARGET.pending(repo_root, units, knowledge, python)
+    repo_root = get_container().root
+    _, readable = DATA_TARGET.pending(units, knowledge, python)
     activity_log = Path(
         tempfile.mkstemp(prefix="model-wtf-activity-", suffix=".jsonl")[1]
     )

@@ -4,13 +4,24 @@ from __future__ import annotations
 
 import shutil
 import sys
+import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
+import yaml
 
-from conftest import FILES_ALL_OK
+from conftest import (
+    APP_OK,
+    seed_activity,
+    seed_app,
+    seed_data,
+    seed_party,
+    seed_touchpoint,
+)
 from model_wtf.compliance.check import run_check
+from model_wtf.compliance.data import load_data_items
+from model_wtf.compliance.declarations import load_declarations
 from model_wtf.compliance.knowledge import load_knowledge
 from model_wtf.compliance.mcp_server import Tools
 from model_wtf.compliance.report import Section, Unit
@@ -23,7 +34,7 @@ from model_wtf.compliance.rights import (
     rights_of,
 )
 from model_wtf.compliance.workspace import load_workspace
-from model_wtf.compliance.yaml_io import Missing
+from model_wtf.compliance.yaml_io import TODO, Missing, load_yaml
 
 if TYPE_CHECKING:
     from conftest import MakeRepo
@@ -42,33 +53,39 @@ IBAN = "api:shop.Customer.iban"
 
 @pytest.fixture
 def repo(make_repo: MakeRepo, monkeypatch: pytest.MonkeyPatch) -> Path:
-    root = make_repo(snow=SNOW, files=FILES_ALL_OK)
+    root = make_repo(snow=SNOW, seed=True)
     shutil.copytree(FIXTURES / "djproj", root / "api", dirs_exist_ok=True)
     monkeypatch.setenv("MODEL_WTF_PYTHON", sys.executable)
     monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
-    (root / "compliance" / "activities").mkdir()
     return root
 
 
 def _ws(root: Path):
-    units = [Unit("api", root / "api" / "compliance", "django", root / "api")]
-    return load_workspace(root, units, load_knowledge(None))
+    units = [Unit("api", root / "api", "django")]
+    return load_workspace(units, load_knowledge(custom=False))
 
 
-def _tp(root: Path, slug: str, body: str) -> None:
-    folder = root / "api" / "compliance" / "touchpoints"
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / f"{slug}.yaml").write_text(body)
+def _tp(root: Path, touchpoint_id: str, body: str) -> None:
+    """A declaration written in its YAML mapping form."""
+    seed_touchpoint("api", touchpoint_id, **yaml.safe_load(body))
 
 
 def _activity(root: Path, slug: str, body: str) -> None:
-    (root / "compliance" / "activities" / f"{slug}.yaml").write_text(body)
+    seed_activity(slug, **load_marked(body))
 
 
-def _data(root: Path, stem: str, body: str) -> None:
-    folder = root / "api" / "compliance" / "data"
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / f"{stem}.yaml").write_text(body)
+def _data(root: Path, item_id: str, body: str) -> None:
+    seed_data("api", item_id, **load_marked(body))
+
+
+def load_marked(body: str) -> dict[str, Any]:
+    """A YAML mapping with ``!todo`` / ``!missing`` markers."""
+    path = Path(tempfile.mkstemp(suffix=".yaml")[1])
+    path.write_text(body)
+    try:
+        return dict(load_yaml(path))
+    finally:
+        path.unlink()
 
 
 def _status(root: Path, ref: str) -> dict[Right, tuple[RightStatus, str]]:
@@ -142,7 +159,7 @@ def test_every_right_derives_from_ops(repo: Path) -> None:
     )
     _tp(
         repo,
-        "task__shop.purge_carts",
+        "task:shop.purge_carts",
         f"data:\n  - {IBAN}: {{retention_purge: {{after: {{years: 1}}, "
         f"since: creation}}}}\n",
     )
@@ -175,7 +192,7 @@ def test_every_right_derives_from_ops(repo: Path) -> None:
     # Portability presupposes access: with access missing there is one gap, not two.
     assert Right.PORTABILITY not in iban
 
-    report = run_check(repo, strict=False)
+    report = run_check(strict=False)
     missing = {d.subject: d for d in report.by_section()[Section.MISSING]}
     assert f"{EMAIL}#erase" in missing
     assert missing[f"{EMAIL}#erase"].code == "erasure-missing"
@@ -186,7 +203,7 @@ def test_every_right_derives_from_ops(repo: Path) -> None:
 def test_staff_reads_are_not_access(repo: Path) -> None:
     """The same facts on a staff screen serve no right of the person; the
     finding says staff could, so a request process can be declared."""
-    _tp(repo, "admin__shop.Customer", f"data:\n  - {EMAIL}: [read, update, delete]\n")
+    _tp(repo, "admin:shop.Customer", f"data:\n  - {EMAIL}: [read, update, delete]\n")
     _tp(repo, "checkout", f"scope: public\ndata:\n  - {EMAIL}: create\n")
     _activity(
         repo,
@@ -210,7 +227,7 @@ def test_retention_cases(repo: Path) -> None:
     _tp(repo, "checkout", f"scope: public\ndata:\n  - {EMAIL}: create\n")
     _tp(
         repo,
-        "task__shop.purge_carts",
+        "task:shop.purge_carts",
         f"data:\n  - {EMAIL}: {{retention_purge: {{after: settings.GUEST_MAX_AGE, "
         "since: last use, when: guest customers only}}\n",
     )
@@ -233,7 +250,7 @@ def test_retention_cases(repo: Path) -> None:
 
 
 def test_portability_needs_a_subject_facing_create(repo: Path) -> None:
-    _tp(repo, "admin__shop.Customer", f"data:\n  - {EMAIL}: create\n")
+    _tp(repo, "admin:shop.Customer", f"data:\n  - {EMAIL}: create\n")
     _activity(
         repo,
         "back-office",
@@ -285,13 +302,13 @@ def test_exemptions_on_the_item(repo: Path) -> None:
     # And with access missing, portability is not asked separately.
     assert Right.PORTABILITY not in status
 
-    report = run_check(repo, strict=False)
+    report = run_check(strict=False)
     review = [d for d in report.diagnostics if d.code == "manual-exemption"]
     assert len(review) == 1
     assert review[0].section is Section.REVIEW
     assert "support desk" in review[0].message
 
-    # A rights-only override file is not a classification override.
+    # A rights-only override row is not a classification override.
     row = _ws(repo).rows[EMAIL]
     assert row.source.value == "rule"
     assert row.rights is not None
@@ -299,7 +316,7 @@ def test_exemptions_on_the_item(repo: Path) -> None:
 
 def test_staff_only_is_verified_against_admin_ops(repo: Path) -> None:
     _ordering_with_email(repo)
-    _tp(repo, "admin__shop.Customer", f"data:\n  - {EMAIL}: update\n")
+    _tp(repo, "admin:shop.Customer", f"data:\n  - {EMAIL}: update\n")
     _data(repo, "shop.Customer.email", "rights:\n  rectify: {exempt: staff_only}\n")
     status = _status(repo, EMAIL)
     assert status[Right.RECTIFY][0] is RightStatus.EXEMPT
@@ -310,7 +327,7 @@ def test_contract_active_needs_an_end_of_contract_delete(repo: Path) -> None:
     _ordering_with_email(repo)
     _data(repo, "shop.Customer.email", "rights:\n  erase: {exempt: contract_active}\n")
     assert _status(repo, EMAIL)[Right.ERASE][0] is RightStatus.MISSING
-    _tp(repo, "admin__shop.Customer", f"data:\n  - {EMAIL}: delete\n")
+    _tp(repo, "admin:shop.Customer", f"data:\n  - {EMAIL}: delete\n")
     status = _status(repo, EMAIL)
     assert status[Right.ERASE][0] is RightStatus.EXEMPT
     assert "removed at end of contract by" in status[Right.ERASE][1]
@@ -330,7 +347,7 @@ def test_anonymisation_needs_a_ground_to_keep_the_row(repo: Path) -> None:
     assert "anonymisation without a ground" in status[Right.ERASE][1]
 
 
-def test_glob_rights_file_applies_to_every_personal_field(repo: Path) -> None:
+def test_glob_rights_row_applies_to_every_personal_field(repo: Path) -> None:
     _ordering_with_email(repo)
     _data(
         repo,
@@ -347,7 +364,7 @@ def test_glob_rights_file_applies_to_every_personal_field(repo: Path) -> None:
     assert isinstance(email_rights, RightsSpec)
     assert isinstance(email_rights.erase, Exemption)
     assert email_rights.erase.exempt is Ground.LEGAL_CLAIMS
-    # The item's own file wins over the glob, right by right.
+    # The item's own row wins over the glob, right by right.
     iban_rights = ws.rows[IBAN].rights
     assert isinstance(iban_rights, RightsSpec)
     assert isinstance(iban_rights.erase, Exemption)
@@ -374,7 +391,7 @@ def test_rights_on_non_personal_item_is_an_error(repo: Path) -> None:
 def test_declared_and_claimed_missing(repo: Path) -> None:
     _ordering_with_email(repo)
     _data(repo, "shop.Customer.email", 'rights:\n  erase: !missing "no delete view"\n')
-    tools = Tools(repo)
+    tools = Tools()
     out = tools.data_flag(
         IBAN, "retention", "missing", "purge task only logs (tasks.py:12)"
     )
@@ -389,13 +406,11 @@ def test_declared_and_claimed_missing(repo: Path) -> None:
         tools.data_flag(IBAN, "erase", "exempt", "  ", "legal_obligation")
     tools.data_flag(IBAN, "portability", "exempt", "computed", "derived")
 
-    text = (
-        repo / "api" / "compliance" / "data" / "shop.Customer.iban.yaml"
-    ).read_text()
-    assert "retention: !missing '[agent] purge task only logs (tasks.py:12)'" in text
-    assert "portability: {exempt: derived, note: computed}" in text
+    rights = load_data_items("api")["shop.Customer.iban"]["rights"]
+    assert rights["retention"] == Missing("[agent] purge task only logs (tasks.py:12)")
+    assert rights["portability"] == {"exempt": "derived", "note": "computed"}
 
-    report = run_check(repo, strict=False)
+    report = run_check(strict=False)
     missing = {d.subject: d for d in report.by_section()[Section.MISSING]}
     assert "[declared]" in missing[f"{EMAIL}#erase"].message
     assert '"no delete view"' in missing[f"{EMAIL}#erase"].message
@@ -417,7 +432,7 @@ def test_no_pii_is_verified(repo: Path) -> None:
         "name: T\npurpose: p\nlegal_basis: no_pii\ndata_subjects: []\n"
         "touchpoints: [api:getCustomer]\n",
     )
-    report = run_check(repo, strict=False)
+    report = run_check(strict=False)
     violated = [d for d in report.diagnostics if d.code == "no-pii-violated"]
     assert violated
     assert violated[0].section is Section.MISSING
@@ -434,7 +449,7 @@ def test_consent_proof_and_withdrawal(repo: Path) -> None:
         "name: N\npurpose: p\nlegal_basis: consent\ndata_subjects: [customers]\n"
         "touchpoints: [api:checkout]\n",
     )
-    codes = {d.code for d in run_check(repo, strict=False).diagnostics}
+    codes = {d.code for d in run_check(strict=False).diagnostics}
     assert {"consent-proof-missing", "consent-withdrawal-missing"} <= codes
 
     _activity(
@@ -454,7 +469,7 @@ def test_consent_proof_and_withdrawal(repo: Path) -> None:
         "getCustomer",
         f"data:\n  - {EMAIL}: {{consent_withdraw: {{for: newsletter}}}}\n",
     )
-    diags = run_check(repo, strict=False).diagnostics
+    diags = run_check(strict=False).diagnostics
     codes = {d.code for d in diags}
     assert "consent-proof-missing" not in codes
     assert "consent-withdrawal-missing" not in codes
@@ -470,19 +485,27 @@ def test_objection_for_legitimate_interests(repo: Path) -> None:
         "name: S\npurpose: p\nlegal_basis: legitimate_interests\n"
         "data_subjects: [customers]\ntouchpoints: [api:getCustomer]\n",
     )
-    report = run_check(repo, strict=False)
+    report = run_check(strict=False)
     assert "objection-missing" in {d.code for d in report.diagnostics}
     # The balancing test is scaffolded as a question.
-    assert "security.yaml#interest" in {d.subject for d in report.diagnostics}
+    assert "activities/security#interest" in {d.subject for d in report.diagnostics}
     # An opt-out is a subject-facing update on one of the items.
     _tp(repo, "getCustomer", f"scope: subject\ndata:\n  - {EMAIL}: [read, update]\n")
     assert "objection-missing" not in {
-        d.code for d in run_check(repo, strict=False).diagnostics
+        d.code for d in run_check(strict=False).diagnostics
     }
 
 
+def _mapbox(**changes: Any) -> None:
+    spec = {
+        **load_declarations().parties["mapbox"].model_dump(mode="python"),
+        **changes,
+    }
+    seed_party("mapbox", **{k: v for k, v in spec.items() if v is not None})
+
+
 def test_third_country_transfer_needs_a_safeguard(repo: Path) -> None:
-    tools = Tools(repo)
+    tools = Tools()
     tools.party_add("mapbox", "Mapbox", country="US")
     _tp(
         repo,
@@ -501,40 +524,39 @@ def test_third_country_transfer_needs_a_safeguard(repo: Path) -> None:
     assert "mapbox (US)" in status[Right.TRANSFER][1]
 
     # An unknown country is a question, not a finding.
-    party = repo / "compliance" / "parties" / "mapbox.yaml"
-    party.write_text(party.read_text().replace("country: US", "country: !todo"))
+    _mapbox(country=TODO)
     assert _status(repo, EMAIL)[Right.TRANSFER][0] is RightStatus.UNKNOWN
-    report = run_check(repo, strict=False)
+    report = run_check(strict=False)
     todo = {d.subject for d in report.by_section()[Section.TODO]}
     assert f"{EMAIL}#transfer" in todo
 
-    party.write_text(party.read_text().replace("country: !todo", "country: US"))
+    _mapbox(country="US")
     assert "transfer-safeguard-missing" in {
-        d.code for d in run_check(repo, strict=False).diagnostics
+        d.code for d in run_check(strict=False).diagnostics
     }
 
     with pytest.raises(ValueError, match="dpf_certified"):
         tools.party_add("other", "Other", country="US", safeguard="dpf")
-    party.write_text(party.read_text() + "safeguard: dpf\ndpf_certified: true\n")
+    _mapbox(safeguard="dpf", dpf_certified=True)
     status = _status(repo, EMAIL)
     assert status[Right.TRANSFER] == (RightStatus.SATISFIED, "sent to mapbox")
 
     # An EEA / adequacy country needs nothing.
-    party.write_text(party.read_text().replace("country: US", "country: CH"))
+    _mapbox(country="CH")
     assert _status(repo, EMAIL)[Right.TRANSFER][0] is RightStatus.SATISFIED
 
 
 def test_party_nothing_refers_to_is_a_question(repo: Path) -> None:
     """A vendor listed "just in case" is a Todo: declare the transfer or
-    delete the file. Controller, processor, recipients and transfer
+    delete the party. Controller, processor, recipients and transfer
     parties are in use."""
-    tools = Tools(repo)
+    tools = Tools()
     tools.party_add("youtube", "YouTube", country="US")
-    report = run_check(repo, strict=False)
+    report = run_check(strict=False)
     todo = {d.subject for d in report.by_section()[Section.TODO]}
-    assert "parties/youtube.yaml" in todo
-    assert "parties/acme.yaml" not in todo
-    assert "parties/with-madrid.yaml" not in todo
+    assert "parties/youtube" in todo
+    assert "parties/acme" not in todo
+    assert "parties/with-madrid" not in todo
 
 
 def test_dpia_reference_when_the_trigger_fires(repo: Path) -> None:
@@ -548,18 +570,19 @@ def test_dpia_reference_when_the_trigger_fires(repo: Path) -> None:
         "name: B\npurpose: p\nlegal_basis: contract\ndata_subjects: [customers]\n"
         "touchpoints: [api:getCustomer]\n",
     )
-    report = run_check(repo, strict=False)
+    report = run_check(strict=False)
     assert "dpia-missing" not in {d.code for d in report.diagnostics}
-    assert "billing.yaml#dpia_reference" not in {d.subject for d in report.diagnostics}
-    app = repo / "compliance" / "app.yaml"
-    app.write_text(app.read_text() + "large_scale: true\n")
-    assert "dpia-missing" in {d.code for d in run_check(repo, strict=False).diagnostics}
-    app.write_text(app.read_text().replace("large_scale: true", "large_scale: !todo"))
-    report = run_check(repo, strict=False)
+    assert "activities/billing#dpia_reference" not in {
+        d.subject for d in report.diagnostics
+    }
+    seed_app(**APP_OK, large_scale=True)
+    assert "dpia-missing" in {d.code for d in run_check(strict=False).diagnostics}
+    seed_app(**APP_OK, large_scale=TODO)
+    report = run_check(strict=False)
     assert "dpia-missing" not in {d.code for d in report.diagnostics}
-    # The open question shows once, on app.yaml.
-    assert "app.yaml#large_scale" in {d.subject for d in report.diagnostics}
-    app.write_text(app.read_text().replace("large_scale: !todo\n", ""))
+    # The open question shows once, on the app.
+    assert "app#large_scale" in {d.subject for d in report.diagnostics}
+    seed_app(**APP_OK)
     _tp(repo, "checkout", "data: [api:shop.Customer.allergies]\n")
     _activity(
         repo,
@@ -569,7 +592,7 @@ def test_dpia_reference_when_the_trigger_fires(repo: Path) -> None:
     )
     ws = _ws(repo)
     assert ws.activities.items["health"].derived.dpia is not None
-    codes = {d.code for d in run_check(repo, strict=False).diagnostics}
+    codes = {d.code for d in run_check(strict=False).diagnostics}
     assert "dpia-missing" in codes
     _activity(
         repo,
@@ -577,9 +600,7 @@ def test_dpia_reference_when_the_trigger_fires(repo: Path) -> None:
         "name: H\npurpose: p\nlegal_basis: contract\ndata_subjects: [customers]\n"
         "touchpoints: [api:checkout]\ndpia_reference: docs/dpia-health.md\n",
     )
-    assert "dpia-missing" not in {
-        d.code for d in run_check(repo, strict=False).diagnostics
-    }
+    assert "dpia-missing" not in {d.code for d in run_check(strict=False).diagnostics}
 
 
 # ---------------------------------------------------------------------------
@@ -589,7 +610,7 @@ def test_dpia_reference_when_the_trigger_fires(repo: Path) -> None:
 
 def test_activity_create_accepts_missing_verdicts(repo: Path) -> None:
     _tp(repo, "checkout", f"data:\n  - {EMAIL}: create\n")
-    tools = Tools(repo)
+    tools = Tools()
     tools.activity_create(
         "marketing",
         "Marketing",
@@ -600,13 +621,12 @@ def test_activity_create_accepts_missing_verdicts(repo: Path) -> None:
         data_subjects=["customers"],
         basis_note="consent would apply; none is collected",
     )
-    text = (repo / "compliance" / "activities" / "marketing.yaml").read_text()
-    assert (
-        "legal_basis: !missing '[agent] emails sent without any opt-in (api.py:30)'"
-        in text
+    marketing = _ws(repo).activities.items["marketing"].spec
+    assert marketing.legal_basis == Missing(
+        "[agent] emails sent without any opt-in (api.py:30)"
     )
-    assert "basis_note: consent would apply; none is collected" in text
-    assert "retention" not in text
+    assert marketing.basis_note == "consent would apply; none is collected"
+    assert marketing.retention is None
     with pytest.raises(ValueError, match="verdict is a string"):
         tools.activity_create("x", "X", {"nope": "y"}, ["api:checkout"], "r")
     with pytest.raises(ValueError, match="not a data item"):
@@ -628,10 +648,11 @@ def test_activity_create_accepts_missing_verdicts(repo: Path) -> None:
         legal_basis="consent",
         consent_record={"missing": "the opt-in is never stored"},
     )
-    text = (repo / "compliance" / "activities" / "newsletter.yaml").read_text()
-    assert "consent:\n  record: !missing '[agent] the opt-in is never stored'" in text
+    newsletter = _ws(repo).activities.items["newsletter"].spec
+    assert newsletter.consent is not None
+    assert newsletter.consent.record == Missing("[agent] the opt-in is never stored")
 
-    report = run_check(repo, strict=False)
+    report = run_check(strict=False)
     missing = {d.subject: d for d in report.by_section()[Section.MISSING]}
-    assert "marketing.yaml#legal_basis" in missing
-    assert "newsletter.yaml#consent.record" in missing
+    assert "activities/marketing#legal_basis" in missing
+    assert "activities/newsletter#consent.record" in missing

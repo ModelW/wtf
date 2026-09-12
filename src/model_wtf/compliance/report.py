@@ -43,26 +43,26 @@ class Severity(StrEnum):
 
 
 class ScopeKind(StrEnum):
-    """Where a compliance folder comes from."""
+    """What a scope is."""
 
     SHARED = "shared"
-    """The repo-root ``compliance/`` folder (controller, actors, ...)."""
+    """The repository level: the app, the parties, the activities."""
 
     UNIT = "unit"
-    """A per-image folder declared in the manifest."""
+    """One image declared in the manifest, with its code."""
 
 
 class ScopeStatus(StrEnum):
     """Outcome of a scope, worst diagnostic wins."""
 
     OK = "ok"
-    """Folder present, nothing owed."""
+    """Nothing owed."""
 
     PENDING = "pending"
-    """Folder present; ``!todo``/``!missing`` values or unreviewed items remain."""
+    """``!todo``/``!missing`` values or unreviewed items remain."""
 
     ERROR = "error"
-    """Invalid declarations, or the folder is missing (``init`` not run)."""
+    """Invalid declarations, or the database was never initialised."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,38 +190,34 @@ class Unit:
     ----------
     id
         The image / unit identifier (``api``, ``front``, ...).
-    folder
-        Absolute path to the unit's compliance folder.
+    code_root
+        Where the unit's code lives (the Dockerfile's folder); the folder
+        the extractors are run against.
     discover
         Discovery engine declared for the unit (``django``, ``sveltekit``,
         ``none``).
-    code_root
-        Where the unit's code lives (the Dockerfile's folder); the folder
-        extractors are run against.
     """
 
     id: str
-    folder: Path
+    code_root: Path
     discover: str = "none"
-    code_root: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class Scope:
-    """A compliance folder that was inspected.
+    """One part of the repository that was inspected.
 
     Parameters
     ----------
     id
-        ``shared`` for the repo-root folder, else the unit id.
+        ``shared`` for the repository level, else the unit id.
     kind
         Shared or unit scope.
     path
-        Absolute path to the folder.
+        The database for the shared scope, the code root for a unit.
     exists
-        Whether the folder is present on disk. A folder with no files is a
-        legitimate state (everything rule-classified and reviewed); a
-        missing one means ``init`` was never run for this scope.
+        Whether the scope has something to inspect: an ``app`` row for the
+        shared scope (``init`` was run), a code folder for a unit.
     items
         Data items inventoried for a unit scope (``None`` for the shared
         scope, which has no inventory).
@@ -258,19 +254,20 @@ def _marker_origin(marker: Marker) -> str:
 
 
 def marker_diagnostics(
-    model: BaseModel, path: Path, scope_id: str | None
+    model: BaseModel, label: str, scope_id: str | None, path: Path | None = None
 ) -> list[Diagnostic]:
     """One diagnostic per ``!todo`` / ``!missing`` value inside ``model``.
 
     Todos land in the Todo section (code ``todo``), missings in the Missing
-    section (code ``missing``). The subject is ``<file>#<dotted field>`` so a
-    gate can tell "the same open question" across runs; a note is appended
-    to the message when present.
+    section (code ``missing``). ``label`` names the record (``app``,
+    ``parties/acme``, ``activities/ordering``); the subject is
+    ``<label>#<dotted field>`` so a gate can tell "the same open question"
+    across runs. A note is appended to the message when present.
     """
     out: list[Diagnostic] = []
     for dotted, marker in iter_markers(model):
         missing = isinstance(marker, Missing)
-        message = f"{path.name}: {dotted} is {marker.tag}"
+        message = f"{label}: {dotted} is {marker.tag}"
         if marker.note:
             message += f' "{marker.note}"'
         out.append(
@@ -280,7 +277,7 @@ def marker_diagnostics(
                 message,
                 scope_id,
                 path,
-                subject=f"{path.name}#{dotted}",
+                subject=f"{label}#{dotted}",
                 # For a todo the hint is the question the field asks; the
                 # ``--todo`` questionnaire is built from it.
                 hint=None if missing else field_description(model, dotted),

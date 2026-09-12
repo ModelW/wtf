@@ -12,9 +12,11 @@ from typing import TYPE_CHECKING
 import pytest
 from click.testing import CliRunner
 
-from conftest import FILES_ALL_OK
+from conftest import PARTY_ACME, seed_app, seed_party, seed_touchpoint
 from model_wtf.cli import cli
 from model_wtf.compliance.check import run_check
+from model_wtf.compliance.container import DB_FILE, configure
+from model_wtf.compliance.db import get_db
 from model_wtf.compliance.discovery import load_units, select_manifest
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.gate import (
@@ -28,13 +30,15 @@ from model_wtf.compliance.gate import (
 from model_wtf.compliance.knowledge import load_knowledge
 from model_wtf.compliance.report import Diagnostic, Report, Severity
 from model_wtf.compliance.review import Lock
+from model_wtf.compliance.stamps import Holder, read_stamps
+from model_wtf.compliance.tables import DataLockRow, TouchpointRow
 from model_wtf.compliance.workspace import load_workspace
+from model_wtf.compliance.yaml_io import TODO
 
 if TYPE_CHECKING:
     from conftest import MakeRepo
 
 FIXTURE = Path(__file__).parent / "fixtures" / "djproj"
-ADDRESS = "address: 1 rue de la Paix, Paris"
 SNOW_DJANGO = """
 images:
   - id: api
@@ -71,8 +75,8 @@ def commit(root: Path, message: str) -> str:
 @pytest.fixture
 def repo(make_repo: MakeRepo, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A real git repository whose ``api`` unit is the fixture Django
-    project, with the compliance folder committed on ``develop``."""
-    root = make_repo(snow=SNOW_DJANGO, files=FILES_ALL_OK, git=False)
+    project, with the compliance database committed on ``develop``."""
+    root = make_repo(snow=SNOW_DJANGO, git=False, seed=True)
     shutil.copytree(FIXTURE, root / "api", dirs_exist_ok=True)
     monkeypatch.setenv("MODEL_WTF_PYTHON", sys.executable)
     monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
@@ -87,14 +91,9 @@ def repo(make_repo: MakeRepo, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _rows(root: Path):
+    configure(root)
     units, _ = load_units(select_manifest(root), root, strict=False)
-    ws = load_workspace(
-        root,
-        units,
-        load_knowledge(root / "compliance"),
-        python=None,
-        with_touchpoints=False,
-    )
+    ws = load_workspace(units, load_knowledge(), python=None, with_touchpoints=False)
     return units[0], ws.data["api"].rows
 
 
@@ -112,17 +111,17 @@ def test_findings_are_keyed_by_identity_and_folds_explode_into_items() -> None:
         "pending-review",
         "2 data item(s) pending",
         "api",
-        root / "api/compliance/data.lock.yaml",
+        root / "api",
         subject="api:data",
         items=("api:shop.Customer.email", "api:shop.Customer.phone"),
     )
     marker = Diagnostic(
         Severity.WARNING,
         "todo",
-        "fah.yaml: address is !todo",
+        "parties/fah: address is !todo",
         "shared",
-        root / "compliance/parties/fah.yaml",
-        subject="fah.yaml#address",
+        None,
+        subject="parties/fah#address",
     )
     info = Diagnostic(Severity.INFO, "data-unreferenced", "x", "api", items=("a",))
     report = Report(root, None, (), (folded, marker, info), ExitCode.FINDINGS)
@@ -130,7 +129,7 @@ def test_findings_are_keyed_by_identity_and_folds_explode_into_items() -> None:
     assert keys == {
         ("api", "pending-review", "api:shop.Customer.email"),
         ("api", "pending-review", "api:shop.Customer.phone"),
-        ("shared", "todo", "fah.yaml#address"),
+        ("shared", "todo", "parties/fah#address"),
     }
     # Rewording the message changes nothing; the identity holds.
     reworded = Diagnostic(
@@ -146,7 +145,7 @@ def test_findings_are_keyed_by_identity_and_folds_explode_into_items() -> None:
     result = compare(report, base, base_ref="develop")
     assert [f.subject for f in result.introduced] == [
         "api:shop.Customer.email",
-        "fah.yaml#address",
+        "parties/fah#address",
     ]
     assert [f.subject for f in result.pre_existing] == ["api:shop.Customer.phone"]
     assert result.fixed == []
@@ -154,7 +153,7 @@ def test_findings_are_keyed_by_identity_and_folds_explode_into_items() -> None:
 
 
 def test_gate_on_the_same_tree_introduces_nothing(repo: Path) -> None:
-    result = run_gate(repo, base_ref="develop")
+    result = run_gate(base_ref="develop")
     assert result.introduced == []
     assert result.fixed == []
     assert result.pre_existing  # the fixture has pending items
@@ -181,7 +180,7 @@ def test_a_new_personal_field_is_the_only_introduced_finding(repo: Path) -> None
             "    nickname = models.CharField(max_length=20, blank=True)\n",
         )
     )
-    result = run_gate(repo, base_ref="develop")
+    result = run_gate(base_ref="develop")
     assert [(f.code, f.subject) for f in result.introduced] == [
         ("pending-review", "api:shop.Customer.nickname")
     ]
@@ -189,56 +188,57 @@ def test_a_new_personal_field_is_the_only_introduced_finding(repo: Path) -> None
     assert result.introduced[0].diagnostic.path is not None
 
     _reviewed(repo, "shop.Customer.nickname")
-    result = run_gate(repo, base_ref="develop")
+    result = run_gate(base_ref="develop")
     assert result.introduced == []
     assert result.exit_code is ExitCode.CLEAN
 
 
-def _open_question(repo: Path) -> Path:
+def _open_question(repo: Path) -> None:
     """Commit a ``!todo`` on the base so a branch can answer it."""
-    party = repo / "compliance" / "parties" / "acme.yaml"
-    party.write_text(party.read_text().replace(ADDRESS, "address: !todo"))
+    configure(repo)
+    seed_party("acme", **{**PARTY_ACME, "address": TODO})
     commit(repo, "open question")
-    return party
 
 
 def test_fixing_a_todo_is_reported_as_fixed(repo: Path) -> None:
-    party = _open_question(repo)
-    party.write_text(party.read_text().replace("address: !todo", ADDRESS))
-    result = run_gate(repo, base_ref="develop")
+    _open_question(repo)
+    seed_party("acme", **PARTY_ACME)
+    result = run_gate(base_ref="develop")
     fixed = [(f.code, f.subject) for f in result.fixed]
-    assert ("todo", "acme.yaml#address") in fixed
+    assert ("todo", "parties/acme#address") in fixed
     assert result.introduced == []
 
 
 def test_declaration_errors_in_the_head_always_fail(repo: Path) -> None:
-    (repo / "compliance" / "app.yaml").write_text("name: [\n")
-    result = run_gate(repo, base_ref="develop")
+    configure(repo)
+    seed_app(name="x", description="y", controller="nobody")
+    result = run_gate(base_ref="develop")
     assert result.exit_code is ExitCode.DECLARATION_ERROR
     assert "Declaration errors" in summary_markdown(result)
 
 
 def test_head_ref_gates_a_commit_instead_of_the_tree(repo: Path) -> None:
-    party = _open_question(repo)
+    _open_question(repo)
     git(repo, "checkout", "-q", "-b", "feature")
-    party.write_text(party.read_text().replace("address: !todo", ADDRESS))
+    seed_party("acme", **PARTY_ACME)
     commit(repo, "fill address")
     # Dirty the tree afterwards: --head ignores it.
-    party.write_text(party.read_text().replace("email: privacy", "email: !todo #"))
-    result = run_gate(repo, base_ref="develop", head_ref="feature")
-    assert [f.subject for f in result.fixed] == ["acme.yaml#address"]
+    seed_party("acme", **{**PARTY_ACME, "email": TODO})
+    result = run_gate(base_ref="develop", head_ref="feature")
+    assert [f.subject for f in result.fixed] == ["parties/acme#address"]
     assert result.introduced == []
 
 
 def test_unknown_ref_and_non_git_are_gate_errors(
     repo: Path, make_repo: MakeRepo
 ) -> None:
+    configure(repo)
     with pytest.raises(GateError, match="fetch-depth"):
-        run_gate(repo, base_ref="nope")
-    plain = make_repo(snow=SNOW_DJANGO, files=FILES_ALL_OK, git=False)
+        run_gate(base_ref="nope")
+    plain = make_repo(snow=SNOW_DJANGO, git=False, seed=True)
     shutil.rmtree(plain / ".git", ignore_errors=True)
     with pytest.raises(GateError, match="not a git repository"):
-        run_gate(plain, base_ref="develop")
+        run_gate(base_ref="develop")
 
 
 def test_environment_is_carried_over_only_with_identical_lockfiles(
@@ -253,20 +253,23 @@ def test_environment_is_carried_over_only_with_identical_lockfiles(
     seen: list[bool] = []
     original = run_check
 
-    def spy(root: Path, **kwargs: object) -> Report:
+    def spy(**kwargs: object) -> Report:
+        from model_wtf.compliance.container import get_container
+
+        root = get_container().root
         if root != repo:
             seen.append((root / "api" / ".venv" / "marker").is_file())
-        return original(root, **kwargs)  # type: ignore[arg-type]
+        return original(**kwargs)  # type: ignore[arg-type]
 
     import model_wtf.compliance.gate as gate
 
     gate.run_check = spy  # type: ignore[assignment]
     try:
-        result = run_gate(repo, base_ref="develop")
+        result = run_gate(base_ref="develop")
         assert seen == [True]
         assert result.warnings == []
         (api / "uv.lock").write_text("lock v2\n")
-        result = run_gate(repo, base_ref="develop")
+        result = run_gate(base_ref="develop")
         assert seen == [True, False]
         assert any("uv.lock differs" in w for w in result.warnings)
     finally:
@@ -316,14 +319,11 @@ def test_cli_formats_and_github_context(
     assert context is not None
     assert context.base_ref == base_sha
 
-    party = repo / "compliance" / "parties" / "acme.yaml"
-    party.write_text(party.read_text().replace(ADDRESS, "address: !todo"))
+    configure(repo)
+    seed_party("acme", **{**PARTY_ACME, "address": TODO})
     out = runner.invoke(cli, ["--root", str(repo), "compliance", "ghate"])
     assert out.exit_code == int(ExitCode.FINDINGS), out.output
-    assert (
-        "::warning file=compliance/parties/acme.yaml,title=todo::acme.yaml#address"
-        in out.output
-    )
+    assert "::warning title=todo::parties/acme#address" in out.output
     assert "::notice title=compliance::compliance gate: 1 introduced" in out.output
     assert "introduced=1" in output.read_text()
     assert "| `todo` | 1 |" in summary.read_text()
@@ -344,7 +344,8 @@ def test_cli_formats_and_github_context(
 def test_challenge_reopens_an_item_once_and_a_review_answers_it(repo: Path) -> None:
     from model_wtf.compliance.mcp_server import Decision, Tools
 
-    tools = Tools(repo)
+    configure(repo)
+    tools = Tools()
     tools.review_model(
         "api:shop.Customer",
         [Decision(field="email", ok=True), Decision(field="phone", ok=True)],
@@ -358,17 +359,18 @@ def test_challenge_reopens_an_item_once_and_a_review_answers_it(repo: Path) -> N
     assert tools.challenge(
         "api:shop.Customer.email", "views.py:12 now logs the email"
     ).startswith("Challenged")
-    lock = repo / "api" / "compliance" / "data.lock.yaml"
-    text = lock.read_text()
-    assert "challenge:" in text
-    assert f"commit: {head}" in text
-    assert "grounds: views.py:12 now logs the email" in text
+    with get_db() as db:
+        entry = db.get(DataLockRow, ("api", "shop.Customer.email"))
+        assert entry is not None
+        assert entry.challenge is not None
+        assert entry.challenge["commit"] == head
+        assert entry.challenge["grounds"] == "views.py:12 now logs the email"
     _, rows = _rows(repo)
     status = {r.row.id: r.status.value for r in Lock(_rows(repo)[0]).annotate(rows)}
     assert status["shop.Customer.email"] == "pending:challenged"
     assert status["shop.Customer.phone"] == "reviewed"
     # The gate sees it as an introduced finding on exactly that item.
-    result = run_gate(repo, base_ref="develop")
+    result = run_gate(base_ref="develop")
     assert [(f.code, f.subject) for f in result.introduced] == [
         ("pending-review", "api:shop.Customer.email")
     ]
@@ -381,9 +383,11 @@ def test_challenge_reopens_an_item_once_and_a_review_answers_it(repo: Path) -> N
     tools.review_model(
         "api:shop.Customer", [Decision(field="email", ok=True)], "still right"
     )
-    text = lock.read_text()
-    assert "challenge:" not in text.replace("answered:", "")
-    assert "answered:" in text
+    with get_db() as db:
+        entry = db.get(DataLockRow, ("api", "shop.Customer.email"))
+        assert entry is not None
+        assert entry.challenge is None
+        assert entry.answered is not None
     assert "already answered" in tools.challenge("api:shop.Customer.email", "again")
     # The reviews tool tells the challenger about it.
     listing = tools.reviews(["api/shop/models.py"])
@@ -395,7 +399,8 @@ def test_challenge_reopens_an_item_once_and_a_review_answers_it(repo: Path) -> N
 def test_challenge_on_a_touchpoint_goes_through_the_manifest(repo: Path) -> None:
     from model_wtf.compliance.mcp_server import DataRef, Tools
 
-    tools = Tools(repo)
+    configure(repo)
+    tools = Tools()
     assert tools.challenge("api:checkout", "x").startswith("Refused")
     tools.touchpoint_set_data(
         "api:checkout",
@@ -408,9 +413,11 @@ def test_challenge_on_a_touchpoint_goes_through_the_manifest(repo: Path) -> None
     assert "email: create" in listing
     out = tools.challenge("api:checkout", "api.py:30 now mails it to mailgun")
     assert out.startswith("Challenged")
-    manifest = repo / "api" / "compliance" / "touchpoints" / "checkout.yaml"
-    assert "challenge:" in manifest.read_text()
-    result = run_gate(repo, base_ref="develop")
+    with get_db() as db:
+        row = db.get(TouchpointRow, ("api", "checkout"))
+        assert row is not None
+        assert row.challenge is not None
+    result = run_gate(base_ref="develop")
     assert ("touchpoint-pending", "api:checkout") in [
         (f.code, f.subject) for f in result.introduced
     ]
@@ -421,18 +428,21 @@ def test_challenge_on_a_touchpoint_goes_through_the_manifest(repo: Path) -> None
         [DataRef(ref="shop.Customer.email", ops=[{"op": "create"}])],
         reason="still fine",
     )
-    text = manifest.read_text()
-    assert "answered:" in text
-    assert "\nchallenge:" not in text
+    with get_db() as db:
+        row = db.get(TouchpointRow, ("api", "checkout"))
+        assert row is not None
+        assert row.answered is not None
+        assert row.challenge is None
     assert "already answered" in tools.challenge("api:checkout", "again")
 
 
-def test_commit_challenges_stages_only_compliance_files(repo: Path) -> None:
+def test_commit_challenges_stages_only_the_database(repo: Path) -> None:
     from model_wtf.compliance.gate import commit_challenges
 
     (repo / "api" / "shop" / "junk.py").write_text("x = 1\n")
-    lock = repo / "api" / "compliance" / "data.lock.yaml"
-    lock.write_text("schema: 1\nitems: {}\n")
+    configure(repo)
+    seed_touchpoint("api", "checkout", data=[])
+    assert DB_FILE in git(repo, "status", "--porcelain")
     sha = commit_challenges(repo, ["api:shop.Customer.email"], base_sha="abc123def456")
     assert sha
     assert "Challenge 1 review(s) after abc123def456" in git(
@@ -448,7 +458,8 @@ def test_parallel_challenges_through_separate_locks_all_survive(repo: Path) -> N
     touched, or the last writer erases the others' challenges."""
     from model_wtf.compliance.mcp_server import Decision, Tools
 
-    Tools(repo).review_model(
+    configure(repo)
+    Tools().review_model(
         "api:shop.Customer",
         [Decision(field="email", ok=True), Decision(field="phone", ok=True)],
         "checked",
@@ -459,8 +470,10 @@ def test_parallel_challenges_through_separate_locks_all_survive(repo: Path) -> N
     first.save()
     assert second.challenge("shop.Customer.phone", commit="abc", grounds="p") is None
     second.save()
-    text = (repo / "api" / "compliance" / "data.lock.yaml").read_text()
-    assert text.count("challenge:") == 2
+    challenged = {
+        item_id for item_id, entry in Lock(unit).items.items() if entry.challenge
+    }
+    assert challenged == {"shop.Customer.email", "shop.Customer.phone"}
 
 
 def test_challenge_on_a_threat_stamp_reopens_the_cell_until_re_stamped(
@@ -470,9 +483,9 @@ def test_challenge_on_a_threat_stamp_reopens_the_cell_until_re_stamped(
     fails on it as an introduced open threat, a re-stamp answers it."""
     from model_wtf.compliance.mcp_server import DataRef, Tools
     from model_wtf.compliance.threats import Verdict, build_matrix
-    from model_wtf.compliance.workspace import load_workspace
 
-    tools = Tools(repo)
+    configure(repo)
+    tools = Tools()
     tools.touchpoint_set_data(
         "api:getCustomer",
         [DataRef(ref="shop.Customer.email")],
@@ -498,14 +511,13 @@ def test_challenge_on_a_threat_stamp_reopens_the_cell_until_re_stamped(
         "api:getCustomer#AC01", "api.py:33 the filter(user=request.user) is gone"
     )
     assert out.startswith("Challenged")
-    manifest = repo / "api" / "compliance" / "touchpoints" / "getCustomer.yaml"
-    text = manifest.read_text()
-    assert "challenge:" in text
-    assert "filter(user=request.user) is gone" in text
+    stamp = read_stamps(Holder.touchpoint("api", "getCustomer")).root["AC01"]
+    assert stamp.challenge is not None  # type: ignore[union-attr]
+    assert "filter(user=request.user) is gone" in stamp.challenge.grounds  # type: ignore[union-attr]
     assert "already challenged" in tools.challenge("api:getCustomer#AC01", "again")
 
     def cell():
-        ws = load_workspace(repo, tools.units, tools.knowledge)
+        ws = load_workspace(tools.units, tools.knowledge)
         matrix = build_matrix(ws, register=False)
         return next(c for c in matrix.by_element("api:getCustomer") if c.sid == "AC01")
 
@@ -514,7 +526,7 @@ def test_challenge_on_a_threat_stamp_reopens_the_cell_until_re_stamped(
     assert "challenged at" in stale.reason
     assert "is gone" in stale.reason
     # The gate sees it as an introduced open threat with the grounds.
-    result = run_gate(repo, base_ref="develop")
+    result = run_gate(base_ref="develop")
     keys = [(f.code, f.subject) for f in result.introduced]
     assert ("threat-open", "api:getCustomer#AC01") in keys
     assert result.exit_code is ExitCode.FINDINGS
@@ -527,18 +539,19 @@ def test_challenge_on_a_threat_stamp_reopens_the_cell_until_re_stamped(
     tools.threat_stamp(
         "api:getCustomer", "AC01", status="mitigated", note="api.py:33 scoped again"
     )
-    text = manifest.read_text()
-    assert "answered:" in text
-    assert "    challenge:" not in text
+    stamp = read_stamps(Holder.touchpoint("api", "getCustomer")).root["AC01"]
+    assert stamp.answered is not None  # type: ignore[union-attr]
+    assert stamp.challenge is None  # type: ignore[union-attr]
     assert cell().verdict is Verdict.STAMPED
     assert "already answered" in tools.challenge("api:getCustomer#AC01", "again")
-    assert run_gate(repo, base_ref="develop").introduced == []
+    assert run_gate(base_ref="develop").introduced == []
 
 
 def test_challenge_on_a_finding_is_refused(repo: Path) -> None:
     from model_wtf.compliance.mcp_server import DataRef, Tools
 
-    tools = Tools(repo)
+    configure(repo)
+    tools = Tools()
     tools.touchpoint_set_data(
         "api:getCustomer",
         [DataRef(ref="shop.Customer.email")],

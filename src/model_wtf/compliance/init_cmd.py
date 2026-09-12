@@ -1,10 +1,11 @@
-"""``model-wtf compliance init``: scaffold the compliance folders.
+"""``model-wtf compliance init``: create the compliance database.
 
-The scaffold is deliberately thin: the repo-level manifest (``app.yaml``),
-one party file per organisation named on the command line, a README, the
-``compliance:`` key on every image of ``snow.yml`` and an empty folder per
-unit. Everything a human still has to write is spelled ``!todo`` so that
-``check`` can list it.
+The scaffold is deliberately thin: the database at the repository root
+with the ``app`` row and one party per organisation named on the command
+line, the ``compliance:`` key on every image of ``snow.yml`` (or a
+``.model-wtf.yml`` when there is no Snow manifest), the gate workflow, and
+the SQLite sidecars in ``.gitignore``. Everything a human still has to
+write is ``!todo`` so that ``check`` can list it.
 
 Idempotency is the key property: nothing that exists is ever rewritten, so
 ``init`` can be re-run on a half-configured repo to fill the gaps.
@@ -15,46 +16,29 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from importlib import resources
 from pathlib import Path
 from typing import Any
 
 from ruamel.yaml import YAML
 
-from model_wtf.compliance.declarations import APP_FILE, PARTIES_DIR
-from model_wtf.compliance.discovery import (
-    FALLBACK_MANIFEST,
-    SNOW_MANIFEST,
-    normalise_folder,
+from model_wtf.compliance.container import get_container
+from model_wtf.compliance.db import get_db
+from model_wtf.compliance.declarations import save_app, save_party
+from model_wtf.compliance.discovery import FALLBACK_MANIFEST, SNOW_MANIFEST
+from model_wtf.compliance.knowledge import (
+    CATEGORIES_DIR,
+    SENSITIVITY_DIR,
+    builtin_entries,
 )
-from model_wtf.compliance.knowledge import CATEGORIES_DIR, SENSITIVITY_DIR
-from model_wtf.compliance.yaml_io import load_yaml, todo_text
+from model_wtf.compliance.tables import CategoryRow, SensitivityRow
+from model_wtf.compliance.yaml_io import TODO, load_yaml
 
-SHARED_FOLDER = "compliance"
 USER_CONFIG = Path("~/.config/model-wtf/config.yml")
-
-README = """\
-# Compliance folder
-
-A compliance-oriented model of the application: its data, components and
-flows, declared in YAML and kept next to the code. `model-wtf compliance`
-reads it for static analysis and code review, and derives documents from
-it (the GDPR Art. 30 registry, the pytm threat model, ...).
-
-* `app.yaml` — what the product is, who is controller and who is processor.
-* `parties/<id>.yaml` — every organisation involved (client, agency,
-  hosting providers, SaaS vendors...). Whether one is controller, processor
-  or recipient is a role declared per processing activity, not here.
-
-Each image in `snow.yml` with a `compliance:` block is a *unit*; its own
-folder (next to its Dockerfile by default) holds what is specific to that
-codebase.
-
-Values a human still has to write are marked with the YAML tag `!todo`.
-Optional keys are simply omitted, never left `!todo`.
-
-    model-wtf compliance check     # validates schemas and lists open values
-    model-wtf compliance init      # re-run any time to add missing pieces
+GITIGNORE_BLOCK = """\
+# model-wtf: SQLite transient files (the database itself is committed)
+*.db-wal
+*.db-shm
+*.db-lock
 """
 
 
@@ -75,34 +59,35 @@ class PartySpec:
 
     @property
     def slug(self) -> str:
-        """File-name id derived from the legal name."""
+        """Party id derived from the legal name."""
         return slugify(self.name)
 
-    def to_yaml(self) -> str:
-        """Party file body; unknown contact fields are ``!todo``."""
-        lines = [f"name: {_scalar(self.name)}"]
+    def to_spec(self) -> dict[str, Any]:
+        """The party mapping; unknown contact fields are ``!todo``."""
+        spec: dict[str, Any] = {"name": self.name}
         for key in ("country", "address", "email"):
             value = getattr(self, key)
-            lines.append(f"{key}: {_scalar(value) if value else todo_text()}")
+            spec[key] = value if value else TODO
         for key in ("phone", "website", "registration", "safeguard"):
             value = getattr(self, key)
             if value:
-                lines.append(f"{key}: {_scalar(value)}")
+                spec[key] = value
         if self.hosts:
-            lines.append("hosts: [" + ", ".join(_scalar(h) for h in self.hosts) + "]")
+            spec["hosts"] = list(self.hosts)
         if self.dpf_certified is not None:
-            lines.append(f"dpf_certified: {'true' if self.dpf_certified else 'false'}")
-        return "\n".join(lines) + "\n"
+            spec["dpf_certified"] = self.dpf_certified
+        return spec
 
 
 @dataclass
 class InitResult:
     """What ``init`` did, for the summary printed to the user."""
 
-    created: list[Path] = field(default_factory=list)
+    created: list[str] = field(default_factory=list)
+    """What was created: file paths (relative) or ``db:<table>/<id>`` records."""
     patched: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
-    skipped: list[Path] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
 
     @property
     def changed(self) -> bool:
@@ -192,7 +177,6 @@ _CONFIG_KEYS = (
 
 
 def run_init(
-    root: Path,
     *,
     app_name: str,
     controller: PartySpec,
@@ -201,11 +185,8 @@ def run_init(
     custom_sensitivity: bool = False,
     custom_categories: bool = False,
     workflow: bool = True,
-    codeowners: bool | None = None,
-    owner_dpo: str | None = None,
-    owner_ciso: str | None = None,
 ) -> InitResult:
-    """Scaffold ``root``; see module docstring for the exact file set.
+    """Initialise the repository of the container; see the module docstring.
 
     Parameters
     ----------
@@ -213,48 +194,48 @@ def run_init(
         ``(id, context)`` pairs to write into ``.model-wtf.yml`` when the
         repo has no ``snow.yml``. Ignored otherwise.
     custom_sensitivity, custom_categories
-        Copy the built-in knowledge folder into ``compliance/`` so the repo
-        can edit, rename or extend it (see ``replaces`` in the README).
+        Seed the built-in scale / categories into the database so the repo
+        can edit, rename or extend them (``replaces`` keeps the rules
+        resolving).
     workflow
         Also write ``.github/workflows/compliance.yml`` running the gate on
         pull requests (never overwrites an existing file).
-    codeowners
-        Write the managed ``CODEOWNERS`` block (see :mod:`codeowners`).
-        ``None``: when the remote is GitHub; ``True``: required (an error
-        when no owner can be resolved); ``False``: skip.
-    owner_dpo, owner_ciso
-        Override the reviewing teams; also recorded in ``app.yaml``.
     """
+    container = get_container()
+    root = container.root
     result = InitResult()
-    shared = root / SHARED_FOLDER
-    parties = shared / PARTIES_DIR
 
-    _write(shared / "README.md", README, result)
-    _write(shared / APP_FILE, _app_yaml(app_name, controller, processor), result)
-    _write(parties / f"{controller.slug}.yaml", controller.to_yaml(), result)
-    if processor is not None and processor.slug != controller.slug:
-        _write(parties / f"{processor.slug}.yaml", processor.to_yaml(), result)
+    existed = container.db_path.exists()
+    if save_app(
+        name=app_name,
+        description=TODO,
+        controller=controller.slug,
+        processor=processor.slug if processor is not None else None,
+    ):
+        result.created.append("db:app")
+    else:
+        result.skipped.append("db:app")
+    if not existed:
+        result.created.insert(0, _rel(container.db_path, root))
+    for spec in (controller, processor):
+        if spec is None or (spec is processor and spec.slug == controller.slug):
+            continue
+        record = f"db:parties/{spec.slug}"
+        if save_party(spec.slug, spec.to_spec()):
+            result.created.append(record)
+        else:
+            result.skipped.append(record)
 
     if workflow:
-        _write(root / ".github" / "workflows" / "compliance.yml", WORKFLOW, result)
-    if custom_sensitivity:
-        _copy_knowledge(SENSITIVITY_DIR, shared, result)
-    if custom_categories:
-        _copy_knowledge(CATEGORIES_DIR, shared, result)
-
-    for folder in _ensure_manifest(root, result, manifest_units or []):
-        if folder == shared.resolve():
-            # Image built from the repo root with no Dockerfile subfolder: its
-            # unit folder *is* the shared folder, which already exists by now.
-            continue
-        if not folder.is_dir():
-            folder.mkdir(parents=True)
-            (folder / ".gitkeep").write_text("", encoding="utf-8")
-            result.created.append(folder)
-    if codeowners is not False:
-        _codeowners(
-            root, result, required=codeowners is True, dpo=owner_dpo, ciso=owner_ciso
+        _write(
+            root, root / ".github" / "workflows" / "compliance.yml", WORKFLOW, result
         )
+    if custom_sensitivity:
+        _seed_levels(result)
+    if custom_categories:
+        _seed_categories(result)
+    _ensure_manifest(root, result, manifest_units or [])
+    _gitignore(root, result)
     return result
 
 
@@ -262,83 +243,63 @@ class InitError(Exception):
     """A requested step cannot be done."""
 
 
-def _codeowners(
-    root: Path,
-    result: InitResult,
-    *,
-    required: bool,
-    dpo: str | None,
-    ciso: str | None,
-) -> None:
-    from model_wtf.compliance.codeowners import (
-        managed_block,
-        resolve_owners,
-        write_codeowners,
-    )
-    from model_wtf.compliance.discovery import (
-        load_units,
-        select_manifest,
-    )
-
-    declared = _declared_owners(root)
-    owners = resolve_owners(root, dpo=dpo, ciso=ciso, declared=declared)
-    if owners is None:
-        if required:
-            msg = (
-                "CODEOWNERS: origin is not a GitHub remote and no owner is declared; "
-                "pass --owner-dpo/--owner-ciso or set `owners:` in app.yaml"
+def _seed_levels(result: InitResult) -> None:
+    with get_db() as db:
+        for level_id, raw in builtin_entries(SENSITIVITY_DIR).items():
+            record = f"db:sensitivity/{level_id}"
+            if db.get(SensitivityRow, level_id) is not None:
+                result.skipped.append(record)
+                continue
+            db.add(
+                SensitivityRow(
+                    id=level_id,
+                    rank=int(raw["rank"]),
+                    description=raw["description"],
+                    criteria=raw["criteria"],
+                    handling=raw["handling"],
+                    dpia=str(raw.get("dpia", "never")),
+                    replaces=list(raw.get("replaces", [])),
+                )
             )
-            raise InitError(msg)
-        result.notes.append("CODEOWNERS skipped: origin is not on GitHub")
+            result.created.append(record)
+
+
+def _seed_categories(result: InitResult) -> None:
+    with get_db() as db:
+        for cat_id, raw in builtin_entries(CATEGORIES_DIR).items():
+            record = f"db:categories/{cat_id}"
+            if db.get(CategoryRow, cat_id) is not None:
+                result.skipped.append(record)
+                continue
+            db.add(
+                CategoryRow(
+                    id=cat_id,
+                    description=raw["description"],
+                    examples=list(raw.get("examples", [])),
+                    register_label=raw["register_label"],
+                    legal=str(raw.get("legal", "none")),
+                    dpia=bool(raw.get("dpia", False)),
+                    replaces=list(raw.get("replaces", [])),
+                )
+            )
+            result.created.append(record)
+
+
+def _gitignore(root: Path, result: InitResult) -> None:
+    """Add the SQLite sidecars to ``.gitignore`` (once)."""
+    path = root / ".gitignore"
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    wanted = [line for line in GITIGNORE_BLOCK.splitlines() if line.startswith("*")]
+    present = set(text.splitlines())
+    if all(line in present for line in wanted):
+        result.skipped.append(".gitignore")
         return
-    if dpo or ciso:
-        _record_owners(root, owners, result)
-    try:
-        units, _ = load_units(select_manifest(root), root, strict=False)
-    except Exception:
-        units = []
-    path, changed = write_codeowners(root, managed_block(units, owners, root))
-    if changed:
-        result.patched.append(f"{path.relative_to(root)} ({owners.dpo}, {owners.ciso})")
-    else:
-        result.skipped.append(path)
-
-
-def _declared_owners(root: Path) -> dict[str, str]:
-    from model_wtf.compliance.yaml_io import load_yaml
-
-    raw = load_yaml(root / SHARED_FOLDER / APP_FILE) or {}
-    owners = raw.get("owners") if isinstance(raw, dict) else None
-    return (
-        {str(k): str(v) for k, v in owners.items()} if isinstance(owners, dict) else {}
-    )
-
-
-def _record_owners(root: Path, owners: object, result: InitResult) -> None:
-    """Write ``owners:`` into ``app.yaml`` with a round-trip editor."""
-    import io
-
-    from ruamel.yaml import YAML
-
-    path = root / SHARED_FOLDER / APP_FILE
-    if not path.is_file():
-        return
-    y = YAML()
-    y.preserve_quotes = True
-    y.width = 4096
-    doc = y.load(path.read_text(encoding="utf-8")) or {}
-    doc["owners"] = {"dpo": owners.dpo, "ciso": owners.ciso}  # type: ignore[attr-defined]
-    buf = io.StringIO()
-    y.dump(doc, buf)
-    path.write_text(buf.getvalue(), encoding="utf-8")
-    result.patched.append(f"{path.relative_to(root)} (owners)")
-
-
-def _copy_knowledge(name: str, shared: Path, result: InitResult) -> None:
-    """Copy every built-in file of ``name`` into ``shared/name`` (no overwrite)."""
-    source = Path(str(resources.files("model_wtf.knowledge").joinpath(name)))
-    for path in sorted(source.glob("*.yaml")):
-        _write(shared / name / path.name, path.read_text(encoding="utf-8"), result)
+    if text and not text.endswith("\n"):
+        text += "\n"
+    if text:
+        text += "\n"
+    path.write_text(text + GITIGNORE_BLOCK, encoding="utf-8")
+    result.patched.append(".gitignore (SQLite transient files)")
 
 
 def guess_discovery(code_root: Path) -> str:
@@ -376,46 +337,26 @@ def detect_dockerfiles(root: Path) -> list[tuple[str, str]]:
     return found
 
 
-def _app_yaml(name: str, controller: PartySpec, processor: PartySpec | None) -> str:
-    lines = [
-        f"name: {_scalar(name)}",
-        f"description: {todo_text()}",
-        f"controller: {controller.slug}",
-    ]
-    if processor is not None:
-        lines.append(f"processor: {processor.slug}")
-    return "\n".join(lines) + "\n"
-
-
 def _ensure_manifest(
     root: Path, result: InitResult, proposed: list[tuple[str, str]]
-) -> list[Path]:
-    """Patch ``snow.yml`` or create ``.model-wtf.yml``; return unit folders."""
+) -> None:
+    """Patch ``snow.yml`` or create ``.model-wtf.yml``."""
     snow = root / SNOW_MANIFEST
     if snow.is_file():
-        return _patch_snow(root, snow, result)
+        _patch_snow(root, snow, result)
+        return
     fallback = root / FALLBACK_MANIFEST
-    if fallback.is_file():
-        data = load_yaml(fallback) or {}
-        return [
-            normalise_folder(
-                root, str(u.get("context", ".")), u.get("dockerfile"), None
-            )
-            for u in data.get("units", [])
-            if u.get("compliance")
-        ]
-    if not proposed:
-        return []
+    if fallback.is_file() or not proposed:
+        return
     body = "units:\n" + "".join(
         f"  - id: {uid}\n    context: {ctx}\n    compliance:\n"
         f"      discover: {guess_discovery(root / ctx)}\n"
         for uid, ctx in proposed
     )
-    _write(fallback, body, result)
-    return [normalise_folder(root, ctx, None, None) for _, ctx in proposed]
+    _write(root, fallback, body, result)
 
 
-def _patch_snow(root: Path, snow: Path, result: InitResult) -> list[Path]:
+def _patch_snow(root: Path, snow: Path, result: InitResult) -> None:
     """Add a ``compliance:`` block to images lacking it, textually.
 
     Re-serialising the whole document (even with a round-trip loader)
@@ -428,17 +369,13 @@ def _patch_snow(root: Path, snow: Path, result: InitResult) -> list[Path]:
     lines = text.splitlines(keepends=True)
     data: Any = YAML().load(text) or {}
     images = data.get("images") or []
-    folders: list[Path] = []
     insertions: list[tuple[int, str]] = []
     for image in images:
         if not isinstance(image, dict) or "id" not in image:
             continue
         context = str(image.get("context", "."))
         dockerfile = image.get("dockerfile")
-        existing = image.get("compliance")
-        custom_dir = existing.get("dir") if isinstance(existing, dict) else None
-        folders.append(normalise_folder(root, context, dockerfile, custom_dir))
-        if existing:
+        if image.get("compliance"):
             continue
         first_line, column = image.lc.line, image.lc.col  # type: ignore[attr-defined]
         # The item ends where the next item starts, or where the sequence's
@@ -460,7 +397,6 @@ def _patch_snow(root: Path, snow: Path, result: InitResult) -> list[Path]:
         lines.insert(line_no, content)
     if insertions:
         snow.write_text("".join(lines), encoding="utf-8")
-    return folders
 
 
 def _block_end(lines: list[str], start: int, column: int) -> int:
@@ -484,18 +420,30 @@ def _block_end(lines: list[str], start: int, column: int) -> int:
     return last_content
 
 
-def _write(path: Path, content: str, result: InitResult) -> None:
+def _write(root: Path, path: Path, content: str, result: InitResult) -> None:
     if path.exists():
-        result.skipped.append(path)
+        result.skipped.append(_rel(path, root))
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
-    result.created.append(path)
+    result.created.append(_rel(path, root))
 
 
-def _scalar(value: str) -> str:
-    """Quote a YAML scalar only when it would otherwise be misparsed."""
-    needs_quotes = value == "" or re.search(r'[:#\[\]{},&*!|>%@`"\']|^\s|\s$', value)
-    if needs_quotes or value.lower() in {"yes", "no", "true", "false", "null", "~"}:
-        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
-    return value
+def _rel(path: Path, root: Path) -> str:
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
+__all__ = [
+    "GITIGNORE_BLOCK",
+    "InitError",
+    "InitResult",
+    "PartySpec",
+    "detect_dockerfiles",
+    "guess_discovery",
+    "load_default_processor",
+    "run_init",
+    "slugify",
+]

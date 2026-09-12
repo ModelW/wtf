@@ -7,8 +7,8 @@ from the touchpoints it lists: the data items they handle, hence the
 categories, the stores, the maximum sensitivity and the DPIA trigger, and
 the units involved.
 
-Activities live at the repository root, ``compliance/activities/<slug>.yaml``,
-because they span units::
+Activities are rows of the ``activities`` table (they span units); read as
+a mapping one looks like::
 
     name: Order fulfilment
     purpose: Take, pay and deliver restaurant orders
@@ -17,7 +17,7 @@ because they span units::
     touchpoints: [front:/checkout, api:checkout, api:task:orders.send_receipt]
     recipients: [stripe]          # party ids; optional
     retention: 10 years (accounting)
-    controller: fah               # defaults to app.yaml's; processor likewise
+    controller: fah               # defaults to the app's; processor likewise
 
 Any legal field may be ``!todo``. "Process" is not used anywhere here: pytm
 reserves it for a running component.
@@ -29,22 +29,24 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
-import yaml
 from pydantic import Field, ValidationError, model_validator
+from sqlalchemy import select
 
+from model_wtf.compliance.db import get_db
 from model_wtf.compliance.declarations import format_errors
 from model_wtf.compliance.report import Diagnostic, Severity, marker_diagnostics
 from model_wtf.compliance.schemas import NonEmpty, Slug, StrictModel
-from model_wtf.compliance.yaml_io import Marker, Todo, load_yaml, marker_text, todo_text
+from model_wtf.compliance.tables import (
+    ActivityRecipientRow,
+    ActivityRow,
+    ActivityTouchpointRow,
+)
+from model_wtf.compliance.yaml_io import TODO, Marker, Todo
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from model_wtf.compliance.data import Row
     from model_wtf.compliance.knowledge import Dpia, Knowledge
     from model_wtf.compliance.touchpoints import Touchpoint
-
-ACTIVITIES_DIR = "activities"
 
 
 class LegalBasis(StrEnum):
@@ -76,7 +78,7 @@ class Consent(StrictModel):
 
 
 class ActivityFile(StrictModel):
-    """``activities/<slug>.yaml``."""
+    """One activity, as a mapping."""
 
     name: NonEmpty | Marker = Field(description="Short name of the activity")
     purpose: NonEmpty | Marker = Field(
@@ -158,16 +160,25 @@ class Derived:
     ``erase``...). The rights derivation works from this."""
 
 
+def activity_label(slug: str) -> str:
+    """How an activity is named in diagnostics and subjects."""
+    return f"activities/{slug}"
+
+
 @dataclass
 class Activity:
     """One activity with its derivation."""
 
     slug: str
     spec: ActivityFile
-    path: Path
     derived: Derived = field(default_factory=Derived)
     touchpoints: list[Touchpoint] = field(default_factory=list)
     """Resolved touchpoints (unknown references are reported, not kept)."""
+
+    @property
+    def label(self) -> str:
+        """``activities/<slug>``."""
+        return activity_label(self.slug)
 
     def to_dict(self) -> dict[str, Any]:
         """JSON form (``!todo`` values become ``null``)."""
@@ -213,15 +224,52 @@ class Activities:
         return [a for a in self.items.values() if full_id in a.spec.touchpoints]
 
 
+def _activity_raw(row: ActivityRow) -> dict[str, Any]:
+    raw: dict[str, Any] = {
+        "name": row.name,
+        "purpose": row.purpose,
+        "legal_basis": row.legal_basis,
+        "touchpoints": [f"{t.unit}:{t.touchpoint_id}" for t in row.touchpoints],
+        "data_subjects": row.data_subjects,
+        "recipients": [r.party_id for r in row.recipients],
+    }
+    if row.consent_record is not None or row.consent_granularity is not None:
+        consent: dict[str, Any] = {
+            "record": row.consent_record if row.consent_record is not None else TODO
+        }
+        if row.consent_granularity is not None:
+            consent["granularity"] = row.consent_granularity
+        raw["consent"] = consent
+    for key in (
+        "basis_note",
+        "interest",
+        "dpia_reference",
+        "retention",
+        "controller",
+        "processor",
+        "description",
+    ):
+        value = getattr(row, key)
+        if value is not None:
+            raw[key] = value
+    return raw
+
+
+def declared_activities() -> dict[str, dict[str, Any]]:
+    """Raw activity mappings by slug."""
+    with get_db() as db:
+        rows = db.scalars(select(ActivityRow).order_by(ActivityRow.slug)).all()
+        return {row.slug: _activity_raw(row) for row in rows}
+
+
 def load_activities(
-    shared: Path,
     touchpoints: dict[str, Touchpoint],
     rows: dict[str, Row],
     stores_of: dict[str, str | None],
     knowledge: Knowledge,
     parties: set[str] | None = None,
 ) -> Activities:
-    """Parse ``<shared>/activities/*.yaml`` and derive each one.
+    """Read the ``activities`` table and derive each one.
 
     ``touchpoints`` and ``rows`` are keyed by full id (``unit:id``);
     ``stores_of`` maps a data full id to its store full id. ``parties``
@@ -229,14 +277,12 @@ def load_activities(
     given.
     """
     result = Activities()
-    folder = shared / ACTIVITIES_DIR
-    if not folder.is_dir():
-        return result
-    for path in sorted(folder.glob("*.yaml")):
-        spec = _load(path, result.diagnostics)
+    for slug, raw in declared_activities().items():
+        label = activity_label(slug)
+        spec = _validate(raw, label, result.diagnostics)
         if spec is None:
             continue
-        activity = Activity(path.stem, spec, path)
+        activity = Activity(slug, spec)
         for ref in spec.touchpoints:
             tp = touchpoints.get(ref)
             if tp is None:
@@ -244,23 +290,22 @@ def load_activities(
                     Diagnostic(
                         Severity.ERROR,
                         "activity-unknown-touchpoint",
-                        f"{path.name}: no touchpoint {ref!r} "
+                        f"{label}: no touchpoint {ref!r} "
                         "(`touchpoints list` shows the ids)",
                         "shared",
-                        path,
                     )
                 )
                 continue
             activity.touchpoints.append(tp)
         if parties is not None:
-            _check_parties(spec, parties, path, result.diagnostics)
+            _check_parties(spec, parties, label, result.diagnostics)
         activity.derived = derive(activity.touchpoints, rows, stores_of, knowledge)
-        result.items[path.stem] = activity
+        result.items[slug] = activity
     return result
 
 
 def _check_parties(
-    spec: ActivityFile, parties: set[str], path: Path, diagnostics: list[Diagnostic]
+    spec: ActivityFile, parties: set[str], label: str, diagnostics: list[Diagnostic]
 ) -> None:
     named = [(role, getattr(spec, role)) for role in ("controller", "processor")]
     named += [("recipient", value) for value in spec.recipients]
@@ -268,9 +313,8 @@ def _check_parties(
         Diagnostic(
             Severity.ERROR,
             "party-unknown",
-            f"{path.name}: {role} {value!r} is not in parties/",
+            f"{label}: {role} {value!r} is not a declared party",
             "shared",
-            path,
         )
         for role, value in named
         if isinstance(value, str) and value not in parties
@@ -319,27 +363,9 @@ def derive(
     )
 
 
-def _load(path: Path, diagnostics: list[Diagnostic]) -> ActivityFile | None:
-    try:
-        raw = load_yaml(path)
-    except (OSError, yaml.YAMLError) as exc:
-        diagnostics.append(
-            Diagnostic(
-                Severity.ERROR, "yaml-error", f"{path.name}: {exc}", "shared", path
-            )
-        )
-        return None
-    if not isinstance(raw, dict):
-        diagnostics.append(
-            Diagnostic(
-                Severity.ERROR,
-                "schema-error",
-                f"{path.name}: expected a mapping",
-                "shared",
-                path,
-            )
-        )
-        return None
+def _validate(
+    raw: dict[str, Any], label: str, diagnostics: list[Diagnostic]
+) -> ActivityFile | None:
     try:
         spec = ActivityFile.model_validate(raw)
     except ValidationError as exc:
@@ -347,19 +373,17 @@ def _load(path: Path, diagnostics: list[Diagnostic]) -> ActivityFile | None:
             Diagnostic(
                 Severity.ERROR,
                 "schema-error",
-                f"{path.name}: {loc}: {msg}",
+                f"{label}: {loc}: {msg}",
                 "shared",
-                path,
             )
             for loc, msg in format_errors(exc)
         )
         return None
-    diagnostics.extend(marker_diagnostics(spec, path, "shared"))
+    diagnostics.extend(marker_diagnostics(spec, label, "shared"))
     return spec
 
 
 def write_activity(
-    shared: Path,
     slug: str,
     *,
     name: str | None,
@@ -372,78 +396,92 @@ def write_activity(
     basis_note: str | None = None,
     consent_record: str | Marker | None = None,
     interest: str | Marker | None = None,
-) -> Path | None:
-    """Write ``activities/<slug>.yaml``; ``None`` when it already exists.
+) -> bool:
+    """Create an activity; ``False`` when the slug already exists.
 
-    A :class:`Marker` value is written as its tag (``!todo`` / ``!missing
-    "note"``); ``None`` on a required field becomes ``!todo``. ``retention``
-    is only written when given: the policy lives in ``retention_purge`` ops.
+    A :class:`Marker` value is stored as such; ``None`` on a required field
+    becomes ``!todo``. ``retention`` is only stored when given: the policy
+    lives in ``retention_purge`` ops.
     """
-    path = shared / ACTIVITIES_DIR / f"{slug}.yaml"
-    if path.exists():
-        return None
 
-    def scalar(value: str | Marker | None) -> str:
-        if value is None or value == "":
-            return todo_text()
-        if isinstance(value, Marker):
-            return marker_text(value)
-        return yaml.safe_dump(value, width=10**6).strip().removesuffix("\n...")
+    def human(value: str | Marker | None) -> str | Marker:
+        return TODO if value is None or value == "" else value
 
-    lines = [
-        f"name: {scalar(name)}",
-        f"purpose: {scalar(purpose)}",
-        f"legal_basis: {scalar(legal_basis)}",
-    ]
-    optional: list[tuple[bool, str]] = [
-        (bool(basis_note), f"basis_note: {scalar(basis_note)}"),
-        (
-            legal_basis == LegalBasis.CONSENT or consent_record is not None,
-            f"consent:\n  record: {scalar(consent_record)}",
-        ),
-        (
-            legal_basis == LegalBasis.LEGITIMATE_INTERESTS or interest is not None,
-            f"interest: {scalar(interest)}",
-        ),
-    ]
-    lines.extend(text for wanted, text in optional if wanted)
-    subjects = "[" + ", ".join(data_subjects) + "]" if data_subjects else todo_text()
-    lines.append(f"data_subjects: {subjects}")
-    lines.append("touchpoints:" if touchpoints else "touchpoints: []")
-    lines.extend(f"  - {ref}" for ref in touchpoints)
-    if recipients:
-        lines.append("recipients: [" + ", ".join(recipients) + "]")
-    if retention:
-        lines.append(f"retention: {scalar(retention)}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return path
-
-
-def add_touchpoints(path: Path, refs: list[str]) -> list[str]:
-    """Append ``refs`` to an activity file's ``touchpoints`` list; return added.
-
-    Edits the YAML textually so hand formatting and comments survive.
-    """
-    text = path.read_text(encoding="utf-8")
-    raw = load_yaml(path) or {}
-    current = list(raw.get("touchpoints") or [])
-    added = [r for r in refs if r not in current]
-    if not added:
-        return []
-    if "touchpoints: []" in text:
-        text = text.replace(
-            "touchpoints: []", "touchpoints:\n" + "\n".join(f"  - {r}" for r in added)
+    with get_db() as db:
+        if db.get(ActivityRow, slug) is not None:
+            return False
+        row = ActivityRow(
+            slug=slug,
+            name=human(name),
+            purpose=human(purpose),
+            legal_basis=human(legal_basis),
+            basis_note=basis_note or None,
+            consent_record=(
+                human(consent_record)
+                if legal_basis == LegalBasis.CONSENT or consent_record is not None
+                else None
+            ),
+            interest=(
+                human(interest)
+                if legal_basis == LegalBasis.LEGITIMATE_INTERESTS
+                or interest is not None
+                else None
+            ),
+            data_subjects=list(data_subjects) if data_subjects else TODO,
+            retention=retention or None,
         )
-    else:
-        lines = text.splitlines()
-        index = next(
-            i for i, line in enumerate(lines) if line.startswith("touchpoints:")
-        )
-        end = index + 1
-        while end < len(lines) and lines[end].startswith("  - "):
-            end += 1
-        lines[end:end] = [f"  - {r}" for r in added]
-        text = "\n".join(lines) + "\n"
-    path.write_text(text, encoding="utf-8")
+        row.touchpoints = [
+            ActivityTouchpointRow(
+                slug=slug,
+                unit=ref.split(":", 1)[0],
+                touchpoint_id=ref.split(":", 1)[1],
+                position=index,
+            )
+            for index, ref in enumerate(touchpoints)
+        ]
+        row.recipients = [
+            ActivityRecipientRow(slug=slug, party_id=p) for p in recipients or []
+        ]
+        db.add(row)
+    return True
+
+
+def add_touchpoints(slug: str, refs: list[str]) -> list[str]:
+    """Append ``refs`` to an activity's touchpoint list; return the added ones."""
+    with get_db() as db:
+        row = db.get(ActivityRow, slug)
+        if row is None:
+            return []
+        current = {f"{t.unit}:{t.touchpoint_id}" for t in row.touchpoints}
+        added = [r for r in refs if r not in current and r not in added_seen(refs, r)]
+        for offset, ref in enumerate(added):
+            unit, _, tp_id = ref.partition(":")
+            row.touchpoints.append(
+                ActivityTouchpointRow(
+                    slug=slug,
+                    unit=unit,
+                    touchpoint_id=tp_id,
+                    position=len(row.touchpoints) + offset,
+                )
+            )
     return added
+
+
+def added_seen(refs: list[str], ref: str) -> set[str]:
+    """Refs listed before ``ref`` (so a duplicate in the input is added once)."""
+    return set(refs[: refs.index(ref)])
+
+
+def activities_of_touchpoint(unit_id: str, touchpoint_id: str) -> list[str]:
+    """Slugs of the activities listing ``unit:touchpoint_id``."""
+    with get_db() as db:
+        return list(
+            db.scalars(
+                select(ActivityTouchpointRow.slug)
+                .where(
+                    ActivityTouchpointRow.unit == unit_id,
+                    ActivityTouchpointRow.touchpoint_id == touchpoint_id,
+                )
+                .order_by(ActivityTouchpointRow.slug)
+            ).all()
+        )

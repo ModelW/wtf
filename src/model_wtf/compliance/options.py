@@ -67,3 +67,11 @@ def model_option(help_text: str = "provider/model.") -> Callable[[F], F]:
 def resolve_root(root: Path | None) -> Path:
     """Absolute repository root from the option value or the cwd."""
     return root.resolve() if root else find_repo_root(Path.cwd())
+
+
+def configure_root(root: Path | None) -> Path:
+    """Resolve the root and populate the container: the first thing every
+    command does, so the library below never takes a ``root`` argument."""
+    from model_wtf.compliance.container import configure
+
+    return configure(resolve_root(root)).root

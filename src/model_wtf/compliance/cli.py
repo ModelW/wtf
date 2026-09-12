@@ -31,7 +31,7 @@ from model_wtf.compliance.init_cmd import (
     run_init,
 )
 from model_wtf.compliance.knowledge import load_knowledge
-from model_wtf.compliance.options import ROOT_OPTION, model_option, resolve_root
+from model_wtf.compliance.options import ROOT_OPTION, configure_root, model_option
 from model_wtf.compliance.render import (
     render_gate_github,
     render_gate_json,
@@ -44,7 +44,6 @@ from model_wtf.compliance.render import (
 from model_wtf.compliance.stores_cli import stores
 from model_wtf.compliance.threats_cli import threats
 from model_wtf.compliance.touchpoints_cli import activities, touchpoints
-from model_wtf.compliance.workspace import SHARED_FOLDER
 from model_wtf.opencode import OpenCodeUnavailable, can_run
 
 
@@ -109,10 +108,8 @@ def check(
     """
     console = Console()
     try:
-        resolved_root = resolve_root(root)
-        report = run_check(
-            resolved_root, strict=strict, python=python, allow_todo=allow_todo
-        )
+        configure_root(root)
+        report = run_check(strict=strict, python=python, allow_todo=allow_todo)
         if todo_only:
             render_todo(report, console)
         elif output_format == "json":
@@ -220,8 +217,8 @@ def ghate(
     if output_format == "auto":
         output_format = "github" if context is not None else "text"
     try:
+        configure_root(root)
         result = run_gate(
-            resolve_root(root),
             base_ref=base_ref,
             head_ref=head_ref,
             strict=strict,
@@ -248,14 +245,16 @@ def ghate(
 def _challenger_hook(
     *, python: str | None, model: str, commit: bool
 ) -> Callable[[Path, str], None]:
-    """The ``before_head`` step of the gate: run the challenger, maybe commit."""
+    """The ``before_head`` step of the gate: run the challenger, maybe commit.
+
+    The gate has already pointed the container at ``head_root`` when the
+    hook runs."""
 
     def hook(head_root: Path, base_sha: str) -> None:
         console = Console(stderr=True)
         units, _ = load_units(select_manifest(head_root), head_root, strict=False)
-        knowledge = load_knowledge(head_root / SHARED_FOLDER)
+        knowledge = load_knowledge()
         result = challenge(
-            head_root,
             units,
             knowledge,
             base=base_sha,
@@ -304,11 +303,10 @@ def challenge_cmd(
     """
     console = Console()
     try:
-        resolved = resolve_root(root)
+        resolved = configure_root(root)
         units, _ = load_units(select_manifest(resolved), resolved, strict=False)
-        knowledge = load_knowledge(resolved / SHARED_FOLDER)
+        knowledge = load_knowledge()
         result = challenge(
-            resolved,
             units,
             knowledge,
             base=base_ref,
@@ -330,7 +328,7 @@ def challenge_cmd(
 
 
 @compliance.command()
-@click.option("--name", "app_name", help="Product name (app.yaml#name).")
+@click.option("--name", "app_name", help="Product name.")
 @click.option("--controller-name", help="Legal name of the controller (the client).")
 @click.option("--controller-country", help="Controller country, ISO 3166-1 alpha-2.")
 @click.option("--processor-name", help="Legal name of the processor (the agency).")
@@ -346,25 +344,14 @@ def challenge_cmd(
     help="Do not write .github/workflows/compliance.yml (the PR gate).",
 )
 @click.option(
-    "--codeowners/--no-codeowners",
-    "codeowners",
-    default=None,
-    help="Write the managed CODEOWNERS block (default: when origin is on GitHub; "
-    "--codeowners makes it an error when no owner can be resolved).",
-)
-@click.option("--owner-dpo", default=None, help="GitHub team reviewing the register.")
-@click.option(
-    "--owner-ciso", default=None, help="GitHub team reviewing the security posture."
-)
-@click.option(
     "--custom-sensitivity",
     is_flag=True,
-    help="Copy the built-in sensitivity scale to compliance/sensitivity/ for editing.",
+    help="Seed the built-in sensitivity scale into the database for editing.",
 )
 @click.option(
     "--custom-categories",
     is_flag=True,
-    help="Copy the built-in categories to compliance/categories/ for editing.",
+    help="Seed the built-in categories into the database for editing.",
 )
 @ROOT_OPTION
 @click.pass_context
@@ -378,21 +365,18 @@ def init(
     processor_country: str | None,
     no_processor: bool,
     no_workflow: bool,
-    codeowners: bool | None,
-    owner_dpo: str | None,
-    owner_ciso: str | None,
     custom_sensitivity: bool,
     custom_categories: bool,
     root: Path | None,
 ) -> None:
-    """Scaffold compliance/ (app manifest, parties) and wire the units.
+    """Create compliance.db (app, parties) and wire the units.
 
     Missing values are prompted for on a terminal; the processor defaults
     to `default_processor` from ~/.config/model-wtf/config.yml. Never
     overwrites anything: re-run to add what is missing.
     """
     console = Console()
-    resolved_root = resolve_root(root)
+    resolved_root = configure_root(root)
 
     app_name = _ask(app_name, "Product name")
     controller = PartySpec(
@@ -419,7 +403,6 @@ def init(
 
     try:
         result = run_init(
-            resolved_root,
             app_name=app_name,
             controller=controller,
             processor=processor,
@@ -427,25 +410,18 @@ def init(
             custom_sensitivity=custom_sensitivity,
             workflow=not no_workflow,
             custom_categories=custom_categories,
-            codeowners=codeowners,
-            owner_dpo=owner_dpo,
-            owner_ciso=owner_ciso,
         )
     except InitError as exc:
         Console(stderr=True).print(Text.assemble(("Error: ", "red"), str(exc)))
         ctx.exit(2)
     for note in result.notes:
         console.print(Text.assemble(("note", "dim"), "     ", note))
-    for path in result.created:
-        console.print(
-            Text.assemble(("created", "green"), "  ", _rel(path, resolved_root))
-        )
+    for what in result.created:
+        console.print(Text.assemble(("created", "green"), "  ", what))
     for what in result.patched:
         console.print(Text.assemble(("patched", "green"), "  ", what))
-    for path in result.skipped:
-        console.print(
-            Text.assemble(("exists", "dim"), "   ", _rel(path, resolved_root))
-        )
+    for what in result.skipped:
+        console.print(Text.assemble(("exists", "dim"), "   ", what))
     if result.changed:
         console.print(
             Text.assemble(
@@ -472,10 +448,3 @@ def _ask(value: str | None, prompt: str) -> str:
         raise click.UsageError(msg)
     answer: str = click.prompt(prompt, type=str)
     return answer
-
-
-def _rel(path: Path, root: Path) -> str:
-    try:
-        return str(path.relative_to(root))
-    except ValueError:
-        return str(path)

@@ -3,9 +3,9 @@
 Nobody expects a repository to be clean on day one; ``ghate`` (the GitHub
 gate) expects it to *not get worse*. It runs the whole ``compliance check``
 twice — on the base ref, checked out into a temporary ``git worktree`` with
-its own ``compliance/`` state, and on the head (the working tree by
-default, so uncommitted work is gated too) — and compares the two sets of
-findings by stable identity.
+its own ``compliance.db``, and on the head (the working tree by default,
+so uncommitted work is gated too) — and compares the two sets of findings
+by stable identity.
 
 A finding's identity is ``(scope, code, subject)`` — a data id, a
 touchpoint id, an activity slug, ``file#field`` for a marker — never a
@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from model_wtf.compliance.check import run_check
+from model_wtf.compliance.container import get_container, using_root
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.report import Diagnostic, Report, Section
 
@@ -183,7 +184,6 @@ def compare(head: Report, base: Report, *, base_ref: str) -> GateResult:
 
 
 def run_gate(
-    root: Path,
     *,
     base_ref: str,
     head_ref: str | None = None,
@@ -193,31 +193,35 @@ def run_gate(
 ) -> GateResult:
     """Run ``check`` on both sides and compare.
 
-    ``head_ref`` defaults to the working tree as it is; a ref checks that
-    revision out into a worktree instead. The base always runs in a
-    worktree that is removed afterwards, whatever happens. ``before_head``
-    runs on the head tree with the base sha before its check — the
-    challenger hooks in there, so what it re-opens counts as introduced.
+    The repository is the container's. ``head_ref`` defaults to the
+    working tree as it is; a ref checks that revision out into a worktree
+    instead. The base always runs in a worktree that is removed afterwards,
+    whatever happens; the container points at each checkout while its
+    check runs. ``before_head`` runs on the head tree with the base sha
+    before its check — the challenger hooks in there, so what it re-opens
+    counts as introduced.
     """
-    root = root.resolve()
+    root = get_container().root
     _ensure_git(root)
     base_sha = _rev_parse(root, base_ref)
     warnings: list[str] = []
     with _worktree(root, base_sha) as base_root:
         warnings.extend(_carry_environments(root, base_root))
-        base = run_check(base_root, strict=strict, python=python, allow_todo=True)
+        with using_root(base_root):
+            base = run_check(strict=strict, python=python, allow_todo=True)
         if head_ref is None:
             if before_head is not None:
                 before_head(root, base_sha)
-            head = run_check(root, strict=strict, python=python, allow_todo=True)
+            head = run_check(strict=strict, python=python, allow_todo=True)
         else:
-            with _worktree(root, _rev_parse(root, head_ref)) as head_root:
+            with (
+                _worktree(root, _rev_parse(root, head_ref)) as head_root,
+                using_root(head_root),
+            ):
                 warnings.extend(_carry_environments(root, head_root))
                 if before_head is not None:
                     before_head(head_root, base_sha)
-                head = run_check(
-                    head_root, strict=strict, python=python, allow_todo=True
-                )
+                head = run_check(strict=strict, python=python, allow_todo=True)
     result = compare(head, base, base_ref=base_ref)
     result.warnings = warnings
     return result
@@ -495,12 +499,14 @@ __all__ = [
 
 
 def commit_challenges(root: Path, refs: list[str], *, base_sha: str) -> str | None:
-    """Commit the lock/manifest changes the challenger made; the sha, or
-    ``None`` when nothing changed. Only compliance folders are staged."""
-    status = _git(root, "status", "--porcelain", "--", "*compliance*")
+    """Commit the database changes the challenger made; the sha, or ``None``
+    when nothing changed. Only the compliance database is staged."""
+    from model_wtf.compliance.container import DB_FILE
+
+    status = _git(root, "status", "--porcelain", "--", DB_FILE)
     if not status.strip():
         return None
-    _git(root, "add", "--", "*compliance*")
+    _git(root, "add", "--", DB_FILE)
     body = "\n".join(f"- {ref}" for ref in refs)
     message = (
         f"[compliance] Challenge {len(refs)} review(s) after {base_sha[:12]}\n\n"
