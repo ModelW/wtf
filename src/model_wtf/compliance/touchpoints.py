@@ -614,13 +614,19 @@ def collect_touchpoints(
 
 
 def link_calls(all_units: dict[str, UnitTouchpoints]) -> None:
-    """Resolve SvelteKit ``calls`` (operation ids) to Django touchpoints.
+    """Resolve SvelteKit ``calls`` (operation ids) and relative ``fetches``
+    to touchpoints of the project.
 
     Rewrites each front touchpoint's ``calls`` to full ids of the api
-    touchpoints whose ``operation_id`` matches; unknown operation ids are
-    kept verbatim so they still show up.
+    touchpoints whose ``operation_id`` matches (unknown operation ids are
+    kept verbatim so they still show up), and adds the touchpoints a raw
+    ``fetch("/api/document-sign")`` reaches: a path with no host is the
+    project itself — one of its routes when one matches, never a party or
+    a store. Such fetches leave ``facts.fetches`` so the flow resolver
+    does not see them as an outbound host.
     """
     by_operation: dict[str, str] = {}
+    by_path: dict[str, str] = {}
     for unit_tps in all_units.values():
         for tp in unit_tps.items:
             if tp.facts.operation_id:
@@ -628,12 +634,60 @@ def link_calls(all_units: dict[str, UnitTouchpoints]) -> None:
                 # -> ``kitchenOrders``); index both spellings.
                 by_operation[tp.facts.operation_id] = tp.full_id
                 by_operation[_camel(tp.facts.operation_id)] = tp.full_id
+            for route_path in _route_paths(tp):
+                by_path.setdefault(route_path, tp.full_id)
     for unit_tps in all_units.values():
         for index, tp in enumerate(unit_tps.items):
-            if not tp.facts.calls:
-                continue
-            resolved = tuple(by_operation.get(c, c) for c in tp.facts.calls)
-            unit_tps.items[index] = replace(tp, calls=resolved)
+            if tp.facts.calls or tp.facts.fetches:
+                unit_tps.items[index] = _link_one(tp, by_operation, by_path)
+
+
+def _link_one(
+    tp: Touchpoint, by_operation: dict[str, str], by_path: dict[str, str]
+) -> Touchpoint:
+    """One touchpoint's ``calls`` resolved and its relative fetches folded
+    into them (see :func:`link_calls`)."""
+    resolved = [by_operation.get(c, c) for c in tp.facts.calls]
+    outbound = []
+    for fetched in tp.facts.fetches:
+        if not fetched.startswith("/"):
+            outbound.append(fetched)
+            continue
+        target = by_path.get(_norm_path(fetched))
+        if target is not None and target not in resolved:
+            resolved.append(target)
+        # A relative path nothing serves stays internal: dropped from the
+        # outbound facts either way.
+    facts = tp.facts
+    if outbound != list(facts.fetches):
+        facts = facts.model_copy(update={"fetches": outbound})
+    return replace(tp, facts=facts, calls=tuple(resolved))
+
+
+def _route_paths(tp: Touchpoint) -> list[str]:
+    """Paths a fetch may name this route by: a SvelteKit route ID is the
+    path itself (``/api/document-sign``); a Django route's ``path`` is
+    relative to the unit's mount (``api/orders/checkout``), so it is
+    indexed with and without the ``back/`` prefix the front reaches it by."""
+    if tp.facts.kind is not Kind.ROUTE:
+        return []
+    if tp.facts.path:
+        path = _norm_path("/" + tp.facts.path)
+        return [path, _norm_path("/back" + path)]
+    if tp.id.startswith("/"):
+        # A SvelteKit route: the id is the route ID, which is the path.
+        return [_norm_path(tp.id)]
+    return []
+
+
+def _norm_path(path: str) -> str:
+    """One spelling for a route path and a fetch literal: no query string,
+    no trailing slash, SvelteKit layout groups dropped, route params
+    (``[id]``, ``<int:pk>``) and template holes (``${id}``) both ``*``."""
+    path = path.split("?", 1)[0]
+    path = re.sub(r"/\([^)]*\)", "", path)
+    path = re.sub(r"\[[^\]]*\]|<[^>]*>|\$\{[^}]*\}", "*", path)
+    return re.sub(r"/+", "/", path).rstrip("/") or "/"
 
 
 def _camel(snake: str) -> str:

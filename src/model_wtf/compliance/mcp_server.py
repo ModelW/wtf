@@ -392,29 +392,35 @@ class Tools:
         hosts: list[str] | None = None,
         description: str | None = None,
     ) -> str:
-        """``store_add``: declare a store the settings do not show."""
-        from model_wtf.compliance.stores import StoreType
+        """``store_add``: declare a store the settings do not show.
+
+        Refused when a visible store of the unit shares a host / settings
+        name, or has an alike name or slug: the SMTP relay declared three
+        times under three slugs is one store. The refusal is final for an
+        agent; a human who knows better marks the pair distinct on the
+        command line.
+        """
+        from model_wtf.compliance.stores import DuplicateStore, find_store_lookalikes
 
         unit = self.unit(unit_id)
+        doc: dict[str, Any] = {"type": _store_type(type_), "name": name.strip()}
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", slug):
             msg = f"store slug {slug!r} must be kebab-case (e.g. `tmw`)"
             raise ValueError(msg)
-        try:
-            kind = StoreType(type_)
-        except ValueError:
-            allowed = ", ".join(t.value for t in StoreType)
-            msg = f"type must be one of {allowed}"
-            raise ValueError(msg) from None
-        if not name.strip():
+        if not doc["name"]:
             msg = "a human name is required"
             raise ValueError(msg)
-        doc: dict[str, Any] = {"type": kind.value, "name": name.strip()}
-        if backend:
-            doc["backend"] = backend.strip()
+        for key, value in (("backend", backend), ("description", description)):
+            if value and value.strip():
+                doc[key] = value.strip()
         if hosts:
             doc["hosts"] = [h.strip() for h in hosts if h.strip()]
-        if description:
-            doc["description"] = description.strip()
+        existing = self.data(unit).stores
+        if existing.get(slug) is not None:
+            return f"store {unit_id}:{slug} already exists"
+        lookalikes = find_store_lookalikes(unit, existing, slug, doc)
+        if lookalikes:
+            raise DuplicateStore(unit.id, slug, lookalikes)
         if not save_store(unit.id, slug, doc):
             return f"store {unit_id}:{slug} already exists"
         self._data.pop(unit.id, None)
@@ -1199,7 +1205,13 @@ class Tools:
         dpf_certified: bool | None = None,
         hosts: list[str] | None = None,
     ) -> str:
-        """``party_add``: a new external party with ``!todo`` contact details."""
+        """``party_add``: a new external party with ``!todo`` contact details.
+
+        Refused when an existing party has a similar name, shares a domain
+        or has a similar id (the agent reuses that id), and when the party
+        names a store of the project (mail, error monitoring: the agent
+        declares a store write instead).
+        """
         from model_wtf.compliance.init_cmd import PartySpec
 
         if safeguard is not None and safeguard not in (
@@ -1228,7 +1240,8 @@ class Tools:
             safeguard=safeguard,
             dpf_certified=dpf_certified,
         )
-        if not save_party(party_id, spec.to_spec()):
+        stores = [s for u in self.units for s in self.data(u).stores.visible()]
+        if not save_party(party_id, spec.to_spec(), stores=stores):
             return f"party {party_id} already exists"
         self._workspace = None
         _log_activity("party", id=party_id, name=name.strip())
@@ -1734,10 +1747,14 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
             "Declare a store of the project that the settings do not show: a "
             "realtime document server, a search index, a spreadsheet export... "
             "{unit, slug (kebab), type (database|cache|bucket|filesystem|queue|"
-            "search|realtime|external|browser), name, backend?, hosts? (the "
+            "search|realtime|mail|external|browser), name, backend?, hosts? (the "
             "hostnames or settings names the code reaches it by, e.g. TMW_URL), "
             "description?}. Not for another organisation's service: that is "
-            "party_add."
+            "party_add. Not for outgoing email: `mail-default` "
+            "exists whenever Django is configured to send mail. Check stores_list "
+            "first: the call is refused when a store of the unit shares a host or "
+            "settings name, or has a similar name or slug — it is that store, "
+            "use its slug."
         ),
     )
     def store_add(
@@ -1896,7 +1913,11 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
             "provider): {id (kebab), name, website?, country? (ISO-2, only if "
             "sure), hosts? (API hostnames the code calls, e.g. api.hubapi.com, "
             "when they differ from the website's domain)}. Contact details are "
-            "left !todo for a human."
+            "left !todo for a human. Check parties_list first: the call is "
+            "refused when a declared party has a similar name, the same domain "
+            "or a similar id — it is that party, reuse its id. Also refused "
+            "when the name is a store of the project (mail, Sentry): that is "
+            "a store write, not a transfer."
         ),
     )
     def party_add(
@@ -2124,6 +2145,18 @@ def _touchpoint_files(tp: Touchpoint) -> list[str]:
     files = [facts.file] if facts.file else []
     files.extend(facts.files)
     return files
+
+
+def _store_type(value: str) -> str:
+    """``value`` as a :class:`StoreType` member's value, or a clear error."""
+    from model_wtf.compliance.stores import StoreType
+
+    try:
+        return StoreType(value).value
+    except ValueError:
+        allowed = ", ".join(t.value for t in StoreType)
+        msg = f"type must be one of {allowed}"
+        raise ValueError(msg) from None
 
 
 def _guard(call: Callable[[], str]) -> str:

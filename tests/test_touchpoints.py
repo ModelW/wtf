@@ -917,3 +917,51 @@ def test_auth_wrappers_applied_around_the_view_are_facts() -> None:
         co_filename="/x/site-packages/django/contrib/auth/decorators.py"
     )
     assert _wrapper_auth(wrapped) == ["login_required"]
+
+
+def test_link_calls_resolves_relative_fetches_to_the_projects_routes() -> None:
+    """`fetch("/api/document-sign")` from a page is a call to the route
+    that serves it, not a fetch of an outbound host: the edge is derived
+    and the path leaves `fetches`, so no party or store is ever expected
+    for the project's own endpoint."""
+    from model_wtf.compliance.report import Unit
+    from model_wtf.compliance.touchpoints import (
+        Introspected,
+        Touchpoint,
+        UnitTouchpoints,
+        link_calls,
+    )
+
+    def tp(unit: str, **facts: object) -> Touchpoint:
+        return Touchpoint(unit=unit, facts=Introspected.model_validate(facts))
+
+    front = UnitTouchpoints(Unit("front", Path("front"), "sveltekit"))
+    api = UnitTouchpoints(Unit("api", Path("api"), "django"))
+    front.items = [
+        tp(
+            "front",
+            id="/(portal)/agreements",
+            fetches=[
+                "/api/document-sign",
+                "/back/api/orders/checkout",
+                "hooks.example.com",
+            ],
+            calls=["whoami"],
+        ),
+        tp("front", id="/api/document-sign", handlers=["POST"]),
+        tp("front", id="/orders/[id]", fetches=["/api/nothing-serves-this"]),
+    ]
+    api.items = [
+        tp("api", id="checkout", path="api/orders/checkout", operation_id="checkout"),
+        tp("api", id="whoami", path="api/whoami", operation_id="whoami"),
+    ]
+    link_calls({"front": front, "api": api})
+
+    page = front.get("/(portal)/agreements")
+    assert page is not None
+    assert page.calls == ("api:whoami", "front:/api/document-sign", "api:checkout")
+    assert page.facts.fetches == ["hooks.example.com"]  # the real outbound one
+    orphan = front.get("/orders/[id]")
+    assert orphan is not None
+    assert orphan.calls == ()
+    assert orphan.facts.fetches == []  # relative: internal, whatever serves it

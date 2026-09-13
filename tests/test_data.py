@@ -105,6 +105,28 @@ def test_detect_runner_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert detect_runner(tmp_path, "/explicit").kind == "explicit"
 
 
+def test_unit_subprocess_does_not_inherit_our_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`uv run model-wtf` exports VIRTUAL_ENV (and puts its bin/ first on
+    PATH); passed through, `poetry run` / `uv run` in the unit would run
+    the introspection in model-wtf's venv — where celery is not."""
+    from model_wtf.introspect.runner import clean_env
+
+    monkeypatch.setenv("VIRTUAL_ENV", "/opt/wtf/.venv")
+    monkeypatch.setenv("UV_RUN_RECURSION_DEPTH", "1")
+    monkeypatch.setenv("PYTHONPATH", "/opt/wtf/src")
+    monkeypatch.setenv("PATH", "/opt/wtf/.venv/bin:/usr/bin:/bin")
+    monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "keep.me")
+
+    env = clean_env()
+
+    for gone in ("VIRTUAL_ENV", "UV_RUN_RECURSION_DEPTH", "PYTHONPATH"):
+        assert gone not in env
+    assert env["PATH"] == "/usr/bin:/bin"
+    assert env["DJANGO_SETTINGS_MODULE"] == "keep.me"
+
+
 def test_detect_settings_sources(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -150,6 +150,7 @@ def seed_party(party_id: str, **spec: Any) -> None:
             "safeguard",
             "dpf_certified",
             "dpa",
+            "distinct_from",
         ):
             setattr(row, key, spec.get(key))
         row.hosts = [
@@ -172,6 +173,7 @@ def seed_store(unit: str, slug: str, **spec: Any) -> None:
             "location",
             "retention",
             "description",
+            "distinct_from",
         ):
             setattr(row, key, spec.get(key))
         row.ignore = bool(spec.get("ignore", False))

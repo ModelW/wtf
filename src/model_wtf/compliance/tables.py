@@ -124,6 +124,9 @@ class PartyRow(Base):
     safeguard: Mapped[str | Marker | None] = mapped_column(Human, nullable=True)
     dpf_certified: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     dpa: Mapped[str | None] = mapped_column(Text, nullable=True)
+    distinct_from: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    """Ids of parties this one looks like but is not (a human's or an
+    agent's decision, so the duplicate guard stops asking)."""
 
     hosts: Mapped[list[PartyHostRow]] = relationship(
         cascade="all, delete-orphan", order_by="PartyHostRow.host"
@@ -157,6 +160,8 @@ class StoreRow(Base):
     retention: Mapped[str | Marker | None] = mapped_column(Human, nullable=True)
     description: Mapped[str | Marker | None] = mapped_column(Human, nullable=True)
     ignore: Mapped[bool] = mapped_column(Boolean, default=False)
+    distinct_from: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    """Slugs of stores of the unit this one looks like but is not."""
 
     hosts: Mapped[list[StoreHostRow]] = relationship(
         cascade="all, delete-orphan", order_by="StoreHostRow.host"

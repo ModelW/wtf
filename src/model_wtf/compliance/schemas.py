@@ -89,6 +89,12 @@ class Party(StrictModel):
         description="Where the data processing agreement with this party lives "
         "(URL or document reference)",
     )
+    distinct_from: list[NonEmpty] = Field(
+        default_factory=list,
+        description="Ids of declared parties this one resembles (a similar name "
+        "or a shared domain) but is a different organisation: silences the "
+        "duplicate guard for those pairs",
+    )
 
 
 class App(StrictModel):

@@ -23,7 +23,7 @@ from ruamel.yaml import YAML
 
 from model_wtf.compliance.container import get_container
 from model_wtf.compliance.db import get_db
-from model_wtf.compliance.declarations import save_app, save_party
+from model_wtf.compliance.declarations import DuplicateParty, save_app, save_party
 from model_wtf.compliance.discovery import FALLBACK_MANIFEST, SNOW_MANIFEST
 from model_wtf.compliance.knowledge import (
     CATEGORIES_DIR,
@@ -56,6 +56,7 @@ class PartySpec:
     registration: str | None = None
     safeguard: str | None = None
     dpf_certified: bool | None = None
+    distinct_from: list[str] = field(default_factory=list)
 
     @property
     def slug(self) -> str:
@@ -76,6 +77,8 @@ class PartySpec:
             spec["hosts"] = list(self.hosts)
         if self.dpf_certified is not None:
             spec["dpf_certified"] = self.dpf_certified
+        if self.distinct_from:
+            spec["distinct_from"] = list(self.distinct_from)
         return spec
 
 
@@ -221,7 +224,15 @@ def run_init(
         if spec is None or (spec is processor and spec.slug == controller.slug):
             continue
         record = f"db:parties/{spec.slug}"
-        if save_party(spec.slug, spec.to_spec()):
+        try:
+            created = save_party(spec.slug, spec.to_spec())
+        except DuplicateParty as exc:
+            # A re-run with the name spelled differently, or a client that
+            # is also the agency: the existing row is the answer, not a
+            # second one.
+            msg = f"{exc}; pass the declared name, or edit the parties table"
+            raise InitError(msg) from None
+        if created:
             result.created.append(record)
         else:
             result.skipped.append(record)

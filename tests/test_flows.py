@@ -11,9 +11,10 @@ from typing import TYPE_CHECKING
 import pytest
 from click.testing import CliRunner
 
-from conftest import seed_party, seed_touchpoint
+from conftest import seed_party, seed_store, seed_touchpoint
 from model_wtf.cli import cli
 from model_wtf.compliance.check import run_check
+from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.flows import FlowKind, FlowStatus, build_flows, describe
 from model_wtf.compliance.knowledge import load_knowledge
 from model_wtf.compliance.mcp_server import (
@@ -448,3 +449,244 @@ def test_a_free_text_report_closes_once_its_store_or_party_exists(repo: Path) ->
     tp = ws.all_touchpoints["api:getCustomer"]
     assert tp.stale_undeclared == {"geocoder at api.mapbox.com"}
     assert not tp.pending
+
+
+def test_django_mail_is_a_built_in_store(repo: Path) -> None:
+    """Sending mail through Django is a write to the `mail-default` store —
+    how it is sent is infrastructure. The store exists in every Django
+    unit, claims `EMAIL_BACKEND`/`EMAIL_HOST`, and a `send_mail` in the
+    code is an undeclared store write to it until the touchpoint declares
+    the copy; nobody has to `store_add` an SMTP relay."""
+    api = repo / "api" / "shop" / "api.py"
+    api.write_text(
+        api.read_text().replace(
+            "    send_receipt.defer(order_id=1)\n",
+            "    send_receipt.defer(order_id=1)\n"
+            "    from django.core.mail import send_mail\n\n"
+            '    send_mail("Receipt", "...", None, [payload.email])\n',
+        )
+    )
+    ws = _ws(repo)
+    mail = ws.data["api"].stores.get("mail-default")
+    assert mail is not None
+    assert (mail.type.value, mail.backend, mail.source.value) == (
+        "mail",
+        "email",
+        "config",
+    )
+    assert mail.hosts == ("EMAIL_BACKEND", "EMAIL_HOST")
+    tp = ws.all_touchpoints["api:checkout"]
+    assert "setting:EMAIL_BACKEND" in tp.facts.fetches
+    gaps = {f.sink: f for f in build_flows(ws, build_elements(ws)).undeclared()}
+    assert set(gaps) == {"store:api:mail-default"}
+    assert gaps["store:api:mail-default"].kind is FlowKind.STORE
+
+    tools = Tools()
+    # An SMTP relay declared by hand is the mail store again: refused.
+    with pytest.raises(ValueError, match="looks like an existing store: mail-default"):
+        tools.store_add(
+            "api", "smtp-relay", "external", "SMTP relay", hosts=["EMAIL_HOST"]
+        )
+    with pytest.raises(ValueError, match="same name"):
+        tools.store_add("api", "smtp", "external", "Mail default")
+    out = tools.touchpoint_set_data(
+        "api:checkout",
+        [DataRef(ref="shop.Customer.email", ops=[{"op": "create"}])],
+        reason="api.py:30 mails the receipt",
+        transfers=[ExportDecision(party="mapbox", data=[EMAIL], purpose="geocoding")],
+        stores=[StoreDecision(store="mail-default", data=[EMAIL], purpose="receipt")],
+        scope="subject",
+    )
+    assert "STILL PENDING" not in out
+    assert build_flows(_ws(repo), build_elements(_ws(repo))).undeclared() == []
+
+
+def test_store_add_refuses_lookalikes_unless_distinct(repo: Path) -> None:
+    tools = Tools()
+    assert "created store api:board" in tools.store_add(
+        "api", "board", "realtime", "Kitchen board", hosts=["BOARD_URL"]
+    )
+    # Same setting name under another slug: one store.
+    with pytest.raises(ValueError, match=r"same host board_url"):
+        tools.store_add("api", "kitchen", "realtime", "Kitchen", hosts=["BOARD_URL"])
+    # A slug that contains the existing one's words (short slugs like
+    # `boards` are only matched exactly: too little to go on).
+    with pytest.raises(ValueError, match="same slug"):
+        tools.store_add("api", "kitchen-board", "realtime", "Other thing")
+    # Two config stores never flag each other; a manual one may not shadow one.
+    with pytest.raises(ValueError, match="same slug"):
+        tools.store_add("api", "db-defaults", "database", "Main DB")
+    # A manual store named after a config store's backend is that store.
+    with pytest.raises(ValueError, match="same name"):
+        tools.store_add("api", "redis-cache", "cache", "Redis")
+    # The agent has no way around it; a human records a real distinction
+    # on the command line, and the guard then lets the row in.
+    root = ["--root", str(repo)]
+    out = CliRunner().invoke(
+        cli,
+        [
+            "compliance",
+            "stores",
+            "add",
+            "api:kitchen",
+            "--type",
+            "search",
+            "--name",
+            "Kitchen index",
+            "--distinct-from",
+            "board",
+            *root,
+        ],
+    )
+    assert out.exit_code == 0, out.output
+    ws = _ws(repo)
+    assert ws.data["api"].stores.get("kitchen").distinct_from == ("board",)  # type: ignore[union-attr]
+    assert not [
+        d for d in run_check(strict=False).diagnostics if d.code == "store-duplicate"
+    ]
+    refused = CliRunner().invoke(
+        cli,
+        [
+            "compliance",
+            "stores",
+            "add",
+            "api:kitchen2",
+            "--type",
+            "search",
+            "--name",
+            "Kitchen",
+            "--distinct-from",
+            "nope",
+            *root,
+        ],
+    )
+    assert refused.exit_code != 0
+    assert "unknown stores: nope" in refused.output
+
+
+def test_sentry_is_a_built_in_store(repo: Path) -> None:
+    """`capture_exception` is a write to `errors-sentry`, which exists as
+    soon as `SENTRY_DSN` is a setting (or the SDK is installed): cloud or
+    self-hosted is a deployment fact, so no Sentry party ever."""
+    settings = repo / "api" / "settings.py"
+    settings.write_text(
+        settings.read_text() + '\nSENTRY_DSN = "https://k@o1.ingest.sentry.io/1"\n'
+    )
+    api = repo / "api" / "shop" / "api.py"
+    api.write_text(
+        api.read_text().replace(
+            "    send_receipt.defer(order_id=1)\n",
+            "    send_receipt.defer(order_id=1)\n"
+            "    import sentry_sdk\n\n"
+            "    sentry_sdk.capture_exception(ValueError(payload.email))\n",
+        )
+    )
+    ws = _ws(repo)
+    sentry = ws.data["api"].stores.get("errors-sentry")
+    assert sentry is not None
+    assert (sentry.type.value, sentry.backend) == ("monitoring", "sentry")
+    assert sentry.hosts == ("sentry_sdk", "SENTRY_DSN")
+    tp = ws.all_touchpoints["api:checkout"]
+    assert "sentry_sdk" in tp.facts.fetches
+    gaps = {f.sink for f in build_flows(ws, build_elements(ws)).undeclared()}
+    assert "store:api:errors-sentry" in gaps
+    assert not any(g.startswith("sdk:") for g in gaps)
+
+    tools = Tools()
+    with pytest.raises(ValueError, match=r"is a store of the project.*errors-sentry"):
+        tools.party_add("sentry", "Sentry", website="https://sentry.io", country="US")
+    with pytest.raises(ValueError, match="is a store of the project"):
+        tools.party_add(
+            "sentry-sdk",
+            "Sentry SDK ingest",
+            hosts=["o1.ingest.sentry.io", "sentry_sdk"],
+        )
+    with pytest.raises(ValueError, match="looks like an existing store: errors-sentry"):
+        tools.store_add("api", "sentry-sdk", "external", "Sentry SDK ingest")
+
+    # A reviewer who reports the flow under a made-up party id lands on the
+    # store anyway, and declaring the store write closes the report: the
+    # touchpoint cannot stay pending on a sink only the agent can spell.
+    tools.workspace(refresh=True)
+    out = tools.flow_report(
+        "api:checkout", "sdk-sentry-sdk", [EMAIL], "api.py:30 capture_exception"
+    )
+    assert "store:api:errors-sentry" in out
+    tools.touchpoint_set_data(
+        "api:checkout",
+        [DataRef(ref="shop.Customer.email", ops=[{"op": "create"}])],
+        reason="declared the error report",
+        transfers=[ExportDecision(party="mapbox", data=[EMAIL], purpose="geocoding")],
+        stores=[StoreDecision(store="errors-sentry", data=[EMAIL], purpose="errors")],
+        scope="subject",
+    )
+    assert _undeclared("checkout") == []
+    assert not _ws(repo).all_touchpoints["api:checkout"].pending
+
+
+def test_check_reports_coexisting_store_lookalikes(repo: Path) -> None:
+    seed_store(
+        "api", "smtp-email", type="external", name="SMTP email", hosts=["EMAIL_HOST"]
+    )
+    seed_store(
+        "api", "smtp-relay", type="external", name="Resend SMTP", hosts=["EMAIL_HOST"]
+    )
+
+    diags = [
+        d for d in run_check(strict=False).diagnostics if d.code == "store-duplicate"
+    ]
+    subjects = sorted(d.subject for d in diags)  # type: ignore[type-var]
+    # Both manual rows duplicate the built-in mail store and each other.
+    assert subjects == [
+        "stores/api:mail-default+smtp-email",
+        "stores/api:mail-default+smtp-relay",
+        "stores/api:smtp-email+smtp-relay",
+    ]
+    assert run_check(strict=False).exit_code is ExitCode.DECLARATION_ERROR
+
+    # The human fix: fold both into the built-in store. Writes move.
+    seed_touchpoint(
+        "api",
+        "checkout",
+        data=[EMAIL],
+        stores=[{"store": "smtp-relay", "data": [EMAIL]}],
+    )
+    root = ["--root", str(repo)]
+    out = CliRunner().invoke(
+        cli,
+        [
+            "compliance",
+            "stores",
+            "merge",
+            "api:smtp-email",
+            "api:smtp-relay",
+            "--into",
+            "mail-default",
+            *root,
+        ],
+    )
+    assert out.exit_code == 0, out.output
+    assert "moved write from api:checkout" in out.output
+    assert not [
+        d for d in run_check(strict=False).diagnostics if d.code == "store-duplicate"
+    ]
+    ws = _ws(repo)
+    assert [w.store for w in ws.all_touchpoints["api:checkout"].stores] == [
+        "api:mail-default"
+    ]
+    assert ws.data["api"].stores.get("smtp-relay") is None
+
+    # Or, for two stores that really are two: a recorded distinction.
+    seed_store("api", "cdn", type="external", name="CDN purge", hosts=["EMAIL_HOST"])
+    assert [
+        d.subject
+        for d in run_check(strict=False).diagnostics
+        if d.code == "store-duplicate"
+    ] == ["stores/api:mail-default+cdn"]
+    out = CliRunner().invoke(
+        cli, ["compliance", "stores", "distinct", "api:cdn", "mail-default", *root]
+    )
+    assert out.exit_code == 0, out.output
+    assert not [
+        d for d in run_check(strict=False).diagnostics if d.code == "store-duplicate"
+    ]

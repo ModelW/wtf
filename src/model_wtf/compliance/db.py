@@ -16,6 +16,10 @@ The file is committed to git, so it is tuned to diff well:
 * a passive WAL checkpoint when the session closes, so the main file
   reflects the data (the ``*.db-wal`` / ``*.db-shm`` sidecars are ignored
   by git).
+
+A new file gets the schema of :mod:`~model_wtf.compliance.tables` and the
+current version stamp; an existing file is upgraded step by step through
+:mod:`~model_wtf.compliance.migrations` before anything reads it.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from sqlalchemy import Engine, create_engine, event, text
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool, StaticPool
 
+from model_wtf.compliance.migrations import SCHEMA_VERSION, has_schema, upgrade
 from model_wtf.compliance.tables import Base
 
 if TYPE_CHECKING:
@@ -34,7 +39,6 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import TracebackType
 
-SCHEMA_VERSION = 1
 BUSY_TIMEOUT_MS = 10_000
 MEMORY = ":memory:"
 
@@ -47,7 +51,11 @@ def _on_connect(conn: sqlite3.Connection, _record: object) -> None:
 
 
 def make_engine(path: Path | str) -> Engine:
-    """An engine on ``path`` (``:memory:`` for tests), schema applied."""
+    """An engine on ``path`` (``:memory:`` for tests), schema current.
+
+    A file with tables is migrated to :data:`SCHEMA_VERSION`; an empty or
+    absent one is created from the mapped classes and stamped.
+    """
     if str(path) == MEMORY:
         engine = create_engine(
             "sqlite://",
@@ -57,9 +65,14 @@ def make_engine(path: Path | str) -> Engine:
     else:
         engine = create_engine(f"sqlite:///{path}", poolclass=NullPool)
         event.listen(engine, "connect", _on_connect)
-    Base.metadata.create_all(engine)
     with engine.begin() as conn:
-        conn.execute(text(f"PRAGMA user_version = {SCHEMA_VERSION}"))
+        existing = has_schema(conn)
+    if existing:
+        upgrade(engine)
+    else:
+        Base.metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.execute(text(f"PRAGMA user_version = {SCHEMA_VERSION}"))
     return engine
 
 
@@ -133,4 +146,4 @@ def json_each(column: Any) -> Any:
     return func.json_each(column).table_valued("value")
 
 
-__all__ = ["Db", "get_db", "json_each", "make_engine", "set_db"]
+__all__ = ["SCHEMA_VERSION", "Db", "get_db", "json_each", "make_engine", "set_db"]

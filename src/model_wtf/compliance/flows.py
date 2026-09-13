@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+from model_wtf.compliance.parties import registrable_domain as _domain
 from model_wtf.compliance.touchpoints import Kind, Undeclared
 
 if TYPE_CHECKING:
@@ -308,7 +309,19 @@ def resolve_sink(ws: Workspace, unit_id: str, sink: str) -> str:
     # name, a store slug or a party id anywhere in it decides.
     tokens = {t.lower() for t in re.findall(r"[A-Za-z0-9_.-]+", text)}
     tokens |= {t.lower() for t in re.findall(r"[A-Za-z0-9_-]+", text)}
-    return _match_tokens(ws, unit_id, tokens) or text
+    return _match_tokens(ws, unit_id, tokens) or _named_store(ws, text) or text
+
+
+def _named_store(ws: Workspace, text: str) -> str | None:
+    """A sink that names a store the way a party guard would catch it
+    (``sdk-sentry-sdk``, ``Sentry error tracker``, ``the mail server``):
+    the store. Same matching as the ``party_add`` refusal, so a sink the
+    guard says is a store resolves to that store."""
+    from model_wtf.compliance.parties import store_clashes
+
+    stores = [st for d in ws.data.values() for st in d.stores.visible()]
+    hits = store_clashes(text, {"name": text}, stores)
+    return f"store:{hits[0].full_slug}" if hits else None
 
 
 def _match_tokens(ws: Workspace, unit_id: str, tokens: set[str]) -> str | None:
@@ -361,12 +374,6 @@ def _party_hosts(ws: Workspace) -> dict[str, str]:
             if "." in host:
                 out[_domain(host)] = f"party:{party_id}"
     return out
-
-
-def _domain(url_or_host: str) -> str:
-    host = url_or_host.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
-    parts = host.split(".")
-    return ".".join(parts[-2:]) if len(parts) >= 2 else host
 
 
 def _sink_of(host: str, party_hosts: dict[str, str]) -> str:

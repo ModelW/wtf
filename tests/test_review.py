@@ -673,3 +673,52 @@ def test_shard_spreads_the_pending_list_over_every_worker() -> None:
 
     assert shard([], batch=8, workers=16) == []
     assert shard(["only"], batch=8, workers=16) == [["only"]]
+
+
+def test_narration_prints_each_write_once() -> None:
+    """A write is narrated from the activity log the MCP server appends to,
+    never from the tool-call stream as well: two subagents' worth of
+    `activity_create` events used to print every activity twice."""
+    from model_wtf.compliance.auto_review import WRITE_TOOLS, narrate, narrate_write
+    from model_wtf.opencode import Event
+
+    def call(tool: str, output: str = "ok", **args: object) -> Event:
+        return Event(kind="tool", tool=f"model-wtf_{tool}", args=args, output=output)
+
+    for tool in WRITE_TOOLS:
+        assert narrate(call(tool), closing_tool="touchpoint_set_data") is None
+    # The closing tools advance the bar and say nothing themselves.
+    assert narrate(
+        call("touchpoint_set_data", touchpoint="api:x"),
+        closing_tool="touchpoint_set_data",
+    ) == (None, True)
+    assert narrate(
+        call("data_review_model", "m: still pending", model="m"),
+        closing_tool="data_review_model",
+    ) == (None, False)
+    # Errors are always shown.
+    line = narrate(call("party_add", "Error: nope"), closing_tool="touchpoint_set_data")
+    assert line is not None
+    assert line[0] is not None
+    assert "nope" in line[0].plain
+
+    assert (
+        "activity cpds created with 7 touchpoint(s) (contract)"
+        in narrate_write(
+            {"kind": "activity", "id": "cpds", "touchpoints": 7, "basis": "contract"}
+        ).plain
+    )
+    assert (
+        "new store api:x (X)"
+        in narrate_write({"kind": "store", "id": "api:x", "name": "X"}).plain
+    )
+    assert "undeclared flow api:a -> store:api:errors-sentry (3 item(s))" in (
+        narrate_write(
+            {
+                "kind": "flow_report",
+                "element": "api:a",
+                "sink": "store:api:errors-sentry",
+                "items": 3,
+            }
+        ).plain
+    )

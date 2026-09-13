@@ -264,12 +264,14 @@ def test_environment_is_carried_over_only_with_identical_lockfiles(
     import model_wtf.compliance.gate as gate
 
     gate.run_check = spy  # type: ignore[assignment]
+    # The fake uv.lock would make the runner `uv run` inside a fake .venv:
+    # this test is about carrying the environment over, not choosing it.
     try:
-        result = run_gate(base_ref="develop")
+        result = run_gate(base_ref="develop", python=sys.executable)
         assert seen == [True]
         assert result.warnings == []
         (api / "uv.lock").write_text("lock v2\n")
-        result = run_gate(base_ref="develop")
+        result = run_gate(base_ref="develop", python=sys.executable)
         assert seen == [True, False]
         assert any("uv.lock differs" in w for w in result.warnings)
     finally:

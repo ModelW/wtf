@@ -77,6 +77,14 @@ BACKEND_NAMES = (
     ("sqs", "sqs"),
 )
 
+MAIL_SLUG = "mail-default"
+"""Slug of the outgoing mail store; the touchpoints script reports a mail
+call as ``setting:EMAIL_BACKEND`` and this store claims that name."""
+
+SENTRY_SLUG = "errors-sentry"
+"""Slug of the error-monitoring store when ``sentry_sdk`` is initialised;
+it claims the ``sentry_sdk`` client and ``SENTRY_DSN``."""
+
 
 def _backend(path):
     """Dotted backend path (or URL scheme) -> conceptual backend name.
@@ -151,6 +159,8 @@ class Stores:
                 cfg.get("BACKEND", ""),
                 f"WAGTAILSEARCH_BACKENDS[{alias!r}]",
             )
+        self._mail(settings)
+        self._sentry(settings)
         self.sessions = self._sessions(settings)
 
     def _add(self, slug, kind, backend, config):
@@ -158,6 +168,49 @@ class Stores:
             {"slug": slug, "type": kind, "backend": _backend(backend), "config": config}
         )
         return slug
+
+    def _mail(self, settings):
+        """Outgoing email is a store of the application, whatever sends it.
+
+        The application mails; which backend, relay or provider does the
+        sending is infrastructure — another level of the review — so no
+        distinction is made between backends: the store exists for every
+        Django project (``EMAIL_BACKEND`` always has a value) and claims
+        the setting names a mail call is reported under.
+        """
+        self.items.append(
+            {
+                "slug": MAIL_SLUG,
+                "type": "mail",
+                "backend": "email",
+                "config": "EMAIL_BACKEND",
+                "hosts": ["EMAIL_BACKEND", "EMAIL_HOST"],
+            }
+        )
+
+    def _sentry(self, settings):
+        """Error monitoring is a store of the application too.
+
+        Where the events go — sentry.io, a self-hosted Sentry, GlitchTip —
+        is a deployment fact, like the mail relay. The store exists as soon
+        as the SDK is installed in the unit's environment (the DSN only
+        arrives with the deployment) and claims the client name the
+        touchpoints script reports plus the usual setting.
+        """
+        try:
+            import sentry_sdk  # noqa: F401
+        except ImportError:
+            if not getattr(settings, "SENTRY_DSN", None):
+                return
+        self.items.append(
+            {
+                "slug": SENTRY_SLUG,
+                "type": "monitoring",
+                "backend": "sentry",
+                "config": "sentry_sdk.init",
+                "hosts": ["sentry_sdk", "SENTRY_DSN"],
+            }
+        )
 
     def _file_storages(self):
         try:

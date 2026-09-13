@@ -627,6 +627,22 @@ def _run_round(
 
 _ID_IN_PROMPT = re.compile(r"`([^`]+)`")
 
+WRITE_TOOLS = frozenset(
+    {
+        "data_add_manual",
+        "party_add",
+        "store_add",
+        "threat_stamp",
+        "activity_create",
+        "activity_add_touchpoints",
+        "flow_report",
+        "challenge",
+        "data_flag",
+    }
+)
+"""Tools whose effect the MCP server records in the activity log; their
+line comes from there (see :func:`narrate_write`), not from the stream."""
+
 
 def narrate(  # noqa: C901 - one branch per tool, flat on purpose
     event: Event, *, closing_tool: str
@@ -634,7 +650,12 @@ def narrate(  # noqa: C901 - one branch per tool, flat on purpose
     """One human line for a tool call, and whether it closed an item.
 
     Returns ``None`` for calls not worth a line (globs, greps, the
-    dispatcher's own bookkeeping). Errors are always shown.
+    dispatcher's own bookkeeping). Errors are always shown. Writes
+    (``touchpoint_set_data``, ``party_add``, ``activity_create``...) are
+    NOT narrated here: the MCP server logs every write it commits to the
+    activity log and :func:`narrate_write` prints that, once, whichever
+    subagent did it — this function only says whether the call closed an
+    item so the bar advances.
     """
     name = event.tool.removeprefix("model-wtf_") if event.tool else ""
     first = event.output.splitlines()[0] if event.output else ""
@@ -672,69 +693,20 @@ def narrate(  # noqa: C901 - one branch per tool, flat on purpose
             ),
             False,
         )
-    if name == "data_add_manual":
-        return Text.assemble(
-            ("  + ", "yellow"), "new transient item ", (first, "bold")
-        ), False
     if name == "data_review_model":
-        model = str(event.args.get("model") or "")
-        summary = first.split(": ", 1)[1] if ": " in first else first
         done = "still pending" not in first
-        mark = ("  ✓ ", "green") if done else ("  ~ ", "yellow")
-        return (
-            Text.assemble(mark, "model ", (model, "bold"), f" reviewed: {summary}"),
-            done and closing_tool == "data_review_model",
-        )
-    if name == "party_add":
-        return (
-            Text.assemble(
-                ("  + ", "yellow"), "new party ", (str(event.args.get("id")), "bold")
-            ),
-            False,
-        )
+        return None, done and closing_tool == "data_review_model"
     if name == "touchpoint_set_data":
-        tp = str(event.args.get("touchpoint") or "")
-        n = len(event.args.get("data") or [])
-        what = "touches no data" if n == 0 else f"{n} data item(s) declared"
-        exports = event.args.get("transfers") or event.args.get("exporting") or []
-        if exports:
-            parties = ", ".join(str(e.get("party", "?")) for e in exports)
-            what += f", sends data to {parties}"
-        return (
-            Text.assemble(
-                ("  ✓ ", "green"), "touchpoint ", (tp, "bold"), f" checked: {what}"
-            ),
-            closing_tool == "touchpoint_set_data",
-        )
-    if name == "threat_stamp":
-        return None  # narrated from the activity log, with the threat title
+        return None, closing_tool == "touchpoint_set_data"
+    if name in WRITE_TOOLS:
+        return None  # narrated from the activity log, once, with the details
     if name in ("threat_cells", "threat_topic"):
         what = event.args.get("element") or event.args.get("topic") or ""
         return Text.assemble(("    threats of ", "dim"), (str(what), "dim")), False
-    if name == "activity_create":
-        slug = str(event.args.get("slug") or "")
-        n = len(event.args.get("touchpoints") or [])
-        basis = event.args.get("legal_basis") or "basis !todo"
-        return (
-            Text.assemble(
-                ("  ★ ", "magenta"),
-                "activity ",
-                (slug, "bold"),
-                f" created with {n} touchpoint(s) ({basis})",
-            ),
-            False,
-        )
-    if name == "activity_add_touchpoints":
-        slug = str(event.args.get("slug") or "")
-        n = len(event.args.get("touchpoints") or [])
-        return (
-            Text.assemble(
-                ("  ★ ", "magenta"), f"{n} touchpoint(s) added to ", (slug, "bold")
-            ),
-            False,
-        )
-    if name in ("activities_graph", "activities_list"):
+    if name == "activities_graph":
         return Text.assemble(("  → ", "cyan"), "reading the touchpoint graph"), False
+    if name == "activities_list":
+        return Text.assemble(("  → ", "cyan"), "reading the activities"), False
     if name in ("data_pending", "touchpoint_pending", "data_changed"):
         return Text.assemble(("  → ", "cyan"), first.split(":")[0] or name), False
     return None
@@ -772,6 +744,27 @@ def narrate_write(  # noqa: C901 - one branch per kind
             "new party ",
             (ident, "bold"),
             f" ({entry.get('name', '')})",
+        )
+    if kind == "store":
+        return Text.assemble(
+            ("  + ", "yellow"),
+            "new store ",
+            (ident, "bold"),
+            f" ({entry.get('name', '')})",
+        )
+    if kind == "flow_report":
+        return Text.assemble(
+            ("  ! ", "red"),
+            "undeclared flow ",
+            (str(entry.get("element", "")), "bold"),
+            f" -> {entry.get('sink', '')} ({entry.get('items', 0)} item(s))",
+        )
+    if kind == "challenge":
+        return Text.assemble(
+            ("  ? ", "yellow"),
+            "challenged ",
+            (str(entry.get("ref", "")), "bold"),
+            (f"  {entry.get('grounds', '')}", "dim"),
         )
     if kind == "flag":
         verdict = str(entry.get("verdict", ""))
@@ -909,7 +902,7 @@ class Reporter:
                 self.log(narrate_write(entry))
 
     def log(self, text: Text | str) -> None:
-        """A line above the bar."""
+        """A line above the bar (Rich moves the bar below it)."""
         self.progress.console.print(text)
 
     def on_event(self, event: Event) -> None:

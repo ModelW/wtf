@@ -124,6 +124,9 @@ class StoreInfo(BaseModel):
     """Conceptual backend: ``postgresql``, ``redis``, ``s3``, ``filesystem``..."""
     config: str = ""
     """The settings key it was read from, for ``stores explain``."""
+    hosts: list[str] = Field(default_factory=list)
+    """Settings names / hostnames the code reaches it by, when the settings
+    say so (the mail store claims ``EMAIL_BACKEND`` / ``EMAIL_HOST``)."""
 
 
 class SessionsInfo(BaseModel):
@@ -270,7 +273,11 @@ def run_django_script(
     runner = detect_runner(context, python)
     settings = detect_settings(context)
     script = resources.files("model_wtf.introspect").joinpath(script_name).read_text()
-    env = {**os.environ, "DJANGO_SETTINGS_MODULE": settings, "PYTHONUNBUFFERED": "1"}
+    env = {
+        **clean_env(),
+        "DJANGO_SETTINGS_MODULE": settings,
+        "PYTHONUNBUFFERED": "1",
+    }
     kind = f"{_context_tag(context)}-{script_name.rsplit('.', 1)[0]}"
     key = cache.tree_key(context, script, " ".join(runner.argv), settings)
     cached = cache.load(context, key, kind)
@@ -279,6 +286,42 @@ def run_django_script(
     payload = _run_json([*runner.argv, "-"], script, context, env, runner.kind)
     cache.store(context, key, kind, payload)
     return payload
+
+
+INHERITED_ENV_BLOCKLIST = (
+    "VIRTUAL_ENV",
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "PYTHONSAFEPATH",
+    "UV_PROJECT",
+    "UV_PROJECT_ENVIRONMENT",
+    "UV_RUN_RECURSION_DEPTH",
+    "POETRY_ACTIVE",
+    "POETRY_VIRTUALENVS_PATH",
+    "CONDA_PREFIX",
+    "PIPENV_ACTIVE",
+)
+"""Variables that describe *our* Python, not the unit's.
+
+``uv run model-wtf`` (or an activated venv) exports ``VIRTUAL_ENV``; ``uv``
+and ``poetry`` in the child honour it and run the unit's introspection in
+model-wtf's own environment — where Django may import but the project's
+libraries (celery, wagtail) do not. The unit's runner must decide the
+interpreter from the unit alone.
+"""
+
+
+def clean_env() -> dict[str, str]:
+    """``os.environ`` minus what points at the current Python environment."""
+    env = {k: v for k, v in os.environ.items() if k not in INHERITED_ENV_BLOCKLIST}
+    venv = os.environ.get("VIRTUAL_ENV")
+    if venv and "PATH" in env:
+        # An activated venv also prepends its bin/ to PATH.
+        bin_dir = os.path.join(venv, "bin")  # noqa: PTH118 - string PATH entries
+        env["PATH"] = os.pathsep.join(
+            p for p in env["PATH"].split(os.pathsep) if p and p != bin_dir
+        )
+    return env
 
 
 def run_node_script(context: Path, script_name: str) -> dict[str, Any]:
@@ -318,7 +361,7 @@ def run_node_script(context: Path, script_name: str) -> dict[str, Any]:
             timeout=TIMEOUT_SECONDS,
         )
     payload = _run_json(
-        [node, "--input-type=module", "-"], script, context, dict(os.environ), "node"
+        [node, "--input-type=module", "-"], script, context, clean_env(), "node"
     )
     cache.store(context, key, kind, payload)
     return payload

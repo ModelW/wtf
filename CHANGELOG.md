@@ -3,7 +3,7 @@
 One section per released version, newest first. The release workflow puts
 the matching section on the GitHub release.
 
-## Unreleased
+## 1.2.0
 
 - **Storage moves from YAML to SQLite.** Every declaration — the app, the
   parties, data overrides and reviews, touchpoint declarations, stores,
@@ -23,6 +23,58 @@ the matching section on the GitHub release.
   names.
 - The library takes the repository from a process-wide container set
   once per command (`--root`); no `root=` / `shared=` arguments.
+- **Duplicate parties are refused.** `party_add` (and `init`) compare the
+  new party with every declared one — normalised name (case, accents,
+  punctuation, legal forms and a typo or an extra word ignored), shared
+  registrable domain or setting name of the website / `hosts`, respelled
+  id — and fail with the matching id when one looks the same. A party
+  that names a store of the project (`Sentry`, "SMTP mail server", a
+  host of `EMAIL_HOST`) is refused too: that is a store write. The
+  refusal is final for agents; `distinct_from` is set by a human only.
+  `check` reports coexisting lookalikes as a `party-duplicate` error.
+- **Duplicate stores are refused** the same way: `store_add` compares the
+  new store with the unit's visible ones (shared host / settings name,
+  alike name, slug or config backend) and fails with the slug to reuse;
+  `check` reports coexisting lookalikes as `store-duplicate`.
+- **`parties` CLI**: `list`, `show`, `add`, `set`, `remove [--force]`,
+  `merge ... --into`, `to-store <id> <unit:slug>` (a party that was
+  infrastructure becomes store writes), `to-flow <id>` (a party that was
+  the project itself: its transfers go, the derived call stays),
+  `distinct`, `duplicates`.
+- `auto-review` narrates each write once: the line comes from the activity
+  log the MCP server appends to, no longer also from the tool-call stream
+  (activities, parties and declarations were printed twice). Stores,
+  undeclared-flow reports and challenges get a line too.
+- A reported sink that names a store the way the party guard sees it
+  (`sdk-sentry-sdk`, "Sentry error tracker", "the mail server") resolves
+  to that store, so declaring the store write closes the report. Before,
+  the sink stayed an unresolvable transfer: `party_add` refused the party
+  (it IS the store) and the touchpoint could never leave pending.
+- A relative `fetch("/api/x")` in a SvelteKit route is linked to the
+  route of the project that serves it (a `calls` edge, like a generated
+  client call) and leaves the outbound `fetches`: the project's own
+  endpoints never show up as an unknown host to declare a party for.
+  **`stores`** gains `add`, `set`, `remove`, `merge`, `distinct`.
+- **Outgoing email and error monitoring are built-in stores.** Every
+  Django unit has a `mail-default` store (type `mail`) claiming
+  `EMAIL_BACKEND` / `EMAIL_HOST`, and an `errors-sentry` store (type
+  `monitoring`) claiming `sentry_sdk` / `SENTRY_DSN` wherever the SDK is
+  installed; a `send_mail` / `EmailMessage` / `email_user` call, or a
+  `capture_exception`, is a write to them. How mail is sent and where
+  events land (cloud, self-hosted) is infrastructure, so no distinction is
+  made between backends: no more `smtp-*` stores or Sentry / mail provider
+  parties declared by agents.
+- `load_declarations` reads the parties even when the `app` row is
+  missing, so `parties list` works before `init`.
+- Fix: the unit's introspection no longer inherits `VIRTUAL_ENV` /
+  `PYTHONPATH` / uv and poetry variables from the process running
+  model-wtf. Under `uv run model-wtf`, `poetry run` in the unit honoured
+  our `VIRTUAL_ENV` and imported the project in model-wtf's venv
+  (`No module named 'celery'`), and `uv run` created a stray `.venv` and
+  `uv.lock` in the unit.
+- Schema migrations: `compliance.db` carries its schema version and is
+  upgraded step by step (`model_wtf.compliance.migrations`) when a newer
+  release opens it; a file from a newer release is refused.
 
 ## 1.1.0
 

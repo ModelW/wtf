@@ -184,7 +184,8 @@ def test_save_party_validates_before_writing(make_repo: MakeRepo) -> None:
     with pytest.raises(ValueError, match="colour"):
         save_party("x", {**PARTY_ACME, "colour": "blue"})
     assert save_party("acme", PARTY_ACME) is False  # exists, untouched
-    assert save_party("mapbox", {**PARTY_ACME, "hosts": ["api.mapbox.com"]})
+    mapbox = {**PARTY_ACME, "name": "Mapbox", "hosts": ["api.mapbox.com"]}
+    assert save_party("mapbox", mapbox)
     assert load_declarations().parties["mapbox"].hosts == ["api.mapbox.com"]
 
 

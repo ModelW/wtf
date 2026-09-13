@@ -5,29 +5,43 @@ rows into models plus :class:`~model_wtf.compliance.report.Diagnostic`
 entries. Two kinds of problems come out, and the exit code depends on
 which:
 
-* **errors** (``schema-error``, ``unknown-party``, ``app-missing``, ...):
-  the declarations are wrong → :attr:`ExitCode.DECLARATION_ERROR`;
+* **errors** (``schema-error``, ``unknown-party``, ``party-duplicate``,
+  ``app-missing``, ...): the declarations are wrong →
+  :attr:`ExitCode.DECLARATION_ERROR`;
 * **todos** (``todo``): the declarations are fine but unfinished
   (``!todo`` values) → :attr:`ExitCode.FINDINGS`.
 
 The writers at the bottom (:func:`save_app`, :func:`save_party`) are what
-``init`` and the ``party_add`` tool go through.
+``init`` and the ``party_add`` tool go through; :func:`save_party` refuses
+a party that looks like one already declared (see
+:mod:`model_wtf.compliance.parties`).
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
 
 from model_wtf.compliance.db import get_db
+from model_wtf.compliance.parties import (
+    Lookalike,
+    StoreClash,
+    duplicate_pairs,
+    find_lookalikes,
+    store_clashes,
+    stored_fingerprints,
+)
 from model_wtf.compliance.report import Diagnostic, Severity, marker_diagnostics
 from model_wtf.compliance.schemas import App, Party, is_valid_id
 from model_wtf.compliance.tables import AppRow, PartyHostRow, PartyRow
 from model_wtf.compliance.yaml_io import Marker
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 SHARED_SCOPE_ID = "shared"
 
@@ -61,9 +75,9 @@ def party_label(party_id: str) -> str:
 def load_declarations() -> Declarations:
     """Read the ``app`` row and every party.
 
-    No ``app`` row yields a single ``app-missing`` error: the repository
-    has not been initialised, and there is nothing else worth saying until
-    it is.
+    No ``app`` row is an ``app-missing`` error (the repository has not been
+    initialised); the parties are read all the same, so they can be listed
+    and fixed.
     """
     decl = Declarations()
     with get_db() as db:
@@ -79,9 +93,8 @@ def load_declarations() -> Declarations:
                 SHARED_SCOPE_ID,
             )
         )
-        return decl
-
-    decl.app = _validate(app_raw(app_row), App, "app", decl.diagnostics)
+    else:
+        decl.app = _validate(app_raw(app_row), App, "app", decl.diagnostics)
     for party_id, raw in raw_parties:
         if not is_valid_id(party_id):
             decl.diagnostics.append(
@@ -101,6 +114,7 @@ def load_declarations() -> Declarations:
             decl.parties[party_id] = party
     if decl.app is not None:
         _check_party_refs(decl)
+    decl.diagnostics.extend(_duplicate_parties(decl))
     return decl
 
 
@@ -140,6 +154,8 @@ def party_raw(row: PartyRow) -> dict[str, Any]:
         value = getattr(row, key)
         if value is not None:
             raw[key] = value
+    if row.distinct_from:
+        raw["distinct_from"] = list(row.distinct_from)
     return raw
 
 
@@ -158,6 +174,39 @@ def _check_party_refs(decl: Declarations) -> None:
                     SHARED_SCOPE_ID,
                 )
             )
+
+
+def _duplicate_parties(decl: Declarations) -> list[Diagnostic]:
+    """One ``party-duplicate`` error per pair of declared parties that look
+    like the same organisation, unless one lists the other in
+    ``distinct_from``.
+
+    An error rather than a todo: two rows for one recipient split the
+    transfers between them and the register lists it twice, which is a
+    wrong declaration, not an unfinished one.
+    """
+    fingerprints = [fp for fp in stored_fingerprints() if fp.party_id in decl.parties]
+    out = []
+    for a, b, reason in duplicate_pairs(fingerprints):
+        if b.party_id in decl.parties[a.party_id].distinct_from or (
+            a.party_id in decl.parties[b.party_id].distinct_from
+        ):
+            continue
+        out.append(
+            Diagnostic(
+                Severity.ERROR,
+                "party-duplicate",
+                f"parties {a.party_id} ({a.name}) and {b.party_id} ({b.name}) "
+                f"look like the same organisation (same {reason}); merge them, "
+                f"or mark them distinct if they are not",
+                SHARED_SCOPE_ID,
+                subject=f"parties/{a.party_id}+{b.party_id}",
+                hint=f"model-wtf compliance parties merge {b.party_id} "
+                f"--into {a.party_id}  |  parties distinct {a.party_id} "
+                f"{b.party_id}",
+            )
+        )
+    return out
 
 
 _BRANCH = re.compile(
@@ -254,13 +303,75 @@ def save_app(
     return True
 
 
-def save_party(party_id: str, spec: dict[str, Any]) -> bool:
+class DuplicateParty(ValueError):
+    """A party that looks like one already declared was refused.
+
+    ``lookalikes`` names the existing rows and why each matched; the
+    message tells the caller how to proceed (reuse the existing id; a human
+    who knows they are two organisations records it with
+    ``model-wtf compliance parties distinct``).
+    """
+
+    def __init__(self, party_id: str, lookalikes: list[Lookalike]) -> None:
+        self.party_id = party_id
+        self.lookalikes = lookalikes
+        listed = "; ".join(str(x) for x in lookalikes)
+        ids = " ".join(x.party_id for x in lookalikes)
+        super().__init__(
+            f"party {party_id!r} looks like an existing party: {listed}. "
+            f"Reuse that id: it is the same organisation. (A human who knows "
+            f"they are distinct runs `model-wtf compliance parties add "
+            f"{party_id} ... --distinct-from {ids}`.)"
+        )
+
+
+class PartyIsAStore(ValueError):
+    """A party that names a store of the project was refused.
+
+    Outgoing mail, error monitoring, the project's own services are
+    stores; who operates them is infrastructure, not a recipient.
+    """
+
+    def __init__(self, party_id: str, clashes: list[StoreClash]) -> None:
+        self.party_id = party_id
+        self.clashes = clashes
+        listed = "; ".join(str(c) for c in clashes)
+        slugs = ", ".join(c.full_slug.split(":", 1)[1] for c in clashes)
+        super().__init__(
+            f"party {party_id!r} is a store of the project, not a party: {listed}. "
+            f"Declare the copy under the touchpoint's `stores` with "
+            f"store: {slugs}; who operates it is infrastructure"
+        )
+
+
+def save_party(
+    party_id: str, spec: dict[str, Any], *, stores: Sequence[Any] = ()
+) -> bool:
     """Create a party from a validated :class:`Party` mapping; ``False``
-    when the id is taken."""
+    when the id is taken.
+
+    Raises :class:`DuplicateParty` when an existing party has a similar
+    name, the same registrable domain or a similar id, unless ``spec``
+    lists it in ``distinct_from``: the same organisation must not be
+    declared twice under two spellings. Raises :class:`PartyIsAStore` when
+    the party names one of ``stores`` (the project's visible stores, when
+    the caller has them).
+    """
     party = Party.model_validate(spec)
     with get_db() as db:
         if db.get(PartyRow, party_id) is not None:
             return False
+    clashes = store_clashes(party_id, spec, list(stores))
+    if clashes:
+        raise PartyIsAStore(party_id, clashes)
+    lookalikes = [
+        x
+        for x in find_lookalikes(party_id, spec)
+        if x.party_id not in party.distinct_from
+    ]
+    if lookalikes:
+        raise DuplicateParty(party_id, lookalikes)
+    with get_db() as db:
         row = PartyRow(
             id=party_id,
             name=party.name,
@@ -279,6 +390,7 @@ def save_party(party_id: str, spec: dict[str, Any]) -> bool:
             safeguard=party.safeguard,
             dpf_certified=party.dpf_certified,
             dpa=party.dpa,
+            distinct_from=list(party.distinct_from) or None,
         )
         row.hosts = [PartyHostRow(party_id=party_id, host=h) for h in party.hosts]
         db.add(row)
@@ -294,6 +406,8 @@ def party_ids() -> set[str]:
 __all__ = [
     "SHARED_SCOPE_ID",
     "Declarations",
+    "DuplicateParty",
+    "PartyIsAStore",
     "app_raw",
     "format_errors",
     "load_declarations",

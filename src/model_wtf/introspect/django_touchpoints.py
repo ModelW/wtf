@@ -347,10 +347,32 @@ SDK_CLIENTS = re.compile(
 )
 
 
+MAIL_CALLS = re.compile(
+    r"^(send_mail|send_mass_mail|mail_admins|mail_managers|EmailMessage|"
+    r"EmailMultiAlternatives|get_connection)$"
+)
+"""Django's outgoing-mail API (``django.core.mail``): a call to one is a
+write to the mail store, reported as ``setting:EMAIL_BACKEND``."""
+
+MAIL_METHODS = frozenset({"send_mail", "email_user", "send_email", "send_messages"})
+"""Methods that mail on an object: ``user.email_user(...)``, a form's
+``send_mail``, ``connection.send_messages``."""
+
+
+def _is_mail_call(callee):
+    """Whether a call node's callee is Django's mail API or a mailing method."""
+    if isinstance(callee, ast.Attribute):
+        return bool(MAIL_CALLS.match(callee.attr)) or callee.attr in MAIL_METHODS
+    if isinstance(callee, ast.Name):
+        return bool(MAIL_CALLS.match(callee.id))
+    return False
+
+
 def _fetches(func):
     """Outbound calls visible in the body of ``func`` itself: hostnames of
-    URL literals, the names of well-known third-party SDK clients and the
-    ``settings.*_URL`` / ``*_HOST`` values it reads (``setting:TMW_URL``).
+    URL literals, the names of well-known third-party SDK clients, the
+    ``settings.*_URL`` / ``*_HOST`` values it reads (``setting:TMW_URL``) and
+    Django's mail API (``setting:EMAIL_BACKEND``: whatever relays the mail).
 
     Facts, not hints: a host that matches no declared party is an
     undeclared flow by itself, no reading needed. Only the function's own
@@ -374,6 +396,8 @@ def _fetches(func):
             root = root.value
         if isinstance(root, ast.Name) and SDK_CLIENTS.match(root.id):
             found.add(root.id.lower())
+        if _is_mail_call(node.func):
+            found.add("setting:EMAIL_BACKEND")
     for node in ast.walk(tree):
         # `settings.TMW_URL`: the code reaches whatever that setting names;
         # reported as `setting:TMW_URL` so a store or party can claim it.

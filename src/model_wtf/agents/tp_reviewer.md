@@ -34,8 +34,10 @@ Repository: `{repo}`. Paths in tool output are relative to it.
 5. Look for data LEAVING the unit: calls to an external API or SaaS
    (geocoding, maps, payments, email/SMS provider, analytics, error
    tracking, an LLM), `requests.`/`httpx.`/`fetch(` to a third-party host,
-   an SDK client. For each one: `parties_list`; if the organisation is not
-   there, `party_add` it (kebab id like `mapbox`, its name, website, its
+   an SDK client. For each one: `parties_list`; if the organisation is
+   there under ANY spelling or subsidiary (`Mapbox` / `Mapbox, Inc.`,
+   `Google` / `Google Cloud`), reuse that id — never add a second row for
+   it. If it is not there, `party_add` it (kebab id like `mapbox`, its name, website, its
    API `hosts` when they differ from the website's domain — HubSpot's
    `api.hubapi.com`, Stripe's `api.stripe.com` — and
    its `country` — public knowledge for a SaaS: Mapbox US, Stripe US/IE,
@@ -55,12 +57,29 @@ Repository: `{repo}`. Paths in tool output are relative to it.
    `store_add` it (unit, kebab slug, `type` such as `realtime`/`search`,
    name, and `hosts`: the setting name or hostname the code reaches it by,
    e.g. `TMW_URL`). Then list the copy under `stores` with the refs sent.
-   Infrastructure whose operator is only known at deployment (the SMTP
-   relay behind `EMAIL_HOST`, a CDN purge behind `WAGTAILFRONTENDCACHE`, an
-   S3-compatible endpoint) is the same case: `store_add` it with type
-   `external` and the setting name as `hosts`; a human fills the provider.
+   Outgoing EMAIL is already a store: `mail-default` exists in every
+   Django unit. List the copy under `stores` with `store: mail-default`
+   and the refs mailed; never `store_add` an SMTP relay, a mail backend or
+   a provider (Resend, Mailgun...) for it — how mail is sent is
+   infrastructure, another level of the review. ERROR MONITORING is the
+   same: `errors-sentry` exists wherever `sentry_sdk` is installed; a
+   `capture_exception` / `capture_message` is a write to it, never a
+   transfer to a "Sentry" party (cloud or self-hosted is a deployment
+   fact). Other infrastructure whose operator is only known at deployment
+   (a CDN purge behind `WAGTAILFRONTENDCACHE`, an S3-compatible endpoint)
+   is a `store_add` with type `external` and the setting name as `hosts`;
+   a human fills the provider.
    NEVER `party_add` a placeholder ("SMTP mail server", "Email delivery
-   service"): a party is a named organisation you can point at.
+   service", "Project SDK endpoint"): a party is a named organisation you
+   can point at. A `fetch("/api/...")` with no host is the project's own
+   route: nothing leaves, the edge is already derived — no party, no
+   store, no `transfers`.
+   A refusal from `store_add` or `party_add` is final: when it says a
+   store or a party of the same name / host / domain exists, it IS the
+   same one — use that slug or id. When it says the party is a store of
+   the project, declare the copy under `stores`. There is no way around
+   it and you must not look for one (no respelling, no suffix, no second
+   id): a human resolves the rare real case on the command line.
 6. Call `touchpoint_set_data` once with every ref and its `ops`, `transfers`
    when anything leaves to another organisation, `stores` when the code
    copies data into another store of the project, and a `reason` citing
