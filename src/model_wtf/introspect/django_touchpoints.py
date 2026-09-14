@@ -30,6 +30,7 @@ Output schema (``schema: 1``)::
        "file": "/repo/fah/apps/orders/api.py", "line": 115,
        "framework": "ninja", "operation_id": "checkout",
        "auth": ["SessionAuth"],
+       "auth_custom": ["get_permissions (shop.views.WebHookLogViewSet)"],
        "request": {"cart_id": "string(uuid)", "address_id": "string(uuid)"},
        "response": {"order_id": "string(uuid)", ...},
        "params": ["slug"]},
@@ -152,6 +153,46 @@ def _walk(patterns, prefix="", namespace=None):
             yield text, name, p
 
 
+def _spectacular_operation_ids():
+    """``{route name: [operation ids]}`` from drf-spectacular's schema, when
+    the project uses it: the generated front clients call DRF endpoints by
+    these ids (``apiBizneoRequisitionsRetrieveWithCvsRetrieve``), which is
+    how a front route links to the api touchpoint it calls. Empty when
+    spectacular is absent or the schema fails to build."""
+    try:
+        from django.conf import settings
+        from django.urls import Resolver404, resolve
+        from drf_spectacular.generators import SchemaGenerator
+    except ImportError:
+        return {}
+    if "drf_spectacular" not in getattr(settings, "INSTALLED_APPS", ()):
+        return {}
+    try:
+        import io
+
+        # Spectacular warns about every view it cannot type; that is its
+        # business, not the introspection's output.
+        with contextlib.redirect_stderr(io.StringIO()):
+            schema = SchemaGenerator().get_schema(request=None, public=True)
+    except Exception:
+        return {}
+    out = {}
+    for path, ops in (schema.get("paths") or {}).items():
+        try:
+            match = resolve(path.replace("{", "1").replace("}", ""))
+        except Resolver404:
+            try:
+                match = resolve(re.sub(r"\{[^}]*\}", "1", path))
+            except Resolver404:
+                continue
+        name = match.view_name
+        for op in ops.values():
+            op_id = op.get("operationId") if isinstance(op, dict) else None
+            if name and op_id:
+                out.setdefault(name, []).append(op_id)
+    return out
+
+
 def _ninja_index():
     """``{(prefix+path, method): operation facts}`` for every NinjaAPI found.
 
@@ -257,7 +298,59 @@ def _drf_facts(view_class):
             facts["request"] = {"<serializer>": _dotted(ser)}
     perms = getattr(view_class, "permission_classes", None) or []
     facts["auth"] = [getattr(c, "__name__", str(c)) for c in perms]
+    custom = _custom_auth(view_class)
+    if custom:
+        facts["auth_custom"] = custom
     return facts
+
+
+AUTH_HOOKS = (
+    "get_permissions",
+    "get_authenticators",
+    "check_permissions",
+    "check_object_permissions",
+    "perform_authentication",
+    "permission_denied",
+    "initial",
+    "dispatch",
+)
+"""DRF ``APIView`` methods that decide who gets past the door. A view (or a
+project mixin) overriding one of them may allow what its
+``permission_classes`` attribute denies: the class attribute is then a
+claim, not a fact."""
+
+DRF_AUTHENTICATORS = re.compile(r"rest_framework(_simplejwt)?\.authentication")
+
+
+def _custom_auth(view_class):
+    """Where the view departs from stock DRF auth: ``get_permissions``
+    overridden in ``shop.views.Foo``, a hand-written authentication class
+    (``TokenHeaderAuthentication`` — one that returns ``None`` lets the
+    caller in as anonymous), a permission class that is not DRF's own.
+
+    Returns ``"<method|class> (<dotted owner>)"`` strings; empty when the
+    view relies on the framework alone. The reviewer must then read the
+    override and declare ``reach``.
+    """
+    found = []
+    for name in AUTH_HOOKS:
+        for klass in view_class.__mro__:
+            if (getattr(klass, "__module__", "") or "").startswith(
+                ("rest_framework.", "django.")
+            ):
+                # Reached the framework's own classes: nothing custom.
+                break
+            if name in vars(klass):
+                found.append(f"{name} ({_dotted(klass)})")
+                break
+    for attr in ("authentication_classes", "permission_classes"):
+        for klass in getattr(view_class, attr, None) or []:
+            module = getattr(klass, "__module__", "") or ""
+            if not DRF_AUTHENTICATORS.match(module) and not module.startswith(
+                "rest_framework."
+            ):
+                found.append(f"{getattr(klass, '__name__', klass)} ({_dotted(klass)})")
+    return found
 
 
 def _form_fields(view_class):
@@ -437,6 +530,7 @@ def _route_touchpoints():
     if not getattr(settings, "ROOT_URLCONF", None):
         return []
     ninja, _ = _ninja_index()
+    spectacular = _spectacular_operation_ids()
     out = []
     for text, name, p in _walk(get_resolver().url_patterns):
         cb = p.callback
@@ -507,7 +601,9 @@ def _route_touchpoints():
                 "line": line,
                 "framework": facts.get("framework") or ("form" if form else "django"),
                 "operation_id": None,
+                "operation_ids": spectacular.get(name, []),
                 "auth": sorted({*facts.get("auth", []), *_wrapper_auth(cb)}),
+                "auth_custom": facts.get("auth_custom", []),
                 "request": facts.get("request") or form or {},
                 "response": facts.get("response", {}),
                 "params": params,

@@ -112,7 +112,9 @@ def test_gen_refuses_an_unmapped_sid(tmp_path: Path) -> None:
     with pytest.raises(GenError, match="ZZ99"):
         generate(str(library), out_dir=out)
     assert not list(out.glob("ZZ99.yaml"))
-    (out / "_mapping.yaml").write_text("ZZ99: {topic: input, effect: tampering}\n")
+    (out / "_mapping.yaml").write_text(
+        "ZZ99: {topic: input, effect: tampering, effort: work}\n"
+    )
     result = generate(str(library), out_dir=out)
     assert [p.name for p in result.written] == ["ZZ99.yaml"]
     assert result.stale == []
@@ -121,7 +123,7 @@ def test_gen_refuses_an_unmapped_sid(tmp_path: Path) -> None:
     # A mapping entry pointing at a rule that does not exist.
     (out / "_rules.yaml").write_text("")
     (out / "_mapping.yaml").write_text(
-        "ZZ99: {topic: input, effect: tampering, dismiss: [nope]}\n"
+        "ZZ99: {topic: input, effect: tampering, effort: work, dismiss: [nope]}\n"
     )
     with pytest.raises(CatalogueError, match="nope"):
         load_catalogue(out)
@@ -195,8 +197,13 @@ def test_flows_carrying_no_personal_item_drop_disclosure_threats(repo: Path) -> 
     # Customer.id is not personal: the flow to the store has no leak to check.
     assert by["api:getCustomer->api:db-default", "DS06"].verdict is Verdict.DISMISSED
     assert by["api:getCustomer->api:db-default", "DS06"].reason == "flow_not_personal"
-    # The email is personal: open, under the disclosure topic.
+    # The email is personal, but writing it into the project's own database
+    # is what the touchpoint is for: the leak question is asked of the
+    # response to the caller, not of the store write.
     cell = by["api:checkout->api:db-default", "DS06"]
+    assert cell.verdict is Verdict.DISMISSED
+    assert cell.reason == "own_store_write"
+    cell = by["actor:public->api:checkout", "DS06"]
     assert cell.verdict is Verdict.OPEN
     assert cell.topic == "disclosure"
     # No credentials anywhere: credential threats out on every flow.
@@ -359,21 +366,29 @@ def test_a_stamp_goes_stale_when_the_touchpoint_changes(repo: Path) -> None:
 
 
 def test_flow_stamps_live_on_the_source_keyed_by_sink(repo: Path) -> None:
-    _tp(repo, "checkout", f"scope: subject\ndata:\n  - {EMAIL}: create\n")
+    # The mail store is where data leaves the project: its flow keeps the
+    # leak cells (the database write is the touchpoint's own business).
+    _tp(
+        repo,
+        "checkout",
+        f"scope: subject\ndata:\n  - {EMAIL}: create\n"
+        f"stores: [{{store: mail-default, data: [{EMAIL}]}}]\n",
+    )
     out = _stamp(
         repo,
-        "api:checkout->api:db-default",
+        "api:checkout->api:mail-default",
         "DS06",
         "--status",
         "n/a",
         "--note",
-        "the store is the app's own database",
+        "the receipt goes to the customer's own address",
     )
     assert out.exit_code == 0, out.output  # type: ignore[attr-defined]
-    assert _stamps("checkout")["DS06@api:db-default"].status == "n/a"  # type: ignore[union-attr]
+    assert _stamps("checkout")["DS06@api:mail-default"].status == "n/a"  # type: ignore[union-attr]
     matrix = build_matrix(_ws(repo))
     by = {(c.element, c.sid): c for c in matrix.cells}
-    assert by["api:checkout->api:db-default", "DS06"].verdict is Verdict.STAMPED
+    assert by["api:checkout->api:mail-default", "DS06"].verdict is Verdict.STAMPED
+    assert by["api:checkout->api:db-default", "DS06"].verdict is Verdict.DISMISSED
     # The actor flow is not covered by a sink-specific stamp...
     assert by["actor:subject->api:checkout", "DS06"].verdict is Verdict.OPEN
     # A bare `missing` would land on every flow at once and take the heaviest
@@ -381,14 +396,14 @@ def test_flow_stamps_live_on_the_source_keyed_by_sink(repo: Path) -> None:
     out = _stamp(repo, "api:checkout", "DR01", "--missing", "leaks the email")
     assert out.exit_code != 0  # type: ignore[attr-defined]
     assert "DR01@actor:subject" in out.output  # type: ignore[attr-defined]
-    assert "DR01@api:db-default" in out.output  # type: ignore[attr-defined]
+    assert "DR01@api:mail-default" in out.output  # type: ignore[attr-defined]
     # A verdict (n/a, mitigated) on the bare key covers every flow: fine.
     out = _stamp(repo, "api:checkout", "DR01", "--status", "n/a", "--note", "https")
     assert out.exit_code == 0, out.output  # type: ignore[attr-defined]
     matrix = build_matrix(_ws(repo))
     by = {(c.element, c.sid): c for c in matrix.cells}
     assert by["actor:subject->api:checkout", "DR01"].verdict is Verdict.STAMPED
-    assert by["api:checkout->api:db-default", "DR01"].verdict is Verdict.STAMPED
+    assert by["api:checkout->api:mail-default", "DR01"].verdict is Verdict.STAMPED
 
 
 def test_store_and_party_stamps(repo: Path) -> None:
@@ -554,18 +569,30 @@ def test_a_finding_is_weighed_from_effect_data_and_actor(repo: Path) -> None:
     f = _finding(repo, "api:checkout", "DO01")
     assert f.effect == "denial"  # type: ignore[attr-defined]
     assert f.degree is None  # type: ignore[attr-defined]
-    assert f.impact <= 2.0  # type: ignore[attr-defined]
+    assert f.impact == 1.0  # type: ignore[attr-defined]  # an outage, not a breach
     # Reach comes from the auth facts, not the declared scope: the fixture's
     # checkout has no auth, so anonymous can call it even though its manifest
     # says `scope: subject` (it reads request.user when there is one).
     assert f.actors[0] == "anonymous"  # type: ignore[attr-defined]
-    assert f.severity == "medium"  # type: ignore[attr-defined]
+    # Flooding takes a script (effort `work`): 1.0 x 0.75 -> low.
+    assert f.likelihood == 0.75  # type: ignore[attr-defined]
+    assert f.severity == "low"  # type: ignore[attr-defined]
 
-    # Escalation is the maximum impact whatever the data.
+    # Escalation is the door to what the touchpoint handles: one personal
+    # record created here -> 2 x 1 (the floor), open to anyone -> high.
     _stamp(repo, "api:checkout", "AA01", "--missing", "auth not enforced on PUT")
     f = _finding(repo, "api:checkout", "AA01")
     assert f.effect == "escalation"  # type: ignore[attr-defined]
-    assert f.impact == 4.0  # type: ignore[attr-defined]
+    assert f.degree == "record"  # type: ignore[attr-defined]
+    assert f.impact == 2.0  # type: ignore[attr-defined]
+    assert f.severity == "high"  # type: ignore[attr-defined]
+    # The same missing auth on the confidential, enumerable lookup (a
+    # subject route, so AA01 applies) -> the whole table: critical.
+    _tp(repo, "getCustomer", f"scope: subject\ndata:\n  - {IBAN}\n  - {EMAIL}\n")
+    _stamp(repo, "api:getCustomer", "AA01", "--missing", "no auth at all")
+    f = _finding(repo, "api:getCustomer", "AA01")
+    assert f.impact == 6.0  # type: ignore[attr-defined]
+    assert f.severity == "critical"  # type: ignore[attr-defined]
 
 
 def test_entitled_actors_and_project_actor_overrides(repo: Path) -> None:
@@ -575,7 +602,14 @@ def test_entitled_actors_and_project_actor_overrides(repo: Path) -> None:
     from model_wtf.compliance.threats import load_catalogue
 
     _tp(repo, "admin:shop.Customer", f"scope: staff\ndata:\n  - {EMAIL}\n  - {IBAN}\n")
-    _tp(repo, "getCustomer", f"scope: staff\ndata:\n  - {EMAIL}\n  - {IBAN}\n")
+    # The fixture's getCustomer has no auth class: a declared scope alone
+    # does not lock the door (anyone reaches it), the reviewer who read the
+    # code says who does with `reach`.
+    _tp(
+        repo,
+        "getCustomer",
+        f"scope: staff\nreach: staff\ndata:\n  - {EMAIL}\n  - {IBAN}\n",
+    )
     ws = _ws(repo)
     matrix = build_matrix(ws, load_catalogue())
     element = matrix.elements["api:getCustomer"]
@@ -607,7 +641,7 @@ def test_check_tags_and_sorts_findings_by_risk(repo: Path) -> None:
     _stamp(repo, "api:getCustomer", "DO01", "--missing", "no throttle")
     report = run_check(strict=False)
     findings = [d for d in report.diagnostics if d.code == "threat-missing"]
-    assert [d.risk for d in findings] == ["critical", "medium"]
+    assert [d.risk for d in findings] == ["critical", "low"]
     assert (
         "[critical: disclosure/bulk by anonymous, subject, staff]"
         in findings[0].message
@@ -658,26 +692,31 @@ def test_findings_lists_missing_stamps_most_severe_first(repo: Path) -> None:
 def test_findings_on_one_flow_print_the_flow_and_keep_working(repo: Path) -> None:
     """A `!missing` keyed `SID@sink` is reported on the holder with the flow
     named; every later lookup (ids, why, table) still resolves the holder."""
-    _tp(repo, "checkout", f"scope: subject\ndata:\n  - {EMAIL}: create\n")
+    _tp(
+        repo,
+        "checkout",
+        f"scope: subject\ndata:\n  - {EMAIL}: create\n"
+        f"stores: [{{store: mail-default, data: [{EMAIL}]}}]\n",
+    )
     out = _stamp(
-        repo, "api:checkout", "DS06@api:db-default", "--missing", "row visible to all"
+        repo, "api:checkout", "DS06@api:mail-default", "--missing", "mails the row"
     )
     assert out.exit_code == 0, out.output  # type: ignore[attr-defined]
     base = ["--root", str(repo), "compliance", "threats"]
     runner = CliRunner()
     table = runner.invoke(cli, [*base, "findings"])
     assert table.exit_code == 0, table.output
-    assert "api:checkout → api:db-default" in table.output.replace("\n", "")
+    assert "api:checkout → api:mail-default" in table.output.replace("\n", "")
     assert "F-0001" in table.output
     as_json = runner.invoke(cli, [*base, "findings", "--format", "json"])
     assert as_json.exit_code == 0, as_json.output
     rows = json.loads(as_json.output)
     assert rows[0]["ids"] == ["F-0001"]
-    assert rows[0]["element"] == "api:checkout → api:db-default"
+    assert rows[0]["element"] == "api:checkout → api:mail-default"
     assert rows[0]["sid"] == "DS06"
     why = runner.invoke(cli, [*base, "why", "F-0001"])
     assert why.exit_code == 0, why.output
-    assert "row visible to all" in why.output
+    assert "mails the row" in why.output
 
 
 def test_findings_get_stable_ids_that_survive_fixes_and_returns(repo: Path) -> None:
@@ -754,22 +793,25 @@ def test_flow_keyed_stamps_are_listed_and_stamped_per_flow(repo: Path) -> None:
         repo,
         "checkout",
         f"scope: subject\ndata:\n  - {EMAIL}: create\n"
-        f"transfers: [{{party: mapbox, data: [{EMAIL}]}}]\n",
+        f"transfers: [{{party: mapbox, data: [{EMAIL}]}}]\n"
+        f"stores: [{{store: mail-default, data: [{EMAIL}]}}]\n",
     )
     tools = Tools()
     listing = tools.threat_cells("api:checkout")
-    # The transfer flow is dismissed (intended use); the store flow is open
-    # and shown with its key.
+    # The transfer flow is dismissed (intended use), so is the write into
+    # the project's own database; the mail flow is open and shown with its
+    # key.
     assert "DS06@party:mapbox" not in listing
-    assert "DS06@api:db-default" in listing
+    assert "DS06@api:db-default" not in listing
+    assert "DS06@api:mail-default" in listing
     out = tools.threat_stamp(
-        "api:checkout", "DS06@api:db-default", missing="row visible to all staff"
+        "api:checkout", "DS06@api:mail-default", missing="mails the whole row"
     )
     assert out.startswith("Stamped")
-    assert "DS06@api:db-default" in _stamps("checkout")
+    assert "DS06@api:mail-default" in _stamps("checkout")
     matrix = build_matrix(_ws(repo))
     by = {(c.element, c.sid): c for c in matrix.cells}
-    assert by["api:checkout->api:db-default", "DS06"].verdict is Verdict.MISSING
+    assert by["api:checkout->api:mail-default", "DS06"].verdict is Verdict.MISSING
     assert by["actor:subject->api:checkout", "DS06"].verdict is Verdict.OPEN
     assert by["api:checkout->party:mapbox", "DS06"].verdict is Verdict.DISMISSED
     assert by["api:checkout->party:mapbox", "DS06"].reason == "declared_transfer"
@@ -810,15 +852,115 @@ def test_vendor_views_are_not_code_reviewed(repo: Path) -> None:
 
 
 def test_bare_key_is_refused_only_for_a_finding(repo: Path) -> None:
-    _tp(repo, "checkout", f"scope: subject\ndata:\n  - {EMAIL}: create\n")
+    _tp(
+        repo,
+        "checkout",
+        f"scope: subject\ndata:\n  - {EMAIL}: create\n"
+        f"stores: [{{store: mail-default, data: [{EMAIL}]}}]\n",
+    )
     ok = _stamp(repo, "api:checkout", "DS06", "--status", "n/a", "--note", "schema")
     assert ok.exit_code == 0, ok.output  # type: ignore[attr-defined]
     matrix = build_matrix(_ws(repo), register=False)
     covered = [
-        c for c in matrix.cells if c.sid == "DS06" and "api:checkout" in c.element
+        c
+        for c in matrix.cells
+        if c.sid == "DS06"
+        and "api:checkout" in c.element
+        and c.verdict is not Verdict.DISMISSED
     ]
-    assert covered
+    assert len(covered) >= 2  # the caller's response and the mail flow
     assert all(c.verdict is Verdict.STAMPED for c in covered)
     bad = _stamp(repo, "api:checkout", "DR01", "--missing", "email in the url")
     assert bad.exit_code != 0  # type: ignore[attr-defined]
     assert "DR01@" in bad.output  # type: ignore[attr-defined]
+
+
+def test_severity_reads_effort_horizontal_and_degree_cap(repo: Path) -> None:
+    """Three knobs of the mapping shape the score: `effort` scales the
+    likelihood (a brute force is not a walk-in), `horizontal` weighs one
+    account reaching every other account like an open door, `degree_cap`
+    bounds what an error message can leak whatever the touchpoint lists."""
+    from model_wtf.compliance.severity import Degree, Effort, assess, load_actors
+    from model_wtf.compliance.threats import load_catalogue
+
+    # A subject-only listing of confidential data (reach declared: the
+    # fixture has no auth class).
+    _tp(
+        repo,
+        "getCustomer",
+        f"scope: subject\nreach: subject\ndata:\n  - {IBAN}\n  - {EMAIL}\n",
+    )
+    ws = _ws(repo)
+    element = build_matrix(ws, load_catalogue(), register=False).elements[
+        "api:getCustomer"
+    ]
+    actors = load_actors()
+    plain = assess(ws, ws.knowledge, actors, element, "disclosure")
+    assert plain.actors[0] == "subject"
+    assert plain.likelihood == 0.48  # 0.6 x 0.8
+    # Ownership not checked: any account reads any customer -> like anyone.
+    idor = assess(ws, ws.knowledge, actors, element, "disclosure", horizontal=True)
+    assert idor.likelihood == 1.0
+    assert idor.severity.value == "critical"  # 3 x 2 (bulk) x 1
+    # The same data behind a brute force: work halves-ish the likelihood.
+    brute = assess(ws, ws.knowledge, actors, element, "disclosure", effort=Effort.WORK)
+    assert brute.likelihood == 0.36
+    assert brute.effort is Effort.WORK
+    # An error message leaks one attribute at a time, not the listing.
+    oracle = assess(
+        ws, ws.knowledge, actors, element, "disclosure", degree_cap=Degree.ATTRIBUTE
+    )
+    assert oracle.degree is Degree.ATTRIBUTE
+    assert oracle.impact == 1.5
+    # The mapping wires them: DS01 (an oracle) is capped, AC01 (IDOR) is
+    # horizontal, CR03 (brute force) is work.
+    catalogue = load_catalogue()
+    assert catalogue.mapping["DS01"].degree_cap == "attribute"
+    assert catalogue.mapping["AC01"].horizontal is True
+    assert catalogue.mapping["CR03"].effort == "work"
+    assert all(
+        t.effort is not None for t in catalogue.mapping.values() if t.never is None
+    )
+
+
+def test_reach_is_derived_from_calls_and_layout_guards(repo: Path) -> None:
+    """A front route with no auth of its own is gated by what it proxies to
+    and by the layouts above it; a declared reach wins over both."""
+    from dataclasses import replace
+
+    from model_wtf.compliance.touchpoints import Introspected, Reach, Touchpoint
+    from model_wtf.compliance.workspace import _derive_reach
+
+    _tp(repo, "getCustomer", f"scope: subject\nreach: staff\ndata:\n  - {EMAIL}\n")
+    ws = _ws(repo)
+    api = ws.all_touchpoints["api:getCustomer"]
+    assert api.reach is Reach.STAFF
+
+    def route(rid: str, **facts: object) -> Touchpoint:
+        tp = Touchpoint(
+            unit="front", facts=Introspected.model_validate({"id": rid, **facts})
+        )
+        return replace(tp, reach=Reach.ANONYMOUS)
+
+    guard = route(
+        "/(portal)",
+        files=["+layout.server.ts"],
+        auth=["login guard (+layout.server.ts)"],
+    )
+    guard = replace(guard, reach=Reach.SUBJECT)
+    proxy = route("/api/customer", files=["+server.ts"])
+    proxy = replace(proxy, calls=("api:getCustomer",))
+    child = route("/(portal)/orders", files=["+page.svelte"])
+    declared = replace(
+        route("/(portal)/public", files=["+page.svelte"]), reach_declared=True
+    )
+    ws.touchpoints["front"] = type(ws.touchpoints["api"])(
+        ws.touchpoints["api"].unit, items=[guard, proxy, child, declared]
+    )
+    _derive_reach(ws)
+    by = {t.id: t for t in ws.touchpoints["front"].items}
+    assert by["/api/customer"].reach is Reach.STAFF
+    assert by["/api/customer"].reach_via == "calls"
+    assert by["/(portal)/orders"].reach is Reach.SUBJECT
+    assert by["/(portal)/orders"].reach_via == "layout /(portal)"
+    assert by["/(portal)/public"].reach is Reach.ANONYMOUS  # declared: untouched

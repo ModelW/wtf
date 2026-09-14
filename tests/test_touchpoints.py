@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -176,7 +177,10 @@ def test_sveltekit_touchpoints_and_call_linking(repo: Path) -> None:
     assert contact is not None
     assert contact.facts.actions == ["send"]
     assert contact.facts.form_fields == ["email", "message"]
-    assert contact.facts.fetches == ["/back/api/contact"]
+    # A relative fetch is the project itself: linked to the route serving
+    # it when one exists, never an outbound host (nothing serves this one).
+    assert contact.facts.fetches == []
+    assert "/back/api/contact" not in contact.calls
     assert contact.facts.action_data == {"sent": "boolean"}
 
     layout = front.get("/")
@@ -965,3 +969,92 @@ def test_link_calls_resolves_relative_fetches_to_the_projects_routes() -> None:
     assert orphan is not None
     assert orphan.calls == ()
     assert orphan.facts.fetches == []  # relative: internal, whatever serves it
+
+
+def test_custom_auth_hooks_are_facts_and_the_declaration_needs_a_reach() -> None:
+    """A view overriding `get_permissions` (or using a hand-written
+    authentication class) may let in what its `permission_classes` deny:
+    the introspection reports the override, the reach inference is flagged
+    unverified, and the declaration is refused until a reviewer who read
+    the code gives `reach`."""
+    import types
+    from typing import ClassVar
+
+    from model_wtf.introspect.django_touchpoints import _custom_auth
+
+    # Stand-ins for DRF's classes, recognised by their module like the real ones.
+    APIView = types.new_class("APIView")
+    APIView.__module__ = "rest_framework.views"
+    GenericViewSet = types.new_class("GenericViewSet", (APIView,))
+    GenericViewSet.__module__ = "rest_framework.viewsets"
+    IsAuthenticated = types.new_class("IsAuthenticated")
+    IsAuthenticated.__module__ = "rest_framework.permissions"
+    TokenHeaderAuthentication = types.new_class("TokenHeaderAuthentication")
+    TokenHeaderAuthentication.__module__ = "shop.views"
+
+    class Plain(GenericViewSet):  # type: ignore[misc, valid-type]
+        permission_classes: ClassVar = [IsAuthenticated]
+
+    class Rebuilt(GenericViewSet):  # type: ignore[misc, valid-type]
+        permission_classes: ClassVar = [IsAuthenticated]
+        authentication_classes: ClassVar = [TokenHeaderAuthentication]
+
+        def get_permissions(self) -> list[object]:
+            return []
+
+    for klass in (Plain, Rebuilt):
+        klass.__module__ = "shop.views"
+        klass.__qualname__ = klass.__name__
+    assert _custom_auth(Plain) == []
+    assert _custom_auth(Rebuilt) == [
+        "get_permissions (shop.views.Rebuilt)",
+        "TokenHeaderAuthentication (shop.views.TokenHeaderAuthentication)",
+    ]
+
+
+def test_reach_is_who_the_code_lets_in_not_who_it_serves(repo: Path) -> None:
+    from model_wtf.compliance.mcp_server import DataRef, Tools
+    from model_wtf.compliance.touchpoints import Introspected, Reach, infer_reach
+
+    # No auth at all is anonymous whatever the touchpoint is for.
+    assert infer_reach(Introspected(id="hooks", auth=[])) is Reach.ANONYMOUS
+    assert infer_reach(Introspected(id="x", auth=["IsAuthenticated"])) is Reach.SUBJECT
+    assert infer_reach(Introspected(id="x", auth=["IsAdminUser"])) is Reach.STAFF
+    assert infer_reach(Introspected(id="x", auth=["AllowAny"])) is Reach.ANONYMOUS
+    assert infer_reach(Introspected(id="task:x", kind="task")) is Reach.SYSTEM  # type: ignore[arg-type]
+
+    ws = _ws(repo)
+    checkout = ws.all_touchpoints["api:checkout"]
+    assert checkout.reach is Reach.ANONYMOUS
+    assert not checkout.reach_unverified
+
+    # A view with a rebuilt door: pending until the reach is declared.
+    hooked = replace(
+        checkout,
+        facts=checkout.facts.model_copy(
+            update={"auth_custom": ["get_permissions (shop.api.Hooked)"]}
+        ),
+    )
+    assert hooked.reach_unverified
+    assert hooked.pending
+    ws.touchpoints["api"].items = [
+        hooked if t.id == "checkout" else t for t in ws.touchpoints["api"].items
+    ]
+    tools = Tools()
+    tools._workspace = ws
+    with pytest.raises(ValueError, match=r"overrides the auth machinery.*`reach`"):
+        tools.touchpoint_set_data(
+            "api:checkout", [DataRef(ref="shop.Customer.email")], reason="api.py:20"
+        )
+    out = tools.touchpoint_set_data(
+        "api:checkout",
+        [DataRef(ref="shop.Customer.email")],
+        reason="api.py:20 get_permissions returns [] on the leader",
+        scope="system",
+        reach="anonymous",
+    )
+    assert "STILL PENDING" not in out
+    fresh = _ws(repo).all_touchpoints["api:checkout"]
+    assert fresh.reach is Reach.ANONYMOUS
+    assert fresh.reach_declared
+    assert fresh.scope.value == "system"

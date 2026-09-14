@@ -33,6 +33,8 @@ from model_wtf.compliance.tables import (
     TransferRow,
 )
 from model_wtf.compliance.touchpoints import (
+    Kind,
+    Reach,
     Touchpoint,
     UnitTouchpoints,
     collect_touchpoints,
@@ -227,6 +229,7 @@ def load_workspace(
             known_stores=store_ids,
         )
     link_calls(ws.touchpoints)
+    _derive_reach(ws)
     _settle_undeclared(ws)
     rows = ws.rows
     ws.activities = load_activities(
@@ -237,6 +240,80 @@ def load_workspace(
         parties=parties,
     )
     return ws
+
+
+_REACH_STRENGTH = {
+    Reach.ANONYMOUS: 0,
+    Reach.SUBJECT: 1,
+    Reach.STAFF: 2,
+    Reach.SYSTEM: 3,
+}
+
+
+def _derive_reach(ws: Workspace) -> None:
+    """A route with no auth facts of its own is gated by what it proxies to
+    and by the layouts above it.
+
+    A SvelteKit ``+server.ts`` forwarding the caller's cookie to the api is
+    reached, for the data it returns, by whoever the api lets in: the
+    weakest of the touchpoints it ``calls``. A parent route with a
+    ``+layout.server.ts`` that redirects to login guards every child. The
+    derived reach is the stronger of the two; a declared reach always wins,
+    and a route with neither calls nor a guarding parent stays anonymous.
+    """
+    from dataclasses import replace
+
+    all_tps = ws.all_touchpoints
+    for unit_tps in ws.touchpoints.values():
+        # Parents before children: a child reads its parent's derived reach.
+        order = sorted(
+            range(len(unit_tps.items)), key=lambda i: len(unit_tps.items[i].id)
+        )
+        derived: dict[str, Reach] = {}
+        for index in order:
+            tp = unit_tps.items[index]
+            if tp.reach_declared or tp.facts.auth or tp.facts.kind is not Kind.ROUTE:
+                continue
+            via: list[str] = []
+            reach = tp.reach
+            called = [
+                all_tps[c].reach for c in tp.calls if c in all_tps and c != tp.full_id
+            ]
+            if called:
+                weakest = min(called, key=lambda r: _REACH_STRENGTH[r])
+                if _REACH_STRENGTH[weakest] > _REACH_STRENGTH[reach]:
+                    reach, via = weakest, ["calls"]
+            parent = _guarding_parent(tp, unit_tps.items, derived)
+            if parent is not None:
+                guard = derived.get(parent.id, parent.reach)
+                if _REACH_STRENGTH[guard] > _REACH_STRENGTH[reach]:
+                    reach, via = guard, [f"layout {parent.id}"]
+            if reach is not tp.reach:
+                derived[tp.id] = reach
+                unit_tps.items[index] = replace(
+                    tp, reach=reach, reach_via=", ".join(via)
+                )
+
+
+def _guarding_parent(
+    tp: Touchpoint, items: list[Touchpoint], derived: dict[str, Reach]
+) -> Touchpoint | None:
+    """The nearest ancestor route (same unit, id prefix on a ``/`` boundary)
+    that has a server layout: its load runs before the child's."""
+    if not tp.id.startswith("/"):
+        return None
+    best: Touchpoint | None = None
+    for other in items:
+        if other is tp or not other.id.startswith("/"):
+            continue
+        prefix = other.id.rstrip("/")
+        if not tp.id.startswith(prefix + "/"):
+            continue
+        if not any(f.startswith("+layout.server") for f in other.facts.files):
+            continue
+        if best is None or len(other.id) > len(best.id):
+            best = other
+    return best
 
 
 def _settle_undeclared(ws: Workspace) -> None:

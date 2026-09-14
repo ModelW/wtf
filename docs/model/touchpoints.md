@@ -39,7 +39,16 @@ metadata. No legal verb: a person changing their own address is an `update`,
 deleting it a `delete` — what that means for their rights follows from the
 touchpoint's **scope** (`scope: subject | staff | public | system`, inferred
 from auth classes, `request.user` in the body and admin namespaces, or
-declared in the manifest). `write`, `rectify`, `access`, `erase`, `object`,
+declared in the manifest). The scope is who the touchpoint is *for*; its
+**reach** (`reach: anonymous | subject | staff | system`) is who the code
+actually *lets in*, and drives how severe every threat on it is. It is
+inferred from the auth facts alone — no auth class at all is `anonymous`
+whatever the scope says — except when the view rebuilt its own door: a DRF
+view overriding `get_permissions` / `get_authenticators` / `dispatch`…, or
+using a hand-written authentication or permission class, is reported under
+`custom auth` and stays **pending** until the reviewer who read the override
+declares `reach` (`touchpoint_set_data` refuses the declaration without it).
+`write`, `rectify`, `access`, `erase`, `object`,
 `restrict` still load, folded onto the fact they imply with an
 `op-ambiguous` warning. `transfers:`
 lists what leaves to another organisation's API — `- {party: mapbox, data:

@@ -26,7 +26,11 @@ def _columns(engine: Engine) -> dict[str, dict[str, str]]:
     }
 
 
-ADDED_SINCE_V1 = (("parties", "distinct_from"), ("stores", "distinct_from"))
+ADDED_SINCE_V1 = (
+    ("parties", "distinct_from"),
+    ("stores", "distinct_from"),
+    ("touchpoints", "reach"),
+)
 """Every ``(table, column)`` a migration added: dropped to rebuild a v1 file.
 Extend it with each new ``ALTER TABLE ... ADD COLUMN`` step."""
 

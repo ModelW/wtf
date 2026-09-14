@@ -229,9 +229,16 @@ def render_touchpoint(tp: Touchpoint, ws: Workspace) -> Text:
     line("route name", f.route_name)
     origin = "declared" if tp.scope_declared else "inferred from auth"
     line("scope", f"{tp.scope.value} ({origin})")
+    reach_origin = "declared" if tp.reach_declared else "inferred from auth"
+    if tp.reach_via:
+        reach_origin = f"derived from {tp.reach_via}"
+    if tp.reach_unverified:
+        reach_origin += ", UNVERIFIED: the view overrides the auth machinery"
+    line("reach", f"{tp.reach.value} ({reach_origin})")
     line("view", f.view)
     line("location", tp.location(ws.root))
     line("auth", ", ".join(f.auth))
+    line("custom auth", "; ".join(f.auth_custom))
     line("summary", f.summary)
     line("params", ", ".join(f.params))
     line("periodic", "yes" if f.periodic else None)

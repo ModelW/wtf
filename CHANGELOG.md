@@ -41,6 +41,51 @@ the matching section on the GitHub release.
   infrastructure becomes store writes), `to-flow <id>` (a party that was
   the project itself: its transfers go, the derived call stays),
   `distinct`, `duplicates`.
+- **Reach: who the code lets in, apart from who it serves.** A finding's
+  likelihood used to come from the touchpoint's `scope`, so a `system`
+  webhook listing whose `get_permissions()` returned `[]` on the leader —
+  readable by anyone on the internet — scored `info` (system, 0.01)
+  instead of `high` (anonymous). Touchpoints now carry a `reach`
+  (`anonymous | subject | staff | system`), inferred from the auth facts
+  alone (no auth is anonymous whatever the scope says) and declared by the
+  reviewer through `touchpoint_set_data(reach=)`. The Django introspection
+  reports `auth_custom` — DRF views overriding `get_permissions`,
+  `get_authenticators`, `dispatch`… or using a hand-written authentication /
+  permission class — and such a touchpoint is pending until a reviewer
+  reads the override and declares its reach; the declaration is refused
+  without it. Schema v4 adds `touchpoints.reach`.
+- **Severity buckets rebalanced.** `critical` is an open buffet — anyone
+  (or any account onto every other account's data) takes personal data in
+  bulk, a confidential listing or a special-category record; `high` is
+  what takes some work, or an account, to get at what is not yours;
+  `medium` is what someone could do that they should not. Concretely: the
+  `bulk` degree weighs 2 (each degree doubles the last), critical starts
+  at 4, high at 2, medium at 1; every reviewable threat in `_mapping.yaml`
+  declares an `effort` (`open` walk in ×1, `work` a script or payload ×¾,
+  `chain` another flaw or a victim ×½) that scales the likelihood, so a
+  brute force on a login or a stored XSS is `high`, not `critical`; the
+  ownership threats (AA03, AC01, AC07, AC12, DS05) are `horizontal` — a
+  subject who can read every other subject's rows weighs like an anonymous
+  caller; the oracle threats (DS01, INP18) are capped at one `attribute`
+  and fingerprinting (DS03, HA03) at `existence`, whatever the touchpoint
+  lists; escalation weighs like a disclosure of the data the touchpoint
+  handles (floor 2) instead of a flat 4, so an unauthenticated webhook that
+  creates one record is `high` and an unauthenticated confidential listing
+  `critical`; a tampering on a touchpoint that only creates is one
+  `record`; denial of service is a flat 1 whatever the data behind the
+  endpoint (an outage is an incident, not a breach), so an unthrottled
+  public endpoint is `medium`, not `high`. A touchpoint's write into an internal store of the project
+  (`own_store_write`: database, files, cache, queue, search, realtime) no
+  longer carries the leak cells DS06/DR01 — the response to the caller and
+  the mail / monitoring / external flows keep them.
+- **Reach is derived through the front.** A SvelteKit route with no auth
+  of its own takes the reach of the api touchpoints it `calls` (the
+  cookie is forwarded: whoever the api lets in) and of a parent
+  `+layout.server.ts` that redirects unauthenticated callers to login (the
+  introspection reports such a `load` as a `login guard` auth fact). The
+  `api.bizneo(fetch).opId()` client-factory call style is now recognised,
+  and DRF routes carry drf-spectacular's operation ids, so front routes
+  link to the DRF endpoints they proxy.
 - `auto-review` narrates each write once: the line comes from the activity
   log the MCP server appends to, no longer also from the tool-call stream
   (activities, parties and declarations were printed twice). Stores,

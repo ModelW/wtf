@@ -260,6 +260,8 @@ class TouchpointRow(Base):
     declared: Mapped[bool] = mapped_column(Boolean, default=False)
     """Whether ``data`` was given (an empty list is a valid declaration)."""
     scope: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reach: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """The weakest caller the code lets in, when a reviewer read the auth."""
     ignore: Mapped[bool] = mapped_column(Boolean, default=False)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     challenge: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)

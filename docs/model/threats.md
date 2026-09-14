@@ -71,16 +71,37 @@ A `!missing` stamp is weighed by the tool, not the agent: **impact ×
 likelihood**. Impact is the *effect* — `disclosure`, `tampering`,
 `destruction`, `denial`, `escalation`, `repudiation` (`_mapping.yaml`
 carries one per threat; `ops` resolves from what the touchpoint does) — at
-a *degree* (`existence` 0.25 < `attribute` 0.5 < `record` 1 < `bulk` 1.5,
-inferred: lists, exports, admin screens, tasks and integer ids are `bulk`)
-on the most sensitive item reached (`public` 0 … `special` 4); escalation
-counts 4, denial is capped at 2. Likelihood is the most feared *actor* the
-touchpoint's scope lets in — `anonymous`, `subject`, `staff`, `system`,
+a *degree* (`existence` 0.25 < `attribute` 0.5 < `record` 1 < `bulk` 2,
+each doubling the last; inferred: lists, exports, admin screens, tasks and
+integer ids are `bulk`, a write that only creates is `record`; a threat's
+`degree_cap` in `_mapping.yaml` bounds it — an error message leaks one
+attribute, not the listing) on the most sensitive item reached (`public` 0 …
+`special` 4). Escalation is the door to what the touchpoint handles and
+weighs like a disclosure of it, never under 2; denial is a flat 1 (an
+outage is an incident, not a breach). Likelihood is the most feared *actor* the
+touchpoint's **reach** lets in — `anonymous`, `subject`, `staff`, `system`,
+the weakest caller and everyone stronger (see
+[touchpoints](touchpoints.md): declared by the reviewer who read a custom
+auth override, else inferred from the auth facts, never from the scope) —
+times the threat's `effort` (`open` 1: walk in; `work` ¾: a script, a
+brute force, a payload; `chain` ½: another flaw or a victim, as XSS and
+CSRF need); a `horizontal` threat (one account reaching other accounts'
+data: IDOR, missing ownership checks) weighs a subject like an anonymous
+caller, every account being a potential attacker on every other —
 each with a `malice` and a `reach` in `knowledge/threats/_actors.yaml`,
 overridable per project in the `actors` table — minus the actors already
 **entitled** to that data through another declared touchpoint (staff
 counting pictures they see in the back-office is not a finding). Buckets:
-`critical` / `high` / `medium` / `low` / `info`. The reviewer may only
+`critical` (≥ 4: an open buffet — anyone, or any account onto the others,
+takes personal data in bulk, a confidential listing or a special-category
+record) / `high` (≥ 2: with some work, or from an account, someone gets at
+what is not theirs — a brute force on a login, an IDOR on one confidential
+record, an unauthenticated webhook writing a personal record) / `medium`
+(≥ 1: someone could do something they should not) / `low` (≥ 0.5) / `info`.
+A touchpoint's own write into an internal store of the project (database,
+files, cache, queue) carries no leak cell: keeping the data there is what
+it is for, the store has its own cells and the response to the caller has
+the leak ones. The reviewer may only
 narrow (`--degree existence`, `--effect denial`, `--actor subject`) with a
 reason; `check` tags and sorts findings by risk.
 

@@ -5,16 +5,28 @@ A ``!missing`` stamp says a control is absent. How much that matters is
 
 * **impact** — the *effect* of a successful attack (``disclosure``,
   ``tampering``, ``destruction``, ``denial``, ``escalation``,
-  ``repudiation``) at a *degree* (``existence`` < ``attribute`` <
-  ``record`` < ``bulk``) on data of a given *sensitivity* (the project's
-  scale, ``public`` 0 to ``special`` 4). Escalation is the door to every
-  other effect and counts as the maximum; denial touches the service, not
-  the data, and is capped.
+  ``repudiation``) at a *degree* (``existence`` ¼ < ``attribute`` ½ <
+  ``record`` 1 < ``bulk`` 2) on data of a given *sensitivity* (the
+  project's scale, ``public`` 0 to ``special`` 4). Escalation is the door
+  to every effect on the data the touchpoint handles: it weighs like a
+  disclosure of that data at the inferred degree, never less than a
+  personal record (2). Denial touches the service, not the data: a flat 1.
 * **likelihood** — the weakest *actor* who can reach the touchpoint
   (``anonymous`` > ``subject`` > ``staff`` > ``system``), each with a
   ``malice`` (propensity to attack) and a ``reach`` (how easy it is to be
   that actor), declared in ``knowledge/threats/_actors.yaml`` and
-  overridable per project in the ``actors`` table.
+  overridable per project in the ``actors`` table — times the *effort* the
+  threat takes once the control is missing (``open`` 1: walk in; ``work``
+  ½: a script, a brute force, a crafted payload; ``chain`` ¼: another flaw
+  or a victim's cooperation), declared per threat in ``_mapping.yaml``. A
+  *horizontal* threat (one account reaching other accounts' data) weighs a
+  subject actor like an anonymous one.
+
+The buckets read: ``critical`` — an open buffet (anyone walks in and takes
+personal data in bulk, or a confidential record, or the account); ``high``
+— with some work, or from any account, someone gets at data that is not
+theirs; ``medium`` — someone could do something they should not; ``low`` /
+``info`` — noise to schedule.
 
 An actor already **entitled** to the data — whose scope performs that same
 kind of operation on those items through declared touchpoints — is not a
@@ -40,7 +52,7 @@ from model_wtf.compliance.db import get_db
 from model_wtf.compliance.ops import Op
 from model_wtf.compliance.tables import ActorRow
 from model_wtf.compliance.threats_gen import builtin_threats_dir
-from model_wtf.compliance.touchpoints import Kind, Scope
+from model_wtf.compliance.touchpoints import Kind, Reach, Scope
 from model_wtf.compliance.yaml_io import load_yaml
 
 if TYPE_CHECKING:
@@ -80,11 +92,35 @@ DEGREE_WEIGHT = {
     Degree.EXISTENCE: 0.25,
     Degree.ATTRIBUTE: 0.5,
     Degree.RECORD: 1.0,
-    Degree.BULK: 1.5,
+    Degree.BULK: 2.0,
 }
+"""Each degree doubles the previous: knowing a row exists, one field of it,
+the whole row, every row (a breach in the Art. 33 sense)."""
 MAX_RANK = 4
-DENIAL_CAP = 2.0
+ESCALATION_FLOOR = 2.0
+"""An escalation on a touchpoint handling no personal data still hands over
+an account or a foothold: worth a personal record."""
+DENIAL_IMPACT = 1.0
+"""A service down is an incident, not a breach: whatever the data behind
+it, one record's worth. A DoS that also costs (a mail flood, a paid API
+hammered) is the reviewer's note, not a higher score."""
 REPUDIATION_IMPACT = 2.0
+
+
+class Effort(StrEnum):
+    """What exploiting a missing control takes; declared per threat."""
+
+    OPEN = "open"
+    """Walk in: an unauthenticated listing, an id in the URL."""
+
+    WORK = "work"
+    """A script or a payload: brute force, injection, flooding."""
+
+    CHAIN = "chain"
+    """Another flaw or a victim: XSS needs a viewer, CSRF a logged-in click."""
+
+
+EFFORT_WEIGHT = {Effort.OPEN: 1.0, Effort.WORK: 0.75, Effort.CHAIN: 0.5}
 
 
 class Severity(StrEnum):
@@ -97,15 +133,28 @@ class Severity(StrEnum):
     CRITICAL = "critical"
 
 
+CRITICAL_SCORE = 4.0
+"""An open buffet: anyone walks in and takes personal data in bulk (2 x 2),
+a special-category record (4 x 1) or a confidential listing (3 x 2)."""
+HIGH_SCORE = 2.0
+"""With some work (a brute force on a login: 3 x 0.75), by chaining (a
+stored XSS on a staff listing: 4 x 0.5), or from any account onto the
+others' data, someone gets at what is not theirs."""
+MEDIUM_SCORE = 1.0
+"""Someone could do something they should not (tamper with one personal
+record through an unchecked parameter: 2 x 0.75)."""
+LOW_SCORE = 0.5
+
+
 def bucket(score: float) -> Severity:
-    """``impact x likelihood`` (0..~6) into a bucket."""
-    if score < 0.5:
+    """``impact x likelihood`` (0..8) into a bucket."""
+    if score < LOW_SCORE:
         return Severity.INFO
-    if score < 1.5:
+    if score < MEDIUM_SCORE:
         return Severity.LOW
-    if score < 3.0:
+    if score < HIGH_SCORE:
         return Severity.MEDIUM
-    if score < 4.5:
+    if score < CRITICAL_SCORE:
         return Severity.HIGH
     return Severity.CRITICAL
 
@@ -170,15 +219,13 @@ def set_actor(
             row.note = note
 
 
-# Scope → the actors who can call the touchpoint as the scope implies. A
-# subject route is reachable by any subject; a staff route by staff; a public
-# route by everyone; a task by nobody directly.
-REACHABLE = {
-    Scope.PUBLIC: ("anonymous", "subject", "staff"),
-    Scope.SUBJECT: ("subject", "staff"),
-    Scope.STAFF: ("staff",),
-    Scope.SYSTEM: ("system",),
+REACHABLE_BY = {
+    Reach.ANONYMOUS: ("anonymous", "subject", "staff"),
+    Reach.SUBJECT: ("subject", "staff"),
+    Reach.STAFF: ("staff",),
+    Reach.SYSTEM: ("system",),
 }
+"""Actors let in at each reach: the weakest one and everyone stronger."""
 
 
 @dataclass(frozen=True)
@@ -194,6 +241,7 @@ class Assessment:
     sensitivity: str | None
     impact: float
     likelihood: float
+    effort: Effort = Effort.OPEN
 
     @property
     def score(self) -> float:
@@ -215,6 +263,7 @@ class Assessment:
             "sensitivity": self.sensitivity,
             "impact": self.impact,
             "likelihood": self.likelihood,
+            "effort": self.effort.value,
             "score": self.score,
             "severity": self.severity.value,
         }
@@ -233,9 +282,13 @@ def resolve_effect(declared: str, element: Element) -> Effect:
     return Effect.DISCLOSURE
 
 
-def infer_degree(element: Element) -> Degree:
+def infer_degree(element: Element, effect: Effect | None = None) -> Degree:
     """``bulk`` when the touchpoint lists, exports, acts on many, or takes an
-    enumerable id; ``record`` otherwise. The agent may lower it."""
+    enumerable id; ``record`` otherwise. The agent may lower it.
+
+    A write that only creates (a webhook receiver, a POST form) alters one
+    row per call whatever its name says: ``record`` for tampering there.
+    """
     tp = element.touchpoint
     if tp is None:
         return Degree.BULK if element.kind.value == "store" else Degree.RECORD
@@ -246,6 +299,10 @@ def infer_degree(element: Element) -> Degree:
     facts = tp.facts
     if facts.kind is Kind.TASK or facts.kind is Kind.ADMIN:
         return Degree.BULK
+    if effect in (Effect.TAMPERING, Effect.DESTRUCTION):
+        ops = {o.op for specs in tp.ops.values() for o in specs}
+        if not ops & {Op.UPDATE, Op.DELETE, Op.RETENTION_PURGE}:
+            return Degree.RECORD
     ident = tp.id.lower()
     if any(w in ident for w in ("list", "export", "bulk", "search", "index", "all")):
         return Degree.BULK
@@ -259,31 +316,19 @@ def infer_degree(element: Element) -> Degree:
     return Degree.RECORD
 
 
-_STAFF_AUTH = ("admin", "staff", "superuser")
-
-
 def reachable_actors(element: Element) -> tuple[str, ...]:
     """Actors who can *call* the element.
 
     Reach is about who gets past the door, not who the touchpoint is for:
-    a route with no auth at all is reachable by anyone even when its scope
-    says ``subject`` (it reads ``request.user`` when there is one). Auth
-    facts decide; the scope only refines when auth is present.
+    the touchpoint's :attr:`~model_wtf.compliance.touchpoints.Touchpoint.reach`
+    (declared by a reviewer who read the auth, else inferred from the auth
+    facts — no auth means anyone, whatever the scope says) names the
+    weakest caller; everyone stronger gets in too.
     """
     tp = element.touchpoint
     if tp is None:
         return ("staff",) if element.kind.value == "store" else ("system",)
-    facts = tp.facts
-    if facts.kind is Kind.TASK:
-        return REACHABLE[Scope.SYSTEM]
-    if facts.kind is Kind.ADMIN or tp.scope is Scope.STAFF:
-        return REACHABLE[Scope.STAFF]
-    if not facts.auth and tp.scope is not Scope.SYSTEM:
-        return REACHABLE[Scope.PUBLIC]
-    joined = " ".join(facts.auth).lower()
-    if any(w in joined for w in _STAFF_AUTH):
-        return REACHABLE[Scope.STAFF]
-    return REACHABLE[tp.scope]
+    return REACHABLE_BY[tp.reach]
 
 
 def entitled_actors(
@@ -329,12 +374,22 @@ def assess(
     element: Element,
     declared_effect: str,
     *,
+    effort: Effort = Effort.OPEN,
+    horizontal: bool = False,
+    degree_cap: Degree | None = None,
     effect: Effect | None = None,
     degree: Degree | None = None,
     actor: str | None = None,
 ) -> Assessment:
     """Weigh one finding on ``element``; ``effect``/``degree``/``actor`` are
-    the agent's narrowing, applied only when they lower the result."""
+    the agent's narrowing, applied only when they lower the result.
+    ``effort`` is the threat's (from the mapping) and scales the likelihood;
+    ``horizontal`` says the threat is one account reaching the others'
+    data, so a subject who can exploit it weighs like an anonymous one
+    (every account is a potential attacker on every other). ``degree_cap``
+    is the most the threat reveals whatever the touchpoint lists (an error
+    message gives one attribute away, not the listing).
+    """
     resolved = effect or resolve_effect(declared_effect, element)
     items = sorted(
         (r for r in element.items if r.pii),
@@ -352,18 +407,31 @@ def assess(
         order = ["anonymous", "subject", "staff", "system"]
         who = [a for a in who if order.index(a) >= order.index(actor)]
     likelihood = max((actors[a].likelihood for a in who if a in actors), default=0.0)
+    if horizontal and "subject" in who and "anonymous" in actors:
+        # One account reaching every other account's data is a breach of
+        # the whole tenant base, whoever holds the account: weighed as if
+        # the door were open to anyone.
+        likelihood = max(likelihood, actors["anonymous"].likelihood)
+    likelihood *= EFFORT_WEIGHT[effort]
 
     deg: Degree | None = None
-    if resolved.on_data:
-        inferred = infer_degree(element)
+    if resolved.on_data or resolved is Effect.ESCALATION:
+        inferred = infer_degree(element, resolved)
+        if (
+            degree_cap is not None
+            and DEGREE_WEIGHT[degree_cap] < DEGREE_WEIGHT[inferred]
+        ):
+            inferred = degree_cap
         deg = degree if degree is not None else inferred
         if degree is not None and DEGREE_WEIGHT[degree] > DEGREE_WEIGHT[inferred]:
             deg = inferred  # the agent may lower, never raise
         impact = rank * DEGREE_WEIGHT[deg]
-    elif resolved is Effect.ESCALATION:
-        impact = float(MAX_RANK)
+        if resolved is Effect.ESCALATION:
+            # The door to whatever the touchpoint handles, at least a
+            # foothold; the agent's narrowing on the degree still counts.
+            impact = max(impact, ESCALATION_FLOOR * DEGREE_WEIGHT[deg])
     elif resolved is Effect.DENIAL:
-        impact = min(max(rank, 1.0), DENIAL_CAP)
+        impact = DENIAL_IMPACT
     else:
         impact = REPUDIATION_IMPACT
     return Assessment(
@@ -374,6 +442,7 @@ def assess(
         top,
         round(impact, 2),
         round(likelihood, 2),
+        effort,
     )
 
 
@@ -390,6 +459,7 @@ __all__ = [
     "Assessment",
     "Degree",
     "Effect",
+    "Effort",
     "Severity",
     "assess",
     "bucket",

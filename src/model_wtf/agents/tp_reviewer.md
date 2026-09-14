@@ -157,6 +157,36 @@ The same `read` is the person's right of access on a `subject` touchpoint
 and nothing of the sort on a `staff` one, so getting the scope right is what
 makes the rights table true.
 
+## Reach: who the code actually lets in
+
+Scope is who the touchpoint is FOR; `reach` is who gets PAST THE DOOR. They
+differ exactly when auth is broken: a webhook-log listing is for the system
+(scope `system`) but if its permission list is empty anyone on the internet
+reads it (reach `anonymous`). Reach drives how severe every threat on the
+touchpoint is, so a wrong reach hides a critical finding as noise.
+
+`touchpoint_show` infers reach from the auth classes. When it prints a
+`custom auth` line — the view overrides `get_permissions` /
+`get_authenticators` / `dispatch`..., or uses a hand-written authentication
+or permission class — the auth classes are a CLAIM the override may void,
+and `touchpoint_set_data` refuses the declaration until you pass `reach`.
+Read the override, then decide, weakest caller wins:
+
+- `anonymous` — a request with no credential, or an unrecognised one, is
+  served. Typical: `authenticate()` returns `None` when the header is
+  missing (DRF then treats the caller as anonymous) AND `get_permissions`
+  returns `[]` / `AllowAny`. Only a WRONG token being rejected does not
+  make the door locked.
+- `system` — a shared secret, HMAC signature or IP allow-list is checked
+  and a missing one is rejected.
+- `subject` — any authenticated account (`IsAuthenticated`, a session, a
+  JWT).
+- `staff` — `IsAdminUser`, `is_staff` / `is_superuser` checks.
+
+State the reason in `reason` with file:line of the override. Give `reach`
+too when a plain view's inference is wrong (an `AllowAny` you can see is
+`anonymous`; a signature check in the body is `system`).
+
 ## Verdicts: `data_flag` on the item
 
 Ops are facts. What the code *should* do and does not is an observation on

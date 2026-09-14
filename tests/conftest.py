@@ -251,8 +251,8 @@ def _ops_json(value: Any) -> list[dict[str, Any]]:
 
 def seed_touchpoint(unit: str, touchpoint_id: str, **spec: Any) -> None:
     """Create (or replace) a touchpoint declaration from its mapping form
-    (``data``, ``transfers``, ``stores``, ``scope``, ``ignore``, ``note``,
-    ``undeclared``, ``challenge``, ``answered``)."""
+    (``data``, ``transfers``, ``stores``, ``scope``, ``reach``, ``ignore``,
+    ``note``, ``undeclared``, ``challenge``, ``answered``)."""
     with get_db() as db:
         row = db.get(TouchpointRow, (unit, touchpoint_id))
         if row is None:
@@ -261,6 +261,7 @@ def seed_touchpoint(unit: str, touchpoint_id: str, **spec: Any) -> None:
         data = spec.get("data")
         row.declared = data is not None
         row.scope = spec.get("scope")
+        row.reach = spec.get("reach")
         row.ignore = bool(spec.get("ignore", False))
         row.note = spec.get("note")
         row.challenge = spec.get("challenge")

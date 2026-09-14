@@ -38,6 +38,7 @@ from model_wtf.compliance.severity import (
     Assessment,
     Degree,
     Effect,
+    Effort,
     assess,
     load_actors,
 )
@@ -127,12 +128,39 @@ class Treatment(BaseModel):
         description="disclosure | tampering | destruction | denial | escalation "
         "| repudiation, or `ops` (from the touchpoint's ops); required unless never",
     )
+    effort: str | None = Field(
+        default=None,
+        description="open | work | chain: what exploiting the missing control "
+        "takes (walk in / a script or payload / another flaw or a victim); "
+        "required unless never",
+    )
+    horizontal: bool = Field(
+        default=False,
+        description="One account reaching other accounts' data: a subject "
+        "actor weighs like an anonymous one",
+    )
+    degree_cap: str | None = Field(
+        default=None,
+        description="existence | attribute | record: the most this threat "
+        "reveals however much the touchpoint handles",
+    )
+
+    @model_validator(mode="after")
+    def _degree_cap_known(self) -> Treatment:
+        if self.degree_cap is not None:
+            Degree(self.degree_cap)
+        return self
 
     @model_validator(mode="after")
     def _effect_when_reviewable(self) -> Treatment:
         if self.never is None and self.effect is None:
             msg = "a reviewable threat needs an `effect`"
             raise ValueError(msg)
+        if self.never is None and self.effort is None:
+            msg = "a reviewable threat needs an `effort`"
+            raise ValueError(msg)
+        if self.effort is not None:
+            Effort(self.effort)
         if self.effect is not None and self.effect != "ops":
             Effect(self.effect)  # raises on an unknown value
         return self
@@ -174,6 +202,16 @@ class RuleWhen(BaseModel):
     store_single_unit: bool | None = None
     store_no_audit_models: bool | None = None
     flow: str | None = None
+    flow_sink_kind: list[str] | None = None
+    """Fires when the flow's sink is one of: ``actor`` (the response to the
+    caller), ``store`` (a write into a store of the project), ``party``
+    (a transfer), ``touchpoint`` (a call between units)."""
+    flow_sink_store_type: list[str] | None = None
+    """Fires when the flow's sink is a store of one of these types."""
+    proxies_calls: bool | None = None
+    """Fires when the touchpoint is a front route whose data all comes from
+    api touchpoints it ``calls`` (the caller's cookie forwarded): the
+    access decision is theirs, the ownership cells live on them."""
     any_of: list[RuleWhen] | None = None
 
 
@@ -594,7 +632,8 @@ def _weigh(
     ws: Workspace,
     actors: dict[str, Actor],
 ) -> Cell:
-    declared = catalogue.mapping[sid].effect or "disclosure"
+    treatment = catalogue.mapping[sid]
+    declared = treatment.effect or "disclosure"
     stamp = cell.stamp
     previous = stamp if isinstance(stamp, Finding) else None
     weighed = assess(
@@ -603,6 +642,9 @@ def _weigh(
         actors,
         element,
         declared,
+        effort=Effort(treatment.effort or "work"),
+        horizontal=treatment.horizontal,
+        degree_cap=Degree(treatment.degree_cap) if treatment.degree_cap else None,
         effect=Effect(previous.narrowed_effect)
         if previous and previous.narrowed_effect
         else None,
@@ -734,6 +776,8 @@ def _fires(when: RuleWhen, element: Element, ws: Workspace) -> bool:  # noqa: C9
         return False
     if when.no_request and not _no_request(element):
         return False
+    if when.proxies_calls and not _proxies_calls(element, ws):
+        return False
     if when.no_file_request and facts is not None and _has_file_request(facts):
         return False
     if when.no_ids and (facts is None or _has_ids(facts)):
@@ -778,12 +822,48 @@ def _fires(when: RuleWhen, element: Element, ws: Workspace) -> bool:  # noqa: C9
         return False
     if when.flow == "not_personal" and any(r.pii for r in element.items):
         return False
+    if (
+        when.flow_sink_kind is not None
+        and _sink_kind(element, ws) not in when.flow_sink_kind
+    ):
+        return False
+    if when.flow_sink_store_type is not None and not _sink_store_is(
+        element, ws, when.flow_sink_store_type
+    ):
+        return False
     if when.flow == "declared_transfer" and not _safeguarded_transfer(element, ws):
         return False
     return not (
         when.flow == "no_credentials"
         and any(r.category == "credentials" for r in element.items)
     )
+
+
+def _sink_kind(element: Element, ws: Workspace) -> str | None:
+    """``actor`` / ``store`` / ``party`` / ``touchpoint`` for a flow's sink.
+    A store sink is ``unit:slug`` (the element id of the store), a party
+    ``party:<id>``, the caller ``actor:<scope>``; anything else is a
+    touchpoint of the project."""
+    sink = element.sink or ""
+    if element.kind is not ElementKind.FLOW or not sink:
+        return None
+    for prefix in ("actor", "party"):
+        if sink.startswith(prefix + ":"):
+            return prefix
+    return "store" if _sink_store(element, ws) is not None else "touchpoint"
+
+
+def _sink_store(element: Element, ws: Workspace) -> Store | None:
+    sink = (element.sink or "").removeprefix("store:")
+    unit, _, slug = sink.partition(":")
+    data = ws.data.get(unit)
+    return data.stores.get(slug) if data is not None and slug else None
+
+
+def _sink_store_is(element: Element, ws: Workspace, types: list[str]) -> bool:
+    """Whether the flow ends in a store of one of ``types``."""
+    store = _sink_store(element, ws)
+    return store is not None and store.type.value in types
 
 
 def _safeguarded_transfer(element: Element, ws: Workspace) -> bool:
@@ -804,6 +884,30 @@ def _safeguarded_transfer(element: Element, ws: Workspace) -> bool:
     if safeguard is None or isinstance(safeguard, Marker):
         return False
     return not (safeguard == "dpf" and not getattr(party, "dpf_certified", False))
+
+
+def _proxies_calls(element: Element, ws: Workspace) -> bool:
+    """A front route that only forwards to api touchpoints of the project:
+    every declared item it touches is handled by one of the touchpoints it
+    calls. Ownership and permission are decided there; a route that reads
+    a store of its own, or calls nothing, keeps its cells."""
+    tp = element.touchpoint
+    if tp is None or tp.facts.kind is not Kind.ROUTE or not tp.calls:
+        return False
+    if not tp.id.startswith("/"):
+        return False  # a Django route; only SvelteKit ids are paths
+    callees = [ws.all_touchpoints[c] for c in tp.calls if c in ws.all_touchpoints]
+    if not any(c.unit != tp.unit for c in callees):
+        return False
+    # Nothing of its own to guard: every item it declares lives in another
+    # unit (fetched through the calls) or is a transient of this one (a
+    # form field, an analytics event), never a row in a store of the front.
+    rows = ws.rows
+    for ref in tp.data or ():
+        row = rows.get(ref)
+        if row is not None and row.unit == tp.unit and row.store:
+            return False
+    return not tp.stores
 
 
 def _no_request(element: Element) -> bool:
@@ -1195,13 +1299,17 @@ def weigh(
 ) -> Assessment:
     """The severity assessment of a ``!missing`` on ``element``/``sid``."""
     catalogue = catalogue or load_catalogue()
-    declared = catalogue.mapping[sid].effect or "disclosure"
+    treatment = catalogue.mapping[sid]
+    declared = treatment.effect or "disclosure"
     return assess(
         ws,
         ws.knowledge,
         load_actors(),
         element,
         declared,
+        effort=Effort(treatment.effort or "work"),
+        horizontal=treatment.horizontal,
+        degree_cap=Degree(treatment.degree_cap) if treatment.degree_cap else None,
         effect=Effect(effect) if effect else None,
         degree=Degree(degree) if degree else None,
         actor=actor,

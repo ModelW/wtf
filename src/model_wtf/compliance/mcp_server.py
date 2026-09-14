@@ -68,6 +68,7 @@ from model_wtf.compliance.rights import (
 from model_wtf.compliance.stamps import Finding, Stamps
 from model_wtf.compliance.stores import save_store
 from model_wtf.compliance.touchpoints import (
+    Reach,
     Scope,
     StoreWrite,
     Touchpoint,
@@ -730,6 +731,7 @@ class Tools:
                 where += (
                     f"  ({facts.kind.value}, {', '.join(facts.methods) or '-'}, "
                     f"scope {element.touchpoint.scope.value}, "
+                    f"reach {element.touchpoint.reach.value}, "
                     f"auth {', '.join(facts.auth) or 'none'})"
                 )
             keys: list[str] = []
@@ -1026,11 +1028,16 @@ class Tools:
         transfers: list[ExportDecision] | None = None,
         scope: str | None = None,
         stores: list[StoreDecision] | None = None,
+        reach: str | None = None,
     ) -> str:
         """``touchpoint_set_data``: write a touchpoint's declaration.
 
         ``scope`` (subject | staff | public | system) says who the touchpoint
         serves; when omitted the inference from auth classes stands.
+        ``reach`` (anonymous | subject | staff | system) says who the code
+        lets in; required when the view overrides the auth machinery
+        (``auth_custom`` in ``touchpoint_show``), since the auth classes are
+        then a claim the override may void.
         """
         scope_value: Scope | None = None
         if scope is not None:
@@ -1039,6 +1046,13 @@ class Tools:
             except ValueError:
                 msg = "scope must be subject, staff, public or system"
                 raise ValueError(msg) from None
+        reach_value: Reach | None = None
+        if reach is not None:
+            try:
+                reach_value = Reach(reach)
+            except ValueError:
+                msg = "reach must be anonymous, subject, staff or system"
+                raise ValueError(msg) from None
         ws = self.workspace()
         tp = ws.all_touchpoints.get(ref)
         if tp is None:
@@ -1046,6 +1060,17 @@ class Tools:
             raise ValueError(msg)
         if tp.ignore:
             msg = f"{ref} is ignored (plumbing); nothing to declare"
+            raise ValueError(msg)
+        if reach_value is None and tp.facts.auth_custom:
+            custom = "; ".join(tp.facts.auth_custom)
+            msg = (
+                f"{ref} overrides the auth machinery ({custom}): read the override "
+                "and give `reach` = the weakest caller it lets in — anonymous "
+                "when a missing or unrecognised credential falls through to "
+                "an empty permission list, system for a checked shared secret "
+                "or signature, subject for any logged-in account, staff for "
+                "admin/staff checks."
+            )
             raise ValueError(msg)
         if not reason.strip():
             msg = "a one-line reason citing file:line is required (even for [])"
@@ -1126,6 +1151,7 @@ class Tools:
             stores=writes,
             note=reason.strip(),
             scope=scope_value,
+            reach=reach_value,
             # A re-declaration answers the open challenge.
             answered=tp.challenge or tp.answered,
             resolve_sink=lambda sink: resolve_sink(ws, tp.unit, sink),
@@ -1859,7 +1885,12 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
             "cites file:line. "
             "`scope` = who the touchpoint serves: subject (an authenticated end "
             "user on their own data), staff (back-office), public (anonymous), "
-            "system (task); give it when touchpoint_show's inference is wrong."
+            "system (task); give it when touchpoint_show's inference is wrong. "
+            "`reach` = who the code actually lets in (anonymous | subject | "
+            "staff | system), REQUIRED when touchpoint_show lists `custom auth` "
+            "(get_permissions override, hand-written authentication class): "
+            "read that code — an authenticate() returning None on a missing "
+            "header plus an empty permission list is anonymous."
         ),
     )
     def touchpoint_set_data(
@@ -1869,10 +1900,11 @@ def build_server(  # noqa: C901 - one flat list of tool registrations
         transfers: list[ExportDecision] | None = None,
         scope: str | None = None,
         stores: list[StoreDecision] | None = None,
+        reach: str | None = None,
     ) -> str:
         return _guard(
             lambda: tools.touchpoint_set_data(
-                touchpoint, data, reason, transfers, scope, stores
+                touchpoint, data, reason, transfers, scope, stores, reach
             )
         )
 
@@ -2023,6 +2055,12 @@ def _pending_why(tp: Touchpoint, gaps: Sequence[Flow]) -> str:
     reasons: list[str] = []
     if tp.challenge is not None:
         reasons.append(f"challenged: {tp.challenge.grounds}")
+    if tp.reach_unverified:
+        reasons.append(
+            "reach unverified: the view overrides the auth machinery "
+            f"({'; '.join(tp.facts.auth_custom)}) -> read it and re-declare "
+            "with `reach`"
+        )
     for gap in gaps:
         kind = "store write" if gap.sink.startswith("store:") else "transfer"
         fix = (

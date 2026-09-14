@@ -21,6 +21,14 @@
 #     grep_present: [<regex>, ...]      fires when one matches
 #     store_type: [database, ...]
 #     flow: <predicate>                 personal | credentials
+#     flow_sink_kind: [actor|store|party|touchpoint]
+#                                       fires when the flow ends there
+#     flow_sink_store_type: [database, ...]
+#                                       fires when the flow ends in a store
+#                                       of one of these types
+#     proxies_calls: true               fires when a front route forwards to
+#                                       api touchpoints of the project that
+#                                       handle every item it declares
 #   Several keys are ANDed. A rule with `kind` fires only for those kinds.
 
 no_request:
@@ -175,6 +183,12 @@ safe_method_only:
   when:
     methods_only: [GET, HEAD, OPTIONS]
 
+proxies_calls:
+  applies: [process]
+  description: a front route forwarding the caller (cookie and all) to api touchpoints of the project that handle every item it declares; who may see or change what is decided there, and those touchpoints carry the ownership and permission cells
+  when:
+    proxies_calls: true
+
 no_ids_from_input:
   applies: [process]
   description: no resource identifier comes from the request (no path params, no *_id field)
@@ -210,6 +224,12 @@ flow_no_credentials:
   description: the flow carries no item of category `credentials`
   when:
     flow: no_credentials
+
+own_store_write:
+  applies: [flow]
+  description: the flow is the touchpoint's own read/write of an internal store of the project (its database, files, cache, queue, search index); keeping data there is the intended use, what leaves it is the touchpoint's business and the store's own cells. Mail, monitoring and external stores stay — data leaves the project through them
+  when:
+    flow_sink_store_type: [database, bucket, filesystem, cache, queue, search, realtime]
 
 declared_transfer:
   applies: [flow]

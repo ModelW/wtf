@@ -193,8 +193,21 @@ const ROUTE_FILES = [
     "+layout.server.js",
 ];
 const HANDLER = /export\s+(?:const|async\s+function|function)\s+(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD|fallback)\b/g;
-const API_CALL = /\bapi\.(\w+)\.(\w+)\s*\(/g;
+// `api.orders.checkout(` (a plain client object) and `api.bizneo(fetch).opId(`
+// (a factory taking the request's fetch): the operation id is the last name.
+const API_CALL = /\bapi\s*\.\s*(\w+)(?:\s*\([^()]*\))?\s*\.\s*(\w+)\s*\(/g;
 const RAW_FETCH = /fetch\(\s*[`'"]([^`'"]*\/(?:api|back)\/[^`'"?]*)/g;
+// A server load / hook that sends unauthenticated callers away: a guard for
+// the route and everything under it.
+// Only a `load` counts (an action redirecting to /login after a password
+// reset is a success path, not a gate), and only the login redirect or a
+// 401/403 on the caller: a 400 on a bad token is input validation.
+const LOAD_BODY = /export\s+(?:const|async\s+function|function)\s+load\b([\s\S]*?)(?=\nexport\s|$)/;
+const LOGIN_GUARD = /\bredirect\s*\(\s*30[0-9]\s*,[^)]*login|\berror\s*\(\s*40[13]\s*[,)]|\bstatus\s*===?\s*401\b/;
+function hasLoginGuard(text) {
+    const m = LOAD_BODY.exec(text);
+    return m !== null && LOGIN_GUARD.test(m[1]);
+}
 const FORM_FIELD = /\bname\s*=\s*["']([\w.\-\[\]]+)["']/g;
 const FORM_DATA_GET = /formData\.get\(\s*["']([\w.\-\[\]]+)["']/g;
 
@@ -212,6 +225,44 @@ function apiCalls(text) {
     return [...new Set([...text.matchAll(API_CALL)].map((m) => m[2]))];
 }
 
+// ---------------------------------------------------------------------------
+// One hop into $lib: a route calling `getBillData(params, fetch)` from
+// `$lib/data/billData` makes the API calls that helper makes. Static imports
+// only, one level (helpers of helpers are the reviewer's to read).
+// ---------------------------------------------------------------------------
+
+const LIB_IMPORT = /import\s+(?:type\s+)?(?:\{([^}]*)\}|(\w+))\s+from\s+["']\$lib\/([^"']+)["']/g;
+const libRoot = path.join(root, "src", "lib");
+const libCallCache = new Map();
+
+function libFile(spec) {
+    for (const candidate of [spec, `${spec}.ts`, `${spec}.js`, `${spec}/index.ts`, `${spec}/index.js`]) {
+        const full = path.join(libRoot, candidate);
+        if (fs.existsSync(full) && fs.statSync(full).isFile()) return full;
+    }
+    return null;
+}
+
+function libCalls(text) {
+    // API calls made by the $lib modules this file imports helpers from,
+    // when the file actually invokes one of the imported names.
+    const out = new Set();
+    for (const m of text.matchAll(LIB_IMPORT)) {
+        const names = (m[1] ? m[1].split(",") : [m[2]])
+            .map((n) => n.trim().replace(/^type\s+/, "").split(/\s+as\s+/).pop())
+            .filter(Boolean);
+        const used = names.some((n) => new RegExp(`\\b${n}\\s*\\(`).test(text));
+        if (!used) continue;
+        const file = libFile(m[3]);
+        if (!file) continue;
+        if (!libCallCache.has(file)) {
+            libCallCache.set(file, apiCalls(fs.readFileSync(file, "utf8")));
+        }
+        for (const c of libCallCache.get(file)) out.add(c);
+    }
+    return out;
+}
+
 const touchpoints = [];
 for (const typeFile of typeFiles) {
     const rel = path.relative(typesRoot, path.dirname(typeFile));
@@ -226,11 +277,16 @@ for (const typeFile of typeFiles) {
     const calls = new Set();
     const fetches = new Set();
     const formFields = new Set();
+    const auth = [];
     for (const f of files) {
         const text = fs.readFileSync(path.join(routeDir, f), "utf8");
         if (f.startsWith("+server")) handlers = matches(text, HANDLER);
+        // A guard in a server file is an auth fact of the route: a layout's
+        // covers its children (the compliance side derives that).
+        if (/\.server\.(ts|js)$/.test(f) && hasLoginGuard(text)) auth.push(`login guard (${f})`);
         if (f.startsWith("+page.server")) actions = actionsOf(text);
         for (const c of apiCalls(text)) calls.add(c);
+        for (const c of libCalls(text)) calls.add(c);
         for (const u of matches(text, RAW_FETCH)) fetches.add(u);
         if (f.endsWith(".svelte")) {
             for (const n of matches(text, FORM_FIELD)) formFields.add(n);
@@ -272,6 +328,7 @@ for (const typeFile of typeFiles) {
         form_fields: [...formFields].sort(),
         calls: [...calls].sort(),
         fetches: [...fetches].sort(),
+        auth,
         hints,
         file: path.relative(root, path.join(routeDir, main)).split(path.sep).join("/"),
     });

@@ -44,7 +44,16 @@ def _v3_store_distinct_from(conn: Connection) -> None:
     conn.execute(text("ALTER TABLE stores ADD COLUMN distinct_from JSON"))
 
 
-MIGRATIONS: tuple[Migration, ...] = (_v2_party_distinct_from, _v3_store_distinct_from)
+def _v4_touchpoint_reach(conn: Connection) -> None:
+    """Touchpoints record who the code lets in, apart from who they serve."""
+    conn.execute(text("ALTER TABLE touchpoints ADD COLUMN reach TEXT"))
+
+
+MIGRATIONS: tuple[Migration, ...] = (
+    _v2_party_distinct_from,
+    _v3_store_distinct_from,
+    _v4_touchpoint_reach,
+)
 """``MIGRATIONS[i]`` upgrades a database from version ``i + 1`` to ``i + 2``."""
 
 SCHEMA_VERSION = len(MIGRATIONS) + 1

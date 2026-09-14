@@ -162,6 +162,28 @@ class Scope(StrEnum):
     """Nobody in particular: a task, a webhook, a cron."""
 
 
+class Reach(StrEnum):
+    """Who gets past the door — the weakest caller the code lets in.
+
+    Distinct from :class:`Scope` (who the touchpoint is *for*): a webhook
+    listing is for the system, yet when its permission list is empty
+    anyone on the internet reaches it. The scope drives the rights table,
+    the reach drives the likelihood side of a finding's severity.
+    """
+
+    ANONYMOUS = "anonymous"
+    """No credential checked: anyone."""
+
+    SUBJECT = "subject"
+    """Any authenticated account."""
+
+    STAFF = "staff"
+    """A staff / admin account."""
+
+    SYSTEM = "system"
+    """A shared secret, a signature, a network position: not a person."""
+
+
 _STAFF_AUTH = re.compile(r"admin|staff|superuser", re.I)
 _STAFF_ROUTE = re.compile(
     r"^(admin:|wagtail(admin|users|docs|images|embeds|forms|redirects|snippets|sites|"
@@ -192,6 +214,29 @@ def infer_scope(facts: Introspected) -> Scope:
     if _USER_AUTH.search(auth) or "scope subject" in body:
         return Scope.SUBJECT
     return Scope.PUBLIC
+
+
+def infer_reach(facts: Introspected) -> Reach:
+    """Who the code lets in, from the auth facts alone.
+
+    No auth class and no auth wrapper means anyone: the scope does not
+    enter into it (a "system" route with an empty permission list is
+    public). Tasks are reached by the system only. A custom auth hook
+    (``facts.auth_custom``) makes this a guess the reviewer must confirm
+    or correct with a declared ``reach``.
+    """
+    if facts.kind is Kind.TASK:
+        return Reach.SYSTEM
+    if facts.kind is Kind.ADMIN or _STAFF_ROUTE.match(facts.id):
+        return Reach.STAFF
+    if not facts.auth:
+        return Reach.ANONYMOUS
+    auth = " ".join(facts.auth)
+    if _STAFF_AUTH.search(auth):
+        return Reach.STAFF
+    if re.search(r"AllowAny|allow_any", auth) and not re.search(r"guard", auth):
+        return Reach.ANONYMOUS
+    return Reach.SUBJECT
 
 
 class Transfer(StrictModel):
@@ -277,6 +322,12 @@ class Manifest(StrictModel):
         description="Who this touchpoint serves (subject | staff | public | "
         "system); inferred from auth when absent",
     )
+    reach: Reach | None = Field(
+        default=None,
+        description="The weakest caller the code lets in (anonymous | subject "
+        "| staff | system); inferred from auth when absent, required when "
+        "the view overrides the auth machinery",
+    )
     ignore: bool = Field(
         default=False, description="Plumbing (health check, static asset): skip"
     )
@@ -341,7 +392,15 @@ class Introspected(BaseModel):
     file: str | None = None
     line: int | None = None
     operation_id: str | None = None
+    operation_ids: list[str] = Field(default_factory=list)
+    """Further ids generated clients call this route by (drf-spectacular
+    gives one per method of a DRF route; Ninja's single id is
+    ``operation_id``)."""
     auth: list[str] = Field(default_factory=list)
+    auth_custom: list[str] = Field(default_factory=list)
+    """Where the view overrides the framework's auth machinery
+    (``get_permissions (shop.views.Foo)``, a hand-written authentication
+    class): ``auth`` is then a claim the reviewer must check."""
     request: dict[str, str] = Field(default_factory=dict)
     response: dict[str, str] = Field(default_factory=dict)
     params: list[str] = Field(default_factory=list)
@@ -397,6 +456,15 @@ class Touchpoint:
     scope: Scope = Scope.PUBLIC
     """Who it serves (see :class:`Scope`); declared or inferred."""
     scope_declared: bool = False
+    reach: Reach = Reach.ANONYMOUS
+    """The weakest caller the code lets in (see :class:`Reach`); declared
+    or inferred from the auth facts."""
+    reach_declared: bool = False
+    reach_via: str | None = None
+    """How an undeclared reach was derived when not from the auth facts:
+    ``calls`` (the api touchpoints a front route proxies to gate it) or
+    ``layout <route>`` (a parent layout that redirects unauthenticated
+    callers). Set by the workspace after linking."""
     ignore: bool = False
     note: str | None = None
     challenge: ManifestChallenge | None = None
@@ -434,8 +502,15 @@ class Touchpoint:
         return (
             self.data is None
             or self.challenge is not None
+            or self.reach_unverified
             or any(u.sink not in self.stale_undeclared for u in self.undeclared)
         )
+
+    @property
+    def reach_unverified(self) -> bool:
+        """The view overrides the auth machinery and nobody read it: the
+        inferred reach is a guess about a door someone rebuilt."""
+        return bool(self.facts.auth_custom) and not self.reach_declared
 
     @property
     def vendor(self) -> bool:
@@ -629,11 +704,13 @@ def link_calls(all_units: dict[str, UnitTouchpoints]) -> None:
     by_path: dict[str, str] = {}
     for unit_tps in all_units.values():
         for tp in unit_tps.items:
-            if tp.facts.operation_id:
+            for op_id in (tp.facts.operation_id, *tp.facts.operation_ids):
+                if not op_id:
+                    continue
                 # Generated clients camelise operation ids (``kitchen_orders``
                 # -> ``kitchenOrders``); index both spellings.
-                by_operation[tp.facts.operation_id] = tp.full_id
-                by_operation[_camel(tp.facts.operation_id)] = tp.full_id
+                by_operation.setdefault(op_id, tp.full_id)
+                by_operation.setdefault(_camel(op_id), tp.full_id)
             for route_path in _route_paths(tp):
                 by_path.setdefault(route_path, tp.full_id)
     for unit_tps in all_units.values():
@@ -812,6 +889,7 @@ def _apply(
             unit=unit.id,
             facts=facts,
             scope=infer_scope(facts),
+            reach=infer_reach(facts),
             ignore=ignored_by_default,
             calls=tuple(facts.calls),
             stamps=stamps or Stamps(),
@@ -888,6 +966,8 @@ def _apply(
         stores=stores,
         scope=manifest.scope or infer_scope(facts),
         scope_declared=manifest.scope is not None,
+        reach=manifest.reach or infer_reach(facts),
+        reach_declared=manifest.reach is not None,
         ignore=manifest.ignore,
         note=manifest.note,
         challenge=manifest.challenge,
@@ -946,7 +1026,7 @@ def _manifest_raw(row: TouchpointRow) -> dict[str, Any]:
             }
             for u in row.undeclared
         ]
-    for key in ("scope", "note", "challenge", "answered"):
+    for key in ("scope", "reach", "note", "challenge", "answered"):
         value = getattr(row, key)
         if value is not None:
             raw[key] = value
@@ -1011,6 +1091,7 @@ def write_manifest(
     note: str | None = None,
     ignore: bool = False,
     scope: Scope | None = None,
+    reach: Reach | None = None,
     answered: ManifestChallenge | None = None,
     undeclared: Sequence[Undeclared] | None = None,
     resolve_sink: Callable[[str], str] | None = None,
@@ -1050,6 +1131,7 @@ def write_manifest(
         row.declared = True
         row.ignore = ignore
         row.scope = scope.value if scope is not None else None
+        row.reach = reach.value if reach is not None else None
         row.note = note or None
         row.challenge = None
         row.answered = (
