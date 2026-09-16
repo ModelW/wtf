@@ -57,9 +57,13 @@ fails with exactly that item, while a PR touching an unrelated file when
 300 items were already pending passes. Fixed findings are reported too.
 
 The base worktree gets the head's `.venv` / `node_modules` linked in when
-the unit's lockfile is byte identical on both sides; otherwise the base
-run is approximate and the gate says so (a dependency change is a
-legitimate reason for new findings). Exit codes: 0 nothing introduced
+the unit's lockfile is byte identical on both sides; when the lock
+differs, the base's own environment is installed from its own lock
+(`uv sync --frozen`, `pnpm install --frozen-lockfile`, ...) inside the
+worktree, so introspection on both sides runs against the packages each
+side actually declares. Only if that install is impossible (installer
+missing, install failed) does the base run without an environment, and
+the gate says so (findings there are approximate). Exit codes: 0 nothing introduced
 (pre-existing findings are listed, not failed), 1 findings introduced, 3
 declaration errors in the head (always the PR's fault), 4 tool error;
 `--fail-on-existing` also fails on pre-existing findings for repositories

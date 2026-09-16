@@ -278,6 +278,55 @@ def test_environment_is_carried_over_only_with_identical_lockfiles(
         gate.run_check = original  # type: ignore[assignment]
 
 
+def test_differing_lockfile_installs_the_base_environment(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dependency change builds the base's own env from its own lock."""
+    import model_wtf.compliance.gate as gate
+
+    api = repo / "api"
+    (api / "uv.lock").write_text("lock v1\n")
+    (api / ".venv").mkdir()
+    (repo / ".gitignore").write_text("__pycache__/\n.venv/\n")
+    commit(repo, "lock")
+    (api / "uv.lock").write_text("lock v2\n")
+
+    calls: list[tuple[tuple[str, ...], Path, str]] = []
+
+    def fake_install(
+        command: tuple[str, ...], cwd: Path, env: dict[str, str]
+    ) -> subprocess.CompletedProcess[str]:
+        assert "VIRTUAL_ENV" not in env
+        calls.append((command, cwd, (cwd / "uv.lock").read_text()))
+        return subprocess.CompletedProcess(list(command), 0, "", "")
+
+    monkeypatch.setattr(gate.shutil, "which", lambda _name: "/usr/bin/uv")
+    monkeypatch.setattr(gate, "_run_installer", fake_install)
+    result = run_gate(base_ref="develop", python=sys.executable)
+    assert len(calls) == 1
+    argv, cwd, lock = calls[0]
+    assert argv == ("uv", "sync", "--frozen", "--no-dev")
+    assert cwd != api  # the base worktree, not the head
+    assert lock == "lock v1\n"  # the base's own lock
+    assert any("installed from its own lock" in w for w in result.warnings)
+
+
+def test_differing_lockfile_without_installer_is_approximate(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import model_wtf.compliance.gate as gate
+
+    api = repo / "api"
+    (api / "uv.lock").write_text("lock v1\n")
+    (api / ".venv").mkdir()
+    (repo / ".gitignore").write_text("__pycache__/\n.venv/\n")
+    commit(repo, "lock")
+    (api / "uv.lock").write_text("lock v2\n")
+    monkeypatch.setattr(gate.shutil, "which", lambda _name: None)
+    result = run_gate(base_ref="develop", python=sys.executable)
+    assert any("approximate" in w for w in result.warnings)
+
+
 def test_cli_requires_merge_into_outside_actions(repo: Path) -> None:
     result = CliRunner().invoke(cli, ["--root", str(repo), "compliance", "ghate"])
     assert result.exit_code == int(ExitCode.TOOL_ERROR)

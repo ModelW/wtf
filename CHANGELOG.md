@@ -5,6 +5,15 @@ the matching section on the GitHub release.
 
 ## 1.2.0
 
+- **The gate installs the base's environment when the lock differs.** A
+  pull request that changes `uv.lock` / `pnpm-lock.yaml` used to leave the
+  base worktree without a `.venv` / `node_modules`; `uv run --no-sync`
+  then created an empty venv and introspection died with
+  `ModuleNotFoundError: No module named 'django'` — a tool error that
+  failed the whole gate. The base's environment is now built from its own
+  lock (`uv sync --frozen --no-dev`, `pnpm install --frozen-lockfile`,
+  ...) inside the worktree; only when that is impossible does the base
+  run approximate, with a warning.
 - **Storage moves from YAML to SQLite.** Every declaration — the app, the
   parties, data overrides and reviews, touchpoint declarations, stores,
   activities, threat stamps, the findings register, custom vocabularies

@@ -17,8 +17,9 @@ items were already pending does not.
 
 Introspection needs the unit's environment. The worktree gets the head's
 ``.venv`` / ``node_modules`` linked in when the unit's lockfile is byte
-identical on both sides; otherwise the base run is approximate and says
-so — a dependency change is a legitimate reason for new findings.
+identical on both sides; when it differs, the base's own environment is
+installed from its own lock inside the worktree. Only when that install is
+impossible does the base run without one, approximate, and says so.
 """
 
 from __future__ import annotations
@@ -48,6 +49,17 @@ _ENVIRONMENTS: tuple[tuple[str, str], ...] = (
     ("package-lock.json", "node_modules"),
     ("yarn.lock", "node_modules"),
 )
+# How to build a unit's environment from its own lockfile when the head's
+# cannot be reused (the lock differs). Frozen: the lock is the truth, and
+# the install must not rewrite it inside a throwaway worktree.
+_INSTALLERS: dict[str, tuple[str, ...]] = {
+    "uv.lock": ("uv", "sync", "--frozen", "--no-dev"),
+    "poetry.lock": ("poetry", "install", "--no-interaction", "--only", "main"),
+    "pnpm-lock.yaml": ("pnpm", "install", "--frozen-lockfile"),
+    "package-lock.json": ("npm", "ci"),
+    "yarn.lock": ("yarn", "install", "--frozen-lockfile"),
+}
+_INSTALL_TIMEOUT = 600
 # Untracked configuration a worktree lacks and introspection needs (Django
 # settings read their secrets from it). Copied as-is: settings are not code.
 _DOTENV = (".env",)
@@ -334,7 +346,11 @@ def _carry_one(
     """Link the environments one lockfile covers; a reason when it cannot.
 
     A workspace lockfile at the root covers the packages below it (pnpm and
-    uv workspaces), so their environments are linked too.
+    uv workspaces), so their environments are linked too. When the base
+    has a different lock, its environment is built from that lock in the
+    worktree instead: a dependency change is exactly when running the base
+    against the head's packages would invent or hide findings, and running
+    it with no packages at all makes introspection fail outright.
     """
     rel = head_lock.relative_to(head_root)
     base_lock = other_root / rel
@@ -351,15 +367,65 @@ def _carry_one(
             f"{env_dir} was not carried over"
         )
     if head_lock.read_bytes() != base_lock.read_bytes():
-        return (
-            f"{rel.parent}: {lock} differs between base and head; the "
-            f"base ran without {env_dir} (findings there are approximate)"
-        )
+        return _install_environment(base_lock, rel.parent, lock, env_dir)
     for env in envs:
         target = other_root / env.relative_to(head_root)
         if not target.exists() and target.parent.is_dir():
             target.symlink_to(env, target_is_directory=True)
     return None
+
+
+def _install_environment(
+    base_lock: Path, rel: Path, lock: str, env_dir: str
+) -> str | None:
+    """Build the base's own environment next to ``base_lock``.
+
+    Returns a warning when that is impossible (installer missing, install
+    failed): the base then runs without its ``env_dir`` and findings there
+    are approximate, which the gate reports.
+    """
+    command = _INSTALLERS[lock]
+    if shutil.which(command[0]) is None:
+        return (
+            f"{rel}: {lock} differs between base and head and {command[0]} is "
+            f"not installed; the base ran without {env_dir} (findings there "
+            f"are approximate)"
+        )
+    # A leaked VIRTUAL_ENV (the caller's own venv) would make uv install
+    # into the wrong place; the worktree's env must be its own.
+    env = {k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV",)}
+    try:
+        proc = _run_installer(command, base_lock.parent, env)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return (
+            f"{rel}: {lock} differs between base and head and installing the "
+            f"base's {env_dir} failed ({exc}); findings there are approximate"
+        )
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-3:]
+        detail = " | ".join(tail) if tail else f"exit {proc.returncode}"
+        return (
+            f"{rel}: {lock} differs between base and head and installing the "
+            f"base's {env_dir} failed ({detail}); findings there are approximate"
+        )
+    return (
+        f"{rel}: {lock} differs between base and head; the base's {env_dir} "
+        f"was installed from its own lock"
+    )
+
+
+def _run_installer(
+    command: tuple[str, ...], cwd: Path, env: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 - fixed argv per lockfile kind
+        list(command),
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=_INSTALL_TIMEOUT,
+        env=env,
+        check=False,
+    )
 
 
 def _children(folder: Path) -> Iterator[Path]:
