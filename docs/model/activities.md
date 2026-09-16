@@ -6,6 +6,7 @@ Groups of touchpoints that serve one purpose — the rows of the Art. 30 registe
 uv run model-wtf compliance activities list [--format json]
 uv run model-wtf compliance activities explain <slug>
 uv run model-wtf compliance activities create <slug> [--name] [--purpose] [--legal-basis] [--touchpoint unit:id]... [--subject]... [--recipient]... [--retention]
+uv run model-wtf compliance activities set <slug> [--name] [--purpose] [--legal-basis] [--consent-record] [--interest] [--dpia-reference] [--subject]... [--recipient]... [--retention] [--todo FIELD]... [--clear FIELD]...
 uv run model-wtf compliance activities add <slug> <unit:id>...
 uv run model-wtf compliance data why <unit:id>... [--model unit:app.Model] [--manifests] [--format json]
 ```

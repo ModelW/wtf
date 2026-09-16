@@ -10,6 +10,7 @@ import rich_click as click
 from rich.console import Console
 from rich.text import Text
 
+from model_wtf.compliance.app_cli import app
 from model_wtf.compliance.auto_review import challenge
 from model_wtf.compliance.check import run_check
 from model_wtf.compliance.data_cli import data
@@ -53,6 +54,7 @@ def compliance() -> None:
     """Check and maintain the repository's compliance declarations."""
 
 
+compliance.add_command(app)
 compliance.add_command(data)
 compliance.add_command(parties)
 compliance.add_command(stores)

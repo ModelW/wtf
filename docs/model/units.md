@@ -43,6 +43,8 @@ newer release is refused rather than misread.
   `check`.
 
 ```
+uv run model-wtf compliance app show [--format table|json]
+uv run model-wtf compliance app set [--name N] [--description D] [--controller ID] [--processor ID] [--large-scale|--no-large-scale] [--todo FIELD]... [--clear FIELD]...
 uv run model-wtf compliance parties list [--unused] [--format table|json]
 uv run model-wtf compliance parties show <id> [--format text|json]
 uv run model-wtf compliance parties add [<id>] --name N [--country CC] [--website URL] [--host H]... [--distinct-from ID]...

@@ -16,8 +16,10 @@ from rich.table import Table
 from rich.text import Text
 
 from model_wtf.compliance.activities import (
+    ACTIVITY_FACTS,
     LegalBasis,
     add_touchpoints,
+    update_activity,
     write_activity,
 )
 from model_wtf.compliance.auto_review import TOUCHPOINTS_TARGET
@@ -26,12 +28,12 @@ from model_wtf.compliance.data_cli import data, load_context, run_auto_review
 from model_wtf.compliance.declarations import party_ids
 from model_wtf.compliance.exit_codes import ExitCode
 from model_wtf.compliance.ops import Op, OpError, OpSpec, describe, parse_ops
-from model_wtf.compliance.options import ROOT_OPTION, model_option
+from model_wtf.compliance.options import ROOT_OPTION, configure_root, model_option
 from model_wtf.compliance.report import Severity
 from model_wtf.compliance.rights import ItemRights, RightStatus, rights_of
 from model_wtf.compliance.touchpoints import Kind, Scope, Transfer, write_manifest
 from model_wtf.compliance.workspace import Workspace, load_workspace
-from model_wtf.compliance.yaml_io import Marker
+from model_wtf.compliance.yaml_io import TODO, Marker
 from model_wtf.introspect.runner import IntrospectionFailed
 
 if TYPE_CHECKING:
@@ -723,6 +725,113 @@ def act_create(
         msg = f"activity {slug!r} already exists"
         raise click.ClickException(msg)
     console.print(Text.assemble(("created", "green"), f"  activities/{slug}"))
+    ctx.exit(0)
+
+
+_ACTIVITY_REQUIRED = frozenset({"name", "purpose", "legal_basis", "data_subjects"})
+
+
+@activities.command("set")
+@click.argument("slug")
+@click.option("--name", default=None)
+@click.option("--purpose", default=None)
+@click.option(
+    "--legal-basis",
+    default=None,
+    type=click.Choice([b.value for b in LegalBasis]),
+)
+@click.option("--basis-note", default=None)
+@click.option("--consent-record", default=None, help="Where consent is recorded.")
+@click.option("--consent-granularity", default=None)
+@click.option("--interest", default=None, help="The balancing test (Art. 6(1)(f)).")
+@click.option("--dpia-reference", default=None)
+@click.option("--subject", "subjects", multiple=True, help="Data subject, repeatable.")
+@click.option(
+    "--recipient", "recipients", multiple=True, help="Party id, repeatable; replaces."
+)
+@click.option("--retention", default=None)
+@click.option("--controller", default=None, help="Party id.")
+@click.option("--processor", default=None, help="Party id.")
+@click.option("--description", default=None)
+@click.option(
+    "--todo",
+    "todos",
+    multiple=True,
+    type=click.Choice(sorted(ACTIVITY_FACTS - {"basis_note", "description"})),
+    help="Reopen a fact as !todo; repeatable.",
+)
+@click.option(
+    "--clear",
+    "clears",
+    multiple=True,
+    type=click.Choice(sorted(ACTIVITY_FACTS - _ACTIVITY_REQUIRED)),
+    help="Remove an optional fact; repeatable.",
+)
+@ROOT_OPTION
+@click.pass_context
+def act_set(
+    ctx: click.Context,
+    *,
+    slug: str,
+    name: str | None,
+    purpose: str | None,
+    legal_basis: str | None,
+    basis_note: str | None,
+    consent_record: str | None,
+    consent_granularity: str | None,
+    interest: str | None,
+    dpia_reference: str | None,
+    subjects: tuple[str, ...],
+    recipients: tuple[str, ...],
+    retention: str | None,
+    controller: str | None,
+    processor: str | None,
+    description: str | None,
+    todos: tuple[str, ...],
+    clears: tuple[str, ...],
+    root: Path | None,
+) -> None:
+    """Change facts about an activity (the answers to its !todo questions)."""
+    console = Console()
+    configure_root(root)
+    facts: dict[str, Any] = {
+        "name": name,
+        "purpose": purpose,
+        "legal_basis": legal_basis,
+        "basis_note": basis_note,
+        "consent_record": consent_record,
+        "consent_granularity": consent_granularity,
+        "interest": interest,
+        "dpia_reference": dpia_reference,
+        "retention": retention,
+        "controller": controller,
+        "processor": processor,
+        "description": description,
+    }
+    changes: dict[str, Any] = {k: v for k, v in facts.items() if v is not None}
+    if subjects:
+        changes["data_subjects"] = list(subjects)
+    if recipients:
+        changes["recipients"] = list(recipients)
+    for key in todos:
+        changes[key] = TODO
+    for key in clears:
+        changes[key] = None
+    if not changes:
+        msg = "nothing to change; give at least one option"
+        raise click.UsageError(msg)
+    try:
+        update_activity(slug, **changes)
+    except KeyError:
+        msg = f"no activity {slug!r}"
+        raise click.UsageError(msg) from None
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+    console.print(
+        Text.assemble(
+            ("set", "green"), f"  activities/{slug}: {', '.join(sorted(changes))}"
+        )
+    )
     ctx.exit(0)
 
 

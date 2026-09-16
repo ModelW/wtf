@@ -3,6 +3,26 @@
 One section per released version, newest first. The release workflow puts
 the matching section on the GitHub release.
 
+## Unreleased
+
+- **Rights on a JSON content are read, not orphaned.** A reviewer's
+  `data_flag` on `<field>@json.<name>` (a retention gap observed on one key
+  of a blob) wrote an `override` row whose id names no column; `check`
+  then reported it as a manual item lacking a description — an error the
+  agents had no way to clear. The row is now the content's rights block:
+  it lands on the declared content, needs the column's `contents`
+  declaration (`data-orphan` otherwise), must name a declared content
+  (`data-ref-unknown`) and a personal one (`rights-on-non-personal`).
+- **`app set` / `app show` and `activities set`.** The `!todo` questions
+  of the product row (`description`, `large_scale`, controller, processor)
+  and of an activity (legal basis, consent record, interest, retention,
+  data subjects, recipients...) are answered from the command line, like
+  `parties set`; `--todo FIELD` reopens one, `--clear FIELD` drops an
+  optional one. No more editing the database by hand.
+- Docs: the add-to-project guide no longer says "edit the YAML" and
+  explains that activity grouping is the second pass of `touchpoints
+  auto-review` (`--group`), not a command of its own.
+
 ## 1.2.0
 
 - **The gate installs the base's environment when the lock differs.** A

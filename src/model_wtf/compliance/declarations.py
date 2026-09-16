@@ -303,6 +303,44 @@ def save_app(
     return True
 
 
+APP_FIELDS: frozenset[str] = frozenset(
+    {"name", "description", "controller", "processor", "large_scale"}
+)
+"""Columns of the ``app`` row a human answers."""
+
+
+def update_app(**changes: Any) -> None:
+    """Set columns of the ``app`` row (the answers to its ``!todo`` questions).
+
+    A ``None`` clears an optional column (``processor``, ``large_scale``);
+    the mandatory ones take a :class:`Marker` instead. The result must still
+    validate as an :class:`App`; a ``ValueError`` names the problem. Raises
+    ``KeyError`` when the repository was never initialised.
+    """
+    unknown = set(changes) - APP_FIELDS
+    if unknown:
+        msg = f"unknown app fields: {', '.join(sorted(unknown))}"
+        raise ValueError(msg)
+    with get_db() as db:
+        row = db.get(AppRow, 1)
+        if row is None:
+            missing = "app"
+            raise KeyError(missing)
+        raw = app_raw(row)
+        for key, value in changes.items():
+            if value is None:
+                raw.pop(key, None)
+            else:
+                raw[key] = value
+        try:
+            App.model_validate(raw)
+        except ValidationError as exc:
+            problems = "; ".join(f"{loc}: {msg}" for loc, msg in format_errors(exc))
+            raise ValueError(problems) from exc
+        for key, value in changes.items():
+            setattr(row, key, value)
+
+
 class DuplicateParty(ValueError):
     """A party that looks like one already declared was refused.
 

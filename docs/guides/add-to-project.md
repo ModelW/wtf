@@ -69,9 +69,13 @@ Pass 1: one agent per touchpoint reads the view/task/route and declares
 the items it handles with the operation (`create`, `read`, `update`,
 `delete`, `retention_purge`, `portability`, `consent_withdraw`), the scope
 (`subject`, `staff`, `public`, `system`) and the transfers to other
-organisations (`party_add` first when the organisation is new). Pass 2:
-a single agent groups the PII-touching touchpoints into activities with a
-purpose; the legal basis is filled only when evident, the rest is `!todo`.
+organisations (`party_add` first when the organisation is new). Pass 2,
+still inside the same command (`--group`, on by default): once nothing is
+pending, a single agent groups the PII-touching touchpoints into
+activities with a purpose; the legal basis is filled only when evident,
+the rest is `!todo`. There is no separate `activities auto-review`; the
+reviewers may leave a few touchpoints ungrouped ("still orphan") — put
+them in an activity by hand with `activities add` or `activities create`.
 
 ## 5. Check the flows
 
@@ -112,7 +116,12 @@ only what changes counts.
 `check` after the swarms shows three kinds of work:
 
 - **Todo** — facts only a person knows: party addresses and privacy
-  emails, an activity's retention, `large_scale`. Edit the YAML.
+  emails, an activity's legal basis or retention, the product's
+  `description` and `large_scale`. Answer them from the command line:
+  `parties set <id> --address ... --email ...`,
+  `activities set <slug> --legal-basis ... --retention ...`,
+  `app set --description ... --large-scale/--no-large-scale`. Each
+  command also takes `--todo FIELD` to reopen a question.
 - **Missing** — established gaps: a right nobody can exercise, a threat
   finding, an undeclared flow. Fix the code or record the decision
   (`accepted` with a reason).

@@ -81,7 +81,8 @@ are risk decisions and are listed too.
 ## What you are asked to decide
 
 - The `!todo` values: contact details, `description`, `large_scale`,
-  retention periods, legal bases the tool could not tell.
+  retention periods, legal bases the tool could not tell. `parties set`,
+  `app set` and `activities set` record the answers.
 - Undeclared flows the reviewers found (`flows list --status undeclared`):
   a transfer to declare, with its party, or code to remove.
 - Accepted risks: a `!missing` you decide to live with becomes a stamp

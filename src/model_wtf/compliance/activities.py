@@ -446,6 +446,79 @@ def write_activity(
     return True
 
 
+ACTIVITY_FACTS: frozenset[str] = frozenset(
+    {
+        "name",
+        "purpose",
+        "legal_basis",
+        "basis_note",
+        "consent_record",
+        "consent_granularity",
+        "interest",
+        "dpia_reference",
+        "data_subjects",
+        "retention",
+        "controller",
+        "processor",
+        "description",
+    }
+)
+"""Columns of an activity a human answers (the ``!todo`` questions)."""
+
+
+def _apply_change(raw: dict[str, Any], key: str, value: Any) -> None:
+    """Apply one column change to an activity's raw mapping (``consent_*``
+    live under the ``consent`` block)."""
+    if key in ("consent_record", "consent_granularity"):
+        consent = dict(raw.get("consent") or {})
+        sub = "record" if key == "consent_record" else "granularity"
+        if value is None:
+            consent.pop(sub, None)
+        else:
+            consent[sub] = value
+        if consent:
+            raw["consent"] = {"record": TODO, **consent}
+        else:
+            raw.pop("consent", None)
+    elif value is None:
+        raw.pop(key, None)
+    else:
+        raw[key] = value
+
+
+def update_activity(slug: str, **changes: Any) -> None:
+    """Set columns of an existing activity; ``recipients`` replaces the list.
+
+    A ``None`` clears an optional column; a required one (``name``,
+    ``purpose``, ``legal_basis``, ``data_subjects``) takes a :class:`Marker`
+    instead. The result must still validate as an :class:`ActivityFile`; a
+    ``ValueError`` names the problem. Raises ``KeyError`` when no such slug.
+    """
+    unknown = set(changes) - ACTIVITY_FACTS - {"recipients"}
+    if unknown:
+        msg = f"unknown activity fields: {', '.join(sorted(unknown))}"
+        raise ValueError(msg)
+    with get_db() as db:
+        row = db.get(ActivityRow, slug)
+        if row is None:
+            raise KeyError(slug)
+        raw = _activity_raw(row)
+        for key, value in changes.items():
+            _apply_change(raw, key, value)
+        try:
+            ActivityFile.model_validate(raw)
+        except ValidationError as exc:
+            problems = "; ".join(f"{loc}: {msg}" for loc, msg in format_errors(exc))
+            raise ValueError(problems) from exc
+        for key, value in changes.items():
+            if key == "recipients":
+                row.recipients = [
+                    ActivityRecipientRow(slug=slug, party_id=p) for p in value
+                ]
+            else:
+                setattr(row, key, value)
+
+
 def add_touchpoints(slug: str, refs: list[str]) -> list[str]:
     """Append ``refs`` to an activity's touchpoint list; return the added ones."""
     with get_db() as db:
