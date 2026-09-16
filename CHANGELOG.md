@@ -3,7 +3,7 @@
 One section per released version, newest first. The release workflow puts
 the matching section on the GitHub release.
 
-## Unreleased
+## 1.2.1
 
 - **Rights on a JSON content are read, not orphaned.** A reviewer's
   `data_flag` on `<field>@json.<name>` (a retention gap observed on one key
