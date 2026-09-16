@@ -383,6 +383,47 @@ def test_rights_on_non_personal_item_is_an_error(repo: Path) -> None:
     assert "rights-on-non-personal" in codes
 
 
+PREFS = "shop.Customer.preferences"
+PREFS_CONTENTS = (
+    "contents:\n"
+    "  phone: {pii: true, sensitivity: personal, category: contact}\n"
+    "  theme: {pii: false, sensitivity: internal, category: technical}\n"
+    "unknown_contents: none\n"
+    "reason: settings view\n"
+)
+
+
+def test_rights_row_on_a_declared_json_content(repo: Path) -> None:
+    """A ``<field>@json.<name>`` row is the content's rights block, not an
+    orphan manual item."""
+    _data(repo, PREFS, PREFS_CONTENTS)
+    _data(
+        repo, f"{PREFS}@json.phone", 'rights:\n  retention: !missing "never purged"\n'
+    )
+    ws = _ws(repo)
+    assert [d.code for d in ws.data["api"].diagnostics] == []
+    phone = ws.rows[f"api:{PREFS}@json.phone"]
+    assert isinstance(phone.rights, RightsSpec)
+    assert phone.rights.retention is not None
+    # The column itself keeps its derived verdict.
+    assert ws.rows[f"api:{PREFS}"].pii is True
+
+
+def test_rights_row_on_a_json_content_needs_the_declaration(repo: Path) -> None:
+    exempt = "rights:\n  erase: {exempt: legal_claims, note: 'disputes'}\n"
+    _data(repo, f"{PREFS}@json.phone", exempt)
+    codes = [d.code for d in _ws(repo).data["api"].diagnostics]
+    assert "data-orphan" in codes
+    _data(repo, PREFS, PREFS_CONTENTS)
+    _data(repo, f"{PREFS}@json.nope", exempt)
+    _data(repo, f"{PREFS}@json.theme", exempt)
+    diags = _ws(repo).data["api"].diagnostics
+    codes = [d.code for d in diags]
+    assert "data-ref-unknown" in codes, [(d.code, d.message) for d in diags]
+    assert "rights-on-non-personal" in codes
+    assert "data-orphan" not in codes
+
+
 # ---------------------------------------------------------------------------
 # agent verdicts: declared / claimed
 # ---------------------------------------------------------------------------

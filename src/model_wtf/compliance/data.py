@@ -329,6 +329,8 @@ def collect_unit(
                 continue
             for item_id, finfo in _model_items(model):
                 known.add(item_id)
+                content_rows = _pop_content_rows(item_id, overrides)
+                known.update(content_rows)
                 data.rows.extend(
                     _rows_for(
                         unit,
@@ -338,6 +340,7 @@ def collect_unit(
                         knowledge,
                         overrides.get(item_id),
                         data.diagnostics,
+                        content_rows,
                     )
                 )
 
@@ -600,12 +603,19 @@ def _rows_for(
     knowledge: Knowledge,
     raw: dict[str, Any] | None,
     diagnostics: list[Diagnostic],
+    content_rows: dict[str, dict[str, Any]] | None = None,
 ) -> list[Row]:
-    """Rows for one column: itself, or itself plus its declared contents."""
+    """Rows for one column: itself, or itself plus its declared contents.
+
+    ``content_rows`` are the ``<field>@json.<name>`` item rows of the column
+    (rights blocks on a declared content); they only make sense with a
+    ``contents`` declaration and are reported otherwise.
+    """
+    content_rows = content_rows or {}
     if raw is not None and "contents" in raw:
         if is_container(finfo):
             return _container_rows(
-                unit, item_id, finfo, model, knowledge, raw, diagnostics
+                unit, item_id, finfo, model, knowledge, raw, diagnostics, content_rows
             )
         diagnostics.append(
             Diagnostic(
@@ -617,6 +627,16 @@ def _rows_for(
             )
         )
         raw = None
+    for content_id in content_rows:
+        diagnostics.append(
+            Diagnostic(
+                Severity.ERROR,
+                "data-orphan",
+                f"{item_label(unit.id, content_id)}: no `contents` declaration on "
+                f"{item_id}; declare the column's contents first",
+                unit.id,
+            )
+        )
     return [
         _classify(unit.id, item_id, finfo, model, knowledge, raw, diagnostics, unit)
     ]
@@ -630,11 +650,14 @@ def _container_rows(
     knowledge: Knowledge,
     raw: dict[str, Any],
     diagnostics: list[Diagnostic],
+    content_rows: dict[str, dict[str, Any]],
 ) -> list[Row]:
     """A container column with a ``contents`` row: its items plus the derived column.
 
     The column is first classified by the rules (so ``rule`` and the
     presumption are known), then replaced by the derivation over the items.
+    A ``<field>@json.<name>`` row in ``content_rows`` carries the rights
+    block of that content (a retention gap observed on one key of the blob).
     """
     column = _classify(
         unit.id, item_id, finfo, model, knowledge, None, diagnostics, unit
@@ -649,12 +672,14 @@ def _container_rows(
         category = None if isinstance(content.category, Marker) else content.category
         if level is not None and category is not None:
             _check_vocabulary(level, category, knowledge, label, diagnostics)
+        content_id = f"{item_id}{JSON_SUFFIX}.{name}"
+        pii = None if isinstance(content.pii, Marker) else content.pii
         items.append(
             Row(
                 unit=unit.id,
-                id=f"{item_id}{JSON_SUFFIX}.{name}",
+                id=content_id,
                 type=JSON_CONTENT_TYPE,
-                pii=None if isinstance(content.pii, Marker) else content.pii,
+                pii=pii,
                 sensitivity=level,
                 category=category,
                 dpia=_dpia(knowledge, level, category),
@@ -664,8 +689,23 @@ def _container_rows(
                 model_module=model.module,
                 model_file=model.file,
                 store=column.store,
+                rights=_content_rights(
+                    unit, content_id, pii, content_rows.get(content_id), diagnostics
+                ),
             )
         )
+    declared_ids = {r.id for r in items}
+    for content_id in content_rows:
+        if content_id not in declared_ids:
+            diagnostics.append(
+                Diagnostic(
+                    Severity.ERROR,
+                    "data-ref-unknown",
+                    f"{item_label(unit.id, content_id)}: {item_id} declares no "
+                    f"content named {content_id.rsplit('.', 1)[1]!r}",
+                    unit.id,
+                )
+            )
     if declared.unknown_contents is Unknown.POSSIBLE:
         diagnostics.append(
             Diagnostic(
@@ -677,6 +717,56 @@ def _container_rows(
             )
         )
     return [derive_column(column, items, declared.unknown_contents, knowledge), *items]
+
+
+def _pop_content_rows(
+    item_id: str, overrides: dict[str, dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Take the ``<item_id>@json.<name>`` rows out of ``overrides``."""
+    prefix = f"{item_id}{JSON_SUFFIX}."
+    return {k: overrides.pop(k) for k in [k for k in overrides if k.startswith(prefix)]}
+
+
+def _content_rights(
+    unit: Unit,
+    content_id: str,
+    pii: bool | None,
+    raw: dict[str, Any] | None,
+    diagnostics: list[Diagnostic],
+) -> RightsSpec | None:
+    """The rights block of a declared content, from its own ``override`` row.
+
+    Only ``rights`` is meaningful there: the classification of a content
+    lives in the column's ``contents`` declaration.
+    """
+    if raw is None:
+        return None
+    label = item_label(unit.id, content_id)
+    override = _validate(Override, raw, label, diagnostics)
+    if override is None:
+        return None
+    if any(
+        v is not None for v in (override.pii, override.sensitivity, override.category)
+    ):
+        diagnostics.append(
+            Diagnostic(
+                Severity.ERROR,
+                "schema-error",
+                f"{label}: a content is classified by the column's `contents` "
+                "declaration; only `rights` applies to a @json row",
+                unit.id,
+            )
+        )
+    if override.rights is not None and not pii:
+        diagnostics.append(
+            Diagnostic(
+                Severity.ERROR,
+                "rights-on-non-personal",
+                f"{label}: rights declared on a non-personal item (nothing to exempt)",
+                unit.id,
+            )
+        )
+    return override.rights
 
 
 def derive_column(
