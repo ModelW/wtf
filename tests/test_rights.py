@@ -409,6 +409,29 @@ def test_rights_row_on_a_declared_json_content(repo: Path) -> None:
     assert ws.rows[f"api:{PREFS}"].pii is True
 
 
+def test_rights_block_on_a_contents_row(repo: Path) -> None:
+    """A ``contents`` row carries the column's own rights block."""
+    _data(
+        repo,
+        PREFS,
+        PREFS_CONTENTS + "rights:\n  erase: {exempt: contract_active}\n",
+    )
+    ws = _ws(repo)
+    assert [d.code for d in ws.data["api"].diagnostics] == []
+    column = ws.rows[f"api:{PREFS}"]
+    assert isinstance(column.rights, RightsSpec)
+    assert isinstance(column.rights.erase, Exemption)
+    # Set through the writer too: the row keeps its contents.
+    from model_wtf.compliance.rights import set_right
+
+    set_right("api", PREFS, Right.ACCESS, Exemption(exempt=Ground.DERIVED))
+    ws = _ws(repo)
+    column = ws.rows[f"api:{PREFS}"]
+    assert isinstance(column.rights, RightsSpec)
+    assert isinstance(column.rights.access, Exemption)
+    assert column.contents == ("phone", "theme")
+
+
 def test_rights_row_on_a_json_content_needs_the_declaration(repo: Path) -> None:
     exempt = "rights:\n  erase: {exempt: legal_claims, note: 'disputes'}\n"
     _data(repo, f"{PREFS}@json.phone", exempt)

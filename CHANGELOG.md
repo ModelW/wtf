@@ -3,6 +3,12 @@
 One section per released version, newest first. The release workflow puts
 the matching section on the GitHub release.
 
+## 1.2.3
+
+- A `contents` row (a JSON-like column with declared contents) may carry
+  its own `rights` block, on the derived column; `data rights` and
+  `data_flag` on such a column no longer leave the block unread.
+
 ## 1.2.2
 
 - **`data rights`.** A human records an exemption (`--exempt legal_obligation

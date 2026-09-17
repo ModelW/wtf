@@ -131,6 +131,9 @@ class Contents(StrictModel):
     contents: dict[Annotated[str, StringConstraints(pattern=CONTENT_NAME)], Content]
     unknown_contents: Unknown
     reason: NonEmpty | Marker
+    rights: RightsSpec | None = None
+    """Exemptions or observed gaps on the column as a whole (a content's
+    own ``<field>@json.<name>`` row wins for that content)."""
 
 
 class Override(StrictModel):
@@ -716,7 +719,20 @@ def _container_rows(
                 unit.id,
             )
         )
-    return [derive_column(column, items, declared.unknown_contents, knowledge), *items]
+    derived = derive_column(column, items, declared.unknown_contents, knowledge)
+    if declared.rights is not None:
+        if not derived.pii:
+            diagnostics.append(
+                Diagnostic(
+                    Severity.ERROR,
+                    "rights-on-non-personal",
+                    f"{label}: rights declared on a non-personal item "
+                    "(nothing to exempt)",
+                    unit.id,
+                )
+            )
+        derived = replace(derived, rights=declared.rights)
+    return [derived, *items]
 
 
 def _pop_content_rows(
@@ -894,6 +910,8 @@ def _item_raw(row: DataItemRow) -> dict[str, Any]:
         }
         raw["unknown_contents"] = row.unknown_contents
         raw["reason"] = row.reason if row.reason is not None else TODO
+        if row.rights is not None:
+            raw["rights"] = row.rights
         return raw
     for key in ("description", "pii", "sensitivity", "category", "store", "reason"):
         value = getattr(row, key)
