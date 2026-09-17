@@ -5,6 +5,7 @@ Every field, column, JSON key and file content the application holds, with three
 ```
 uv run model-wtf compliance data list  [--unit ID] [--format table|json]
 uv run model-wtf compliance data rules
+uv run model-wtf compliance data rights <unit:id> <right> [--exempt GROUND|--missing|--clear] [--note ...]
 uv run model-wtf compliance data override <unit>:<app.Model.field> [--pii|--no-pii] [--sensitivity L] [--category C] [--reason TEXT]
 ```
 

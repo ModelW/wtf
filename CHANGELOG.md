@@ -3,6 +3,14 @@
 One section per released version, newest first. The release workflow puts
 the matching section on the GitHub release.
 
+## 1.2.2
+
+- **`data rights`.** A human records an exemption (`--exempt legal_obligation
+  --note "..."`), a declared gap (`--missing --note`) or clears an entry on
+  one right of one personal item (or a `Model.*` glob) from the command
+  line; until now only the agents' `data_flag` tool could write the
+  `rights` block.
+
 ## 1.2.1
 
 - **Rights on a JSON content are read, not orphaned.** A reviewer's

@@ -937,3 +937,22 @@ def set_right(
         else:
             stored[name] = entry
     set_rights(unit_id, item_id, stored)
+
+
+def clear_right(unit_id: str, item_id: str, right: Right) -> None:
+    """Drop one right from the ``rights`` block of a data item; the rest of
+    the block and every other column stay as written."""
+    from model_wtf.compliance.data import load_data_items, set_rights
+
+    current = load_data_items(unit_id).get(item_id, {})
+    rights = dict(current.get("rights") or {})
+    rights.pop(right.value, None)
+    stored: dict[str, object] = {}
+    for name, entry in rights.items():
+        if isinstance(entry, Marker):
+            stored[name] = {entry.tag.lstrip("!"): entry.note}
+        elif isinstance(entry, Exemption):
+            stored[name] = entry.model_dump(mode="json", exclude_none=True)
+        else:
+            stored[name] = entry
+    set_rights(unit_id, item_id, stored)

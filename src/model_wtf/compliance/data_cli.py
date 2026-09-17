@@ -39,7 +39,14 @@ from model_wtf.compliance.mcp_server import serve
 from model_wtf.compliance.options import ROOT_OPTION, configure_root, model_option
 from model_wtf.compliance.report import DeclarationError, Severity, Unit
 from model_wtf.compliance.review import Lock, Reviewed, ReviewStatus
-from model_wtf.compliance.yaml_io import TODO_TAG
+from model_wtf.compliance.rights import (
+    Exemption,
+    Ground,
+    Right,
+    clear_right,
+    set_right,
+)
+from model_wtf.compliance.yaml_io import TODO_TAG, Missing
 from model_wtf.introspect.runner import IntrospectionFailed
 
 
@@ -246,6 +253,101 @@ def rules_cmd(*, root: Path | None) -> None:
     )
     Console().print(f"\nSensitivity levels: {levels}")
     Console().print(f"Categories: {', '.join(sorted(knowledge.categories))}")
+
+
+@data.command("rights")
+@click.argument("item_id")
+@click.argument("right", type=click.Choice([r.value for r in Right]))
+@click.option(
+    "--exempt",
+    type=click.Choice([g.value for g in Ground]),
+    default=None,
+    help="Why the right does not apply to this item.",
+)
+@click.option(
+    "--missing", is_flag=True, help="State the right as unmet (a declared gap)."
+)
+@click.option("--clear", is_flag=True, help="Drop the entry for this right.")
+@click.option("--note", default=None, help="Which law / process / ticket.")
+@ROOT_OPTION
+@click.pass_context
+def rights_cmd(
+    ctx: click.Context,
+    *,
+    item_id: str,
+    right: str,
+    exempt: str | None,
+    missing: bool,
+    clear: bool,
+    note: str | None,
+    root: Path | None,
+) -> None:
+    """Record what is true of one right on one personal item.
+
+    ITEM_ID is ``<unit>:<app.Model.field>`` (``@json``/``@files`` rows and a
+    ``<app.Model>.*`` glob for every personal field of a model are allowed).
+    ``--exempt GROUND`` explains why the right is not served (an order kept
+    for accounting: ``erase --exempt legal_obligation --note "..."``);
+    ``--missing`` declares the gap; ``--clear`` removes the entry. Other
+    columns of the row are untouched.
+    """
+    _, units, knowledge = load_context(root)
+    try:
+        unit_id, local_id = parse_full_id(item_id, units)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+    if sum(map(bool, (exempt is not None, missing, clear))) != 1:
+        msg = "give exactly one of --exempt GROUND, --missing, --clear"
+        raise click.UsageError(msg)
+    unit = next(u for u in units if u.id == unit_id)
+    _check_rights_target(unit_id, local_id, collect_unit(unit, knowledge), clear)
+    right_value = Right(right)
+    value: Exemption | Missing | None = None
+    if missing:
+        if not (note or "").strip():
+            msg = "--missing needs a --note saying what is unmet and where"
+            raise click.UsageError(msg)
+        value = Missing(note)
+    elif exempt is not None:
+        try:
+            value = Exemption(exempt=Ground(exempt), note=(note or "").strip() or None)
+        except ValueError as exc:
+            msg = f"{item_id}: {exc}"
+            raise click.UsageError(msg) from exc
+    try:
+        if value is None:
+            clear_right(unit_id, local_id, right_value)
+        else:
+            set_right(unit_id, local_id, right_value, value)
+    except ValueError as exc:
+        msg = f"{item_id}: {exc}"
+        raise click.UsageError(msg) from exc
+    verb = "cleared" if clear else "set"
+    Console().print(Text.assemble((verb, "green"), f"  {unit_id}:{local_id} {right}"))
+    ctx.exit(0)
+
+
+def _check_rights_target(
+    unit_id: str, local_id: str, unit_data: UnitData, clear: bool
+) -> None:
+    """``local_id`` must be a data item (or ``Model.*`` glob) of the unit,
+    and personal unless the entry is being cleared."""
+    rows = {row.id: row for row in unit_data.rows}
+    if local_id.endswith(".*"):
+        label = local_id[:-2]
+        if not any(r.startswith(f"{label}.") for r in rows):
+            msg = f"no model {label!r} in unit {unit_id!r}"
+            raise click.UsageError(msg)
+        return
+    row = rows.get(local_id)
+    if row is None:
+        close = difflib.get_close_matches(local_id, sorted(rows), n=3, cutoff=0.6)
+        hint = f"; did you mean {', '.join(close)}?" if close else ""
+        msg = f"{local_id!r} is not a data item of unit {unit_id!r}{hint}"
+        raise click.UsageError(msg)
+    if not row.pii and not clear:
+        msg = f"{unit_id}:{local_id} is not personal data; rights do not apply"
+        raise click.UsageError(msg)
 
 
 @data.command("override")

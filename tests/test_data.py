@@ -23,7 +23,7 @@ from model_wtf.compliance.knowledge import Dpia, KnowledgeError, load_knowledge
 from model_wtf.compliance.report import Unit
 from model_wtf.compliance.review import Lock, ReviewStatus
 from model_wtf.compliance.tables import DataItemRow, SensitivityRow
-from model_wtf.compliance.yaml_io import TODO
+from model_wtf.compliance.yaml_io import TODO, Missing
 from model_wtf.introspect.runner import (
     FieldInfo,
     IntrospectionUnavailable,
@@ -1052,6 +1052,78 @@ def test_cli_contents(django_repo: Path) -> None:
         cli, ["compliance", "data", "list", *root], env={"COLUMNS": "250"}
     )
     assert "holds theme, phone; unknown: none" in table.output
+
+
+def test_cli_rights(django_repo: Path) -> None:
+    """``data rights`` writes one right's exemption / gap on an item row."""
+    runner = CliRunner()
+    root = ["--root", str(django_repo)]
+    base = ["compliance", "data", "rights"]
+
+    ok = runner.invoke(
+        cli,
+        [
+            *base,
+            "api:shop.Customer.email",
+            "erase",
+            "--exempt",
+            "legal_obligation",
+            "--note",
+            "invoices, 10 years (CGI L102 B)",
+            *root,
+        ],
+    )
+    assert ok.exit_code == 0, ok.output
+    gap = runner.invoke(
+        cli,
+        [
+            *base,
+            "api:shop.Customer.email",
+            "retention",
+            "--missing",
+            "--note",
+            "no purge task, see TCK-1",
+            *root,
+        ],
+    )
+    assert gap.exit_code == 0, gap.output
+    configure(django_repo)
+    with get_db() as db:
+        row = db.get(DataItemRow, ("api", "shop.Customer.email"))
+        assert row is not None
+        assert row.rights["erase"] == {
+            "exempt": "legal_obligation",
+            "note": "invoices, 10 years (CGI L102 B)",
+        }
+        assert isinstance(row.rights["retention"], Missing)
+        assert row.rights["retention"].note == "no purge task, see TCK-1"
+
+    cleared = runner.invoke(
+        cli, [*base, "api:shop.Customer.email", "retention", "--clear", *root]
+    )
+    assert cleared.exit_code == 0, cleared.output
+    with get_db() as db:
+        row = db.get(DataItemRow, ("api", "shop.Customer.email"))
+        assert row is not None
+        assert list(row.rights) == ["erase"]
+
+    glob = runner.invoke(
+        cli,
+        [*base, "api:shop.Customer.*", "portability", "--exempt", "derived", *root],
+    )
+    assert glob.exit_code == 0, glob.output
+
+    for args, said in [
+        (["api:shop.Customer.email", "erase"], "exactly one"),
+        (["api:shop.Customer.status", "erase", "--exempt", "derived"], "not personal"),
+        (["api:shop.Customer.email", "erase", "--exempt", "derived"], "only for"),
+        (["api:shop.Customer.email", "erase", "--missing"], "--note"),
+        (["api:shop.Nope.*", "erase", "--exempt", "derived"], "no model"),
+        (["api:shop.Customer.nope", "erase", "--exempt", "derived"], "not a data"),
+    ]:
+        bad = runner.invoke(cli, [*base, *args, *root])
+        assert bad.exit_code == 2, bad.output
+        assert said in bad.output
 
 
 def test_library_knowledge(django_repo: Path) -> None:

@@ -32,7 +32,7 @@ framework) which applies to inherited columns too (a page type's `owner`).
 
 Exemptions live on the **data item** (its `data_items` row, or a
 `<app.Model>.*` row for every personal field of a model; the item's own
-file wins right by right):
+row wins right by right), one entry per right:
 
 ```yaml
 rights:
@@ -41,6 +41,14 @@ rights:
   rectify: {exempt: staff_only}           # verified: an admin op by staff must exist
   access: {exempt: manual, note: "..."}   # always listed under Review
   retention: !missing "no purge task, see FAH-210"
+```
+
+Written with `data rights` (agents use the `data_flag` tool):
+
+```
+uv run model-wtf compliance data rights <unit:app.Model.field|unit:app.Model.*> <right> --exempt <ground> [--note "..."]
+uv run model-wtf compliance data rights <ref> <right> --missing --note "what is unmet, where"
+uv run model-wtf compliance data rights <ref> <right> --clear
 ```
 
 Grounds: `legal_obligation`, `contract_active` (still needs an event-driven
